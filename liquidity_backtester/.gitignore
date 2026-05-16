@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data_cache/
+output/
+.ipynb_checkpoints/
+*.egg-info/

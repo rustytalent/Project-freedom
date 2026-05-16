@@ -1,0 +1,92 @@
+"""Configuration dataclasses for detection params, factor weights, and runtime."""
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict
+
+
+@dataclass
+class DetectionParams:
+    # Swing fractal window: a swing high needs `left` lower highs to the left and `right` to the right.
+    swing_left: int = 3
+    swing_right: int = 3
+
+    # EQH/EQL tolerance as multiple of ATR(atr_period) at the first swing.
+    eqhl_tol_atr: float = 0.15
+    eqhl_max_bars: int = 240        # max bar distance between the two swings on the source TF
+    eqhl_min_touches: int = 2       # 2 = double top/bottom, 3 = triple, etc.
+
+    # ATR settings used everywhere a "small price tolerance" is needed.
+    atr_period: int = 14
+
+    # Fair value gap: bullish gap when bar[i-1].high < bar[i+1].low (and the middle bar is the displacement).
+    # min gap size as fraction of ATR — filters noise gaps.
+    fvg_min_atr: float = 0.25
+
+    # Order block: last opposite-color candle preceding a displacement of `ob_displacement_atr`*ATR.
+    ob_displacement_atr: float = 1.5
+    ob_lookback: int = 30
+
+    # In-candle imbalance: wick/body asymmetry threshold to flag a candle as a rejection / liquidity grab.
+    wick_dominance: float = 0.55    # dominant wick must be >= this fraction of full range
+    body_max_ratio: float = 0.35    # body must be <= this fraction of full range to count as rejection
+
+    # Opening Range Breakout: minutes after session open. For US equities, default 15m ORB.
+    orb_minutes: int = 15
+
+    # Volume node: rolling window for volume-by-price, top-N price bins flagged as HVN.
+    vp_bins: int = 50
+    vp_window_bars: int = 390 * 5   # ~5 trading days of 1m == 5d of bars on 1m. Auto-scaled later.
+    vp_top_n: int = 4
+
+    # Pool merging: pools whose price ranges overlap (or are within merge_atr*ATR) on the same side
+    # are merged into a single zone.
+    merge_atr: float = 0.20
+
+    # Default pool half-width in ATRs when a single price level needs a zone.
+    pool_halfwidth_atr: float = 0.10
+
+
+@dataclass
+class FactorWeights:
+    """Weights applied when scoring a candidate pool. Optimizer tunes these."""
+    eqhl: float = 1.0
+    prev_day: float = 1.0
+    prev_week: float = 1.2
+    prev_month: float = 1.4
+    fvg: float = 0.7
+    order_block: float = 0.9
+    in_candle_imbalance: float = 0.5
+    volume_node: float = 0.8
+    orb_extreme: float = 0.6
+    multi_tf_overlap: float = 1.5   # multiplier per additional TF that confirms the zone
+
+    def as_dict(self) -> Dict[str, float]:
+        return asdict(self)
+
+
+@dataclass
+class Config:
+    symbol: str = "AAPL"
+    base_interval: str = "5m"
+    period: str = "60d"                 # used if start/end not given
+    start: str | None = None
+    end: str | None = None
+
+    # Higher TFs to compute features on. Their pools get projected onto the base 5m chart.
+    higher_tfs: List[str] = field(default_factory=lambda: ["15min", "60min", "240min", "1D", "1W"])
+
+    # Tester: how far forward (in 5m bars) we evaluate each pool, and what counts as respect/break.
+    test_horizon_bars: int = 200
+    respect_reaction_atr: float = 1.0   # price must move this many ATRs away from pool after touching
+    respect_within_bars: int = 20       # within this many bars after first touch
+    break_close_buffer_atr: float = 0.10 # close must be beyond pool by this much to count as broken
+
+    # Minimum confluence score for a pool to be drawn / tested.
+    min_pool_score: float = 1.0
+
+    # Optimizer
+    opt_iterations: int = 80
+    opt_explore_frac: float = 0.4       # fraction of iterations used for random exploration
+    opt_seed: int = 7
+
+    detect: DetectionParams = field(default_factory=DetectionParams)
+    weights: FactorWeights = field(default_factory=FactorWeights)
