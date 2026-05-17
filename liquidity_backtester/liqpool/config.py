@@ -84,13 +84,21 @@ class Config:
     #   strong_reaction_atr: definitive rejection.
     #   weak_break_atr     : close beyond zone by this much = mild break (could be a wick close).
     #   strong_break_atr   : close beyond zone by this much = decisive break.
-    # The previous 1.0 / 0.10 settings were break-biased (it was easy to "break" but hard to
-    # "respect"); the new defaults are symmetric in weak/weak and strong/strong.
     weak_reaction_atr: float = 0.5
     strong_reaction_atr: float = 1.5
     weak_break_atr: float = 0.20
     strong_break_atr: float = 0.50
-    respect_within_bars: int = 20
+    # Reaction must occur within this many bars after the first touch. Raised from 20 to 40 so
+    # pools formed on higher TFs (1D/1W/3H) have a fair chance to react on the 5m chart —
+    # institutional reactions often take 2-3 hours.
+    respect_within_bars: int = 40
+    # Confirmation: a single bar closing past the zone by >=strong_break_atr can be a stop hunt.
+    # Require N consecutive bars closing past before calling it broken_strong. N=2 = "the break
+    # held for one more bar" — classical breakout-confirmation principle.
+    strong_break_confirm_bars: int = 2
+    # If the first strong-break bar is followed by a close BACK INSIDE the zone within this many
+    # bars, classify as swept_and_reclaimed (the canonical SMC stop-hunt-then-hold pattern).
+    reclaim_within_bars: int = 12
 
     # Minimum confluence score for a pool to be drawn / tested.
     min_pool_score: float = 1.0

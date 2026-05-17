@@ -1,24 +1,36 @@
-"""Walk-forward pool tester (forward-bias-free, multi-tier outcomes).
+"""Walk-forward pool tester (forward-bias-free, multi-tier outcomes with confirmation logic).
 
 For each pool we start scanning the base TF *strictly after* `pool.available_at` — the moment
 the latest contributor would have been visible to a real trader — and classify into ONE of:
 
   untouched             price never entered the zone within the horizon
-  touched_no_signal     entered but neither a meaningful reaction nor a close-break occurred
-  respected_weak        reaction in [weak, strong) ATR within respect_within_bars; no break
-  respected_strong      reaction >= strong_reaction_atr; no break
-  broken_weak           close beyond zone by [weak, strong) ATR (mild breach, often wick-close)
-  broken_strong         close beyond zone by >= strong_break_atr (decisive close-through)
-  horizon_insufficient  available_at too close to data end — excluded from rates
+  touched_no_signal     entered but neither a meaningful reaction nor a break occurred
+  respected_weak        reaction in [weak_reaction_atr, strong_reaction_atr) within
+                        respect_within_bars; no decisive break
+  respected_strong      reaction >= strong_reaction_atr; no break >= weak_break_atr
+  broken_weak           close beyond by [weak_break_atr, strong_break_atr) AND no strong reaction
+                        OR a single-bar close past >= strong_break_atr that DIDN'T confirm
+                        (i.e. next bar didn't also close past) — classical "wick break" / fakeout
+  broken_strong         strong_break_confirm_bars CONSECUTIVE bars close past by
+                        >= strong_break_atr AND price didn't reclaim back inside within
+                        reclaim_within_bars — definitive failure
+  swept_and_reclaimed   price closed past by >= strong_break_atr (even just once) then closed
+                        back INSIDE the zone within reclaim_within_bars — the canonical SMC
+                        stop-hunt + hold pattern. Treated as a (decisive) respect.
+  horizon_insufficient  pool too close to data end to test fairly
 
-A strong break wins over any reaction (it overrides — the pool ultimately failed). A weak break
-is only fatal if there was no strong reaction (the pool survived the wick-through).
-
-Compared to the previous single-threshold tester, this gives us TEXTURE: the share of pools
-that broke decisively vs barely, and the share that respected meaningfully vs marginally."""
+Priorities at classification time:
+  1. untouched (overrides all)
+  2. swept_and_reclaimed (close-past followed by reclaim)
+  3. broken_strong (confirmed consecutive strong-close-past, no reclaim)
+  4. respected_strong (strong reaction, no weak-break-or-greater anywhere)
+  5. broken_weak (some close past, no strong reaction)
+  6. respected_weak (some reaction)
+  7. touched_no_signal (touched but nothing meaningful)
+"""
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
@@ -27,9 +39,9 @@ from .indicators import atr
 from .pools import Pool
 
 
-_RESPECT_OUTCOMES = ("respected_strong", "respected_weak")
+_RESPECT_OUTCOMES = ("respected_strong", "respected_weak", "swept_and_reclaimed")
 _BREAK_OUTCOMES = ("broken_strong", "broken_weak")
-_DECISIVE = ("respected_strong", "broken_strong")
+_DECISIVE = ("respected_strong", "broken_strong", "swept_and_reclaimed")
 
 
 @dataclass
@@ -45,7 +57,7 @@ class PoolResult:
     broken_at: Optional[pd.Timestamp] = None
     bars_to_touch: Optional[int] = None
     bars_to_break: Optional[int] = None
-    max_excursion_through: float = 0.0      # in ATR units; max close-through past the zone
+    max_excursion_through: float = 0.0      # max close-through past the zone in ATR units
     reaction_atr: float = 0.0               # max reverse move post-touch in ATR units
     n_touches: int = 0
     tfs: List[str] = field(default_factory=list)
@@ -64,7 +76,6 @@ class PoolResult:
 
     @property
     def is_tested(self) -> bool:
-        """A pool is 'tested' if we got either a respect or break outcome (any tier)."""
         return self.is_respect or self.is_break
 
     def as_dict(self):
@@ -77,6 +88,24 @@ class PoolResult:
 
 def _touch(bar_low: float, bar_high: float, pool_low: float, pool_high: float) -> bool:
     return not (bar_high < pool_low or bar_low > pool_high)
+
+
+def _has_consecutive_run(indices: Sequence[int], n: int) -> bool:
+    """True if `indices` contains a run of n consecutive integers."""
+    if n <= 1:
+        return len(indices) >= 1
+    if len(indices) < n:
+        return False
+    s = sorted(set(indices))
+    streak = 1
+    for i in range(1, len(s)):
+        if s[i] == s[i - 1] + 1:
+            streak += 1
+            if streak >= n:
+                return True
+        else:
+            streak = 1
+    return False
 
 
 def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[PoolResult]:
@@ -105,12 +134,15 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
         max_reaction = 0.0
         n_touches = 0
         outside_seen = False
+        strong_break_bars: List[int] = []   # bar indices where close past by >= strong_break_atr
+        first_strong_break_at: Optional[int] = None
+        reclaim_at: Optional[int] = None
+        confirmed_strong_break = False
 
         for j in range(start, end):
             in_zone = _touch(l[j], h[j], p.price_low, p.price_high)
             if not in_zone:
                 outside_seen = True
-            # A touch only counts after price has cleanly left the zone at least once.
             if in_zone and outside_seen:
                 if not did_touch:
                     did_touch = True
@@ -118,8 +150,8 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
                     bars_to_touch = j - start
                 n_touches += 1
 
-            # Close-through magnitude in ATR units (post-touch only).
             if did_touch:
+                # Close-through magnitude (post-touch only).
                 if p.side == "high":
                     cb = (c[j] - p.price_high) / max(a[j], 1e-9)
                 else:
@@ -130,8 +162,21 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
                         broken_at = idx[j]
                         bars_to_break = j - start
 
-            # Reverse move within respect_within_bars after first touch.
-            if did_touch:
+                # Track strong-break bars (for confirmation logic).
+                if cb >= cfg.strong_break_atr:
+                    strong_break_bars.append(j)
+                    if first_strong_break_at is None:
+                        first_strong_break_at = j
+
+                # Reclaim detection: after the first strong-break bar, did price close BACK
+                # INSIDE the zone within reclaim_within_bars?
+                if first_strong_break_at is not None and reclaim_at is None:
+                    delta = j - first_strong_break_at
+                    if 0 < delta <= cfg.reclaim_within_bars:
+                        if p.price_low <= c[j] <= p.price_high:
+                            reclaim_at = j
+
+                # Reaction tracking: max reverse move within respect_within_bars after touch.
                 bars_since_touch = j - (start + bars_to_touch)
                 if bars_since_touch <= cfg.respect_within_bars:
                     if p.side == "high":
@@ -141,14 +186,25 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
                     if rev > max_reaction:
                         max_reaction = rev
 
-            # Stop walking once a STRONG break has happened — that's a final state.
-            if max_close_break >= cfg.strong_break_atr:
+            # Cheap early exit: confirmed strong break with no chance of reclaim left.
+            if (first_strong_break_at is not None
+                    and reclaim_at is None
+                    and (j - first_strong_break_at) > cfg.reclaim_within_bars
+                    and _has_consecutive_run(strong_break_bars, cfg.strong_break_confirm_bars)):
+                confirmed_strong_break = True
                 break
 
-        # Classify with priority: strong-break overrides; otherwise strong-respect; then weak tier.
+        # Final consolidation if we didn't early-exit.
+        if not confirmed_strong_break:
+            confirmed_strong_break = _has_consecutive_run(strong_break_bars,
+                                                          cfg.strong_break_confirm_bars)
+
+        # Classify (priority order matters).
         if not did_touch:
             outcome = "untouched"
-        elif max_close_break >= cfg.strong_break_atr:
+        elif first_strong_break_at is not None and reclaim_at is not None:
+            outcome = "swept_and_reclaimed"
+        elif confirmed_strong_break:
             outcome = "broken_strong"
         elif max_reaction >= cfg.strong_reaction_atr and max_close_break < cfg.weak_break_atr:
             outcome = "respected_strong"
@@ -175,9 +231,9 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
 def summarise(results: List[PoolResult]) -> dict:
     """Returns headline metrics + per-outcome counts.
 
-    `respect_rate` is the BROAD rate: (all respects) / (all respects + all breaks).
-    `respect_rate_strict` is the DECISIVE rate: respected_strong / (respected_strong + broken_strong).
-    Strict ignores weak/ambiguous outcomes and gives the cleanest signal of "pools that mattered".
+    `respect_rate` (broad)        = (all respects incl swept_and_reclaimed) / (respects + breaks)
+    `respect_rate_strict`         = (respected_strong + swept_and_reclaimed) /
+                                    (respected_strong + swept_and_reclaimed + broken_strong)
     """
     if not results:
         return {"n": 0, "tested_n": 0, "respect_rate": 0.0, "break_rate": 0.0,
@@ -198,7 +254,7 @@ def summarise(results: List[PoolResult]) -> dict:
     untouched = [r for r in eligible if r.outcome == "untouched"]
     no_signal = [r for r in eligible if r.outcome == "touched_no_signal"]
 
-    decisive_resp = counts.get("respected_strong", 0)
+    decisive_resp = counts.get("respected_strong", 0) + counts.get("swept_and_reclaimed", 0)
     decisive_break = counts.get("broken_strong", 0)
     decisive_total = decisive_resp + decisive_break
 

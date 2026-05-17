@@ -10,6 +10,9 @@ from .tester import PoolResult
 def _color_for(p: Pool, outcome: str | None) -> tuple[str, str]:
     if outcome == "respected_strong":
         line = "rgba(46,160,67,1.0)"; fill = "rgba(46,160,67,0.25)"
+    elif outcome == "swept_and_reclaimed":
+        # purple — the SMC stop-hunt-then-hold pattern is its own thing
+        line = "rgba(160,80,200,1.0)"; fill = "rgba(160,80,200,0.22)"
     elif outcome == "respected_weak":
         line = "rgba(120,180,90,0.85)"; fill = "rgba(120,180,90,0.15)"
     elif outcome == "broken_strong":

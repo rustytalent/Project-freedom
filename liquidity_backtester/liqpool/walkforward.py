@@ -186,8 +186,9 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.n_total_oos_tested = n_tested
         report.n_total_oos_pools = sum(fr.test_n_pools for fr in report.folds)
         report.oos_respect_pooled = (n_resp / n_tested) if n_tested else 0.0
-        # Strict rate = respected_strong / (respected_strong + broken_strong) across OOS
-        s_resp = report.oos_outcome_counts.get("respected_strong", 0)
+        # Strict rate = decisive respects (strong + swept_and_reclaimed) over all decisive outcomes
+        s_resp = (report.oos_outcome_counts.get("respected_strong", 0)
+                  + report.oos_outcome_counts.get("swept_and_reclaimed", 0))
         s_break = report.oos_outcome_counts.get("broken_strong", 0)
         report.oos_respect_strict = (s_resp / (s_resp + s_break)) if (s_resp + s_break) else 0.0
         fold_rates = [fr.test_respect for fr in report.folds if fr.test_n_tested > 0]
@@ -245,7 +246,8 @@ def print_report(report: WalkForwardReport, file=None) -> None:
     oc = report.oos_outcome_counts
     if oc:
         print(f"\n[OOS outcome breakdown]", file=file)
-        for k in ("respected_strong", "respected_weak", "broken_weak", "broken_strong",
+        for k in ("respected_strong", "swept_and_reclaimed", "respected_weak",
+                  "broken_weak", "broken_strong",
                   "touched_no_signal", "untouched"):
             v = oc.get(k, 0)
             pct = (v / sum(oc.values()) * 100) if oc else 0.0
