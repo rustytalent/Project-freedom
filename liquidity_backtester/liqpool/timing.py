@@ -1,38 +1,35 @@
-"""Track 3: direction and timing/proximity layer.
+"""Track 3: direction and timing/proximity layer with multi-horizon support.
 
-Track 2 predicts P(respect | touched) — pool quality. It says nothing about WHICH pool will be
-touched first or which DIRECTION price will move next. Track 3 closes those gaps with two
-independent LightGBM models trained on time-series snapshots:
+Two LightGBM models trained on time-series snapshots:
 
-  DirectionModel:  at time T, predict P(up | state at T) over next horizon bars.
-                   Target = (max_high - close) > (close - min_low) over the horizon.
-                   Features = momentum, ADX/vol regime, VWAP deviation, session, aggregate pool
-                              pull (Q × 1/distance summed over each side).
+  DirectionModel:   P(up | state) over a single primary horizon (default 78 bars = 1 NSE session).
+                    Target = (max_up_atr >= max_dn_atr) over horizon.
 
-  ProximityModel:  at (time T, pool P), predict P(touched within horizon bars | state).
-                   Target = pool's touched_at falls in (T, T+horizon].
-                   Features = state features + per-pool features (distance, quality, age, TFs).
+  ProximityModel:   P(pool touched within H bars | state, pool). Walkforward trains THREE of
+                    these at H = 78 (1 day), 156 (2 days), 312 (4 days). Each next-pool entry
+                    in the run output shows all three so the user can see "when".
 
-Joint trading score for a pool: Q × T (quality × touch-probability).
-A pool that's likely to be touched AND likely to respect when touched is the actionable signal.
+A Snapshot stores enough information (cumulative future max-high / min-low arrays and per-pool
+bars-to-touch) to derive labels for ANY horizon <= the max_horizon used at generation time.
+That lets us train multiple horizon-specific models from one snapshot pass.
 
 All snapshot generation is causal — features at T only use bars with timestamp <= T, and labels
-are determined from future bars but those future bars are never used as inputs.
+are derived from bars in (T, T+H].
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Iterable
+from typing import List, Dict, Tuple, Optional
 import numpy as np
 import pandas as pd
 
 from .pools import Pool
 from .tester import PoolResult
-from .regime import compute_regime_series, lookup_regime, SESSION_LABELS, nse_session
+from .regime import compute_regime_series, nse_session, SESSION_LABELS
 from .indicators import atr
 
 
 # ---------------------------------------------------------------------------
-# Causal state features at a single bar
+# State features
 # ---------------------------------------------------------------------------
 
 _STATE_NUMERIC = [
@@ -49,7 +46,7 @@ STATE_FEATURE_NAMES = _STATE_NUMERIC + _STATE_SESSION
 
 
 class StateFeaturizer:
-    """Pre-computes anything that can be precomputed per-bar; cheap lookup per snapshot."""
+    """Pre-computes per-bar series; provides cheap snapshot-time feature lookup."""
 
     def __init__(self, df_base: pd.DataFrame):
         self.df = df_base
@@ -60,21 +57,17 @@ class StateFeaturizer:
         self.high = df_base["high"].values
         self.low = df_base["low"].values
         self.idx = df_base.index
-        # Rolling mean of close for z-score
         self.roll_mean_50 = df_base["close"].rolling(50, min_periods=10).mean().bfill().values
         self.roll_std_50 = df_base["close"].rolling(50, min_periods=10).std().bfill().values
 
     def features_at(self, j: int, active_pools: List[Pool]) -> Dict[str, float]:
-        """Build the state feature dict at bar j. `active_pools` are pools with available_at <=
-        ts[j] AND not yet touched/broken before ts[j] (caller's responsibility)."""
         n = len(self.idx)
         if j < 1 or j >= n:
             return {k: 0.0 for k in STATE_FEATURE_NAMES}
 
         c = self.close
         ts = self.idx[j]
-        a = float(self.atr_14.iloc[j])
-        a = max(a, 1e-9)
+        a = max(float(self.atr_14.iloc[j]), 1e-9)
 
         def log_ret(k):
             i0 = max(0, j - k)
@@ -82,29 +75,25 @@ class StateFeaturizer:
                 return 0.0
             return float(np.log(c[j] / c[i0]))
 
-        # Momentum: sum of body / ATR over last 12 bars
+        # Momentum over last 12 bars
         i0 = max(0, j - 11)
         oa = (c[i0:j + 1] - c[max(0, i0 - 1):j])[:j - i0 + 1]
         mom_12 = float(np.sum(oa) / a) if len(oa) else 0.0
 
-        # Z-score of close vs 50-bar mean
         mean50 = self.roll_mean_50[j]
         std50 = self.roll_std_50[j]
         z = float((c[j] - mean50) / std50) if std50 > 0 else 0.0
 
-        # Range over last 6 bars / ATR
         i0 = max(0, j - 5)
         rng6 = float((self.high[i0:j + 1].max() - self.low[i0:j + 1].min()) / a)
 
-        # Regime
         adx_14 = float(self.regime["adx_14"].iloc[j])
         vol_r = float(self.regime["vol_ratio"].iloc[j])
         session = nse_session(ts)
-        ist_min = (ts + pd.Timedelta(hours=5, minutes=30)).hour * 60 + \
-                  (ts + pd.Timedelta(hours=5, minutes=30)).minute
+        ist = ts + pd.Timedelta(hours=5, minutes=30)
+        ist_min = ist.hour * 60 + ist.minute
         m_since_open = max(0, ist_min - (9 * 60 + 15))
 
-        # Pool environment
         close_T = c[j]
         n_above = n_below = 0
         nearest_above_d = float("inf")
@@ -115,7 +104,7 @@ class StateFeaturizer:
                 d = (p.mid - close_T) / a
                 n_above += 1
                 nearest_above_d = min(nearest_above_d, d)
-                pull_above += 1.0 / max(d, 1.0)  # quality multiplied in later if model provided
+                pull_above += 1.0 / max(d, 1.0)
             elif p.price_high < close_T:
                 d = (close_T - p.mid) / a
                 n_below += 1
@@ -150,7 +139,7 @@ class StateFeaturizer:
 
 
 # ---------------------------------------------------------------------------
-# Snapshot generation
+# Multi-horizon Snapshot
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -158,38 +147,93 @@ class Snapshot:
     bar_idx: int
     ts: pd.Timestamp
     close: float
-    atr: float
+    atr_val: float
     state: Dict[str, float]
-    direction_label: int          # 1 = up wins, 0 = down wins in horizon
-    max_up_atr: float
-    max_dn_atr: float
-    # (pool_index_in_pools_list, touched_in_window, distance_atr_at_snapshot, side)
-    pool_touches: List[Tuple[int, int, float, str]] = field(default_factory=list)
+    # Cumulative running max-high / min-low over future bars (T+1 .. T+n_future_bars).
+    # future_max_high[i-1] = max(high[j+1..j+i]) — i.e. max-high seen so far i bars into the future.
+    future_max_high: List[float] = field(default_factory=list)
+    future_min_low: List[float] = field(default_factory=list)
+    # Per-pool: (pool_idx, bars_to_touch_or_None, distance_atr_at_snapshot, "above"/"below")
+    pool_touches: List[Tuple[int, Optional[int], float, str]] = field(default_factory=list)
+    # How many future bars we actually observed (could be < max_horizon near end of data).
+    n_future_bars: int = 0
+
+    def direction_label(self, horizon: int) -> Optional[int]:
+        """1 if max_up_atr >= max_dn_atr over `horizon` future bars; None if not enough data."""
+        h = min(horizon, self.n_future_bars)
+        if h < 5:
+            return None
+        max_h = self.future_max_high[h - 1]
+        min_l = self.future_min_low[h - 1]
+        max_up = max_h - self.close
+        max_dn = self.close - min_l
+        return 1 if max_up >= max_dn else 0
+
+    def max_up_atr(self, horizon: int) -> float:
+        h = min(horizon, self.n_future_bars)
+        if h == 0:
+            return 0.0
+        return (self.future_max_high[h - 1] - self.close) / max(self.atr_val, 1e-9)
+
+    def max_dn_atr(self, horizon: int) -> float:
+        h = min(horizon, self.n_future_bars)
+        if h == 0:
+            return 0.0
+        return (self.close - self.future_min_low[h - 1]) / max(self.atr_val, 1e-9)
+
+    def pool_touch_labels(self, horizon: int) -> List[Tuple[int, int, float, str]]:
+        """Returns (pool_idx, touched_within_horizon, distance_atr, side) for each pool that was
+        active at the snapshot. Caller is responsible for filtering by self.n_future_bars >=
+        horizon if it needs a definitive 0-label."""
+        return [(pi,
+                 1 if (bt is not None and bt <= horizon) else 0,
+                 d, s)
+                for (pi, bt, d, s) in self.pool_touches]
 
 
 def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[PoolResult],
-                        featurizer: StateFeaturizer,
-                        window_start: pd.Timestamp, window_end: pd.Timestamp,
-                        sample_every: int, horizon: int) -> List[Snapshot]:
-    """Walk through df_base at `sample_every` bars; build a Snapshot at each sample point. Only
-    sample times within [window_start, window_end - horizon * base_period] are used so every
-    snapshot has a full forward window inside the requested window."""
+                       featurizer: StateFeaturizer,
+                       window_start: pd.Timestamp, window_end: pd.Timestamp,
+                       sample_every: int, max_horizon: int) -> List[Snapshot]:
+    """Build snapshots at every `sample_every` bar in [window_start, window_end].
+
+    Each snapshot stores the full future trajectory (up to max_horizon bars) AND the per-pool
+    bars-to-touch, so we can derive labels for any horizon h <= max_horizon downstream.
+    """
     idx = df_base.index
     n = len(idx)
     h_arr = df_base["high"].values
     l_arr = df_base["low"].values
     c_arr = df_base["close"].values
 
-    # Convert window bounds to bar indices.
     j_start = int(np.searchsorted(idx.values, np.datetime64(window_start), side="left"))
     j_end = int(np.searchsorted(idx.values, np.datetime64(window_end), side="right")) - 1
-    j_end = min(j_end, n - horizon - 1)
+    j_end = min(j_end, n - 5)
 
     snaps: List[Snapshot] = []
-    for j in range(max(j_start, 80), j_end + 1, sample_every):  # need >=80 bars warmup
+    for j in range(max(j_start, 80), j_end + 1, sample_every):
         T = idx[j]
+        close_T = c_arr[j]
+        a_T = max(float(featurizer.atr_14.iloc[j]), 1e-9)
 
-        # Active pools at T: available_at <= T AND not yet touched/broken at T
+        n_future = min(max_horizon, n - 1 - j)
+        if n_future < 5:
+            continue
+
+        # Cumulative running max-high / min-low for the future window
+        f_max_high: List[float] = []
+        f_min_low: List[float] = []
+        cur_max = h_arr[j + 1]
+        cur_min = l_arr[j + 1]
+        f_max_high.append(cur_max)
+        f_min_low.append(cur_min)
+        for i in range(2, n_future + 1):
+            cur_max = max(cur_max, float(h_arr[j + i]))
+            cur_min = min(cur_min, float(l_arr[j + i]))
+            f_max_high.append(cur_max)
+            f_min_low.append(cur_min)
+
+        # Active pools at T (available_at <= T, not yet touched/broken)
         active_with_idx: List[Tuple[int, Pool]] = []
         for pi, p in enumerate(pools):
             if p.available_at > T:
@@ -201,30 +245,17 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
                 continue
             active_with_idx.append((pi, p))
         active_pools = [p for _, p in active_with_idx]
-
         state = featurizer.features_at(j, active_pools)
 
-        # Forward window for labels
-        j_end_h = j + horizon
-        close_T = c_arr[j]
-        a_T = float(featurizer.atr_14.iloc[j])
-        a_T = max(a_T, 1e-9)
-        h_win = h_arr[j + 1 : j_end_h + 1]
-        l_win = l_arr[j + 1 : j_end_h + 1]
-        if len(h_win) == 0:
-            continue
-        max_up = float(h_win.max()) - close_T
-        max_dn = close_T - float(l_win.min())
-        dir_label = 1 if max_up >= max_dn else 0
-        max_up_atr = max_up / a_T
-        max_dn_atr = max_dn / a_T
-
-        # Per-pool touch labels: touched_at falls in (T, ts[j_end_h]]
-        T_end = idx[min(j_end_h, n - 1)]
-        pool_touches: List[Tuple[int, int, float, str]] = []
+        # Per-pool bars-to-touch (within max_horizon)
+        pool_touches: List[Tuple[int, Optional[int], float, str]] = []
         for pi, p in active_with_idx:
             ta = results[pi].touched_at
-            touched_in_window = 1 if (ta is not None and T < ta <= T_end) else 0
+            bars_to_touch: Optional[int] = None
+            if ta is not None and ta > T:
+                ta_idx = int(idx.searchsorted(ta, side="left"))
+                if j < ta_idx <= j + n_future:
+                    bars_to_touch = ta_idx - j
             if p.price_low > close_T:
                 dist = (p.mid - close_T) / a_T
                 side = "above"
@@ -232,25 +263,25 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
                 dist = (close_T - p.mid) / a_T
                 side = "below"
             else:
-                # Currently inside the pool — skip (price has already reached it)
-                continue
-            pool_touches.append((pi, touched_in_window, float(dist), side))
+                continue   # already inside the zone
+            pool_touches.append((pi, bars_to_touch, float(dist), side))
 
         snaps.append(Snapshot(
-            bar_idx=j, ts=T, close=float(close_T), atr=a_T,
-            state=state, direction_label=int(dir_label),
-            max_up_atr=float(max_up_atr), max_dn_atr=float(max_dn_atr),
-            pool_touches=pool_touches,
+            bar_idx=j, ts=T, close=float(close_T), atr_val=a_T,
+            state=state,
+            future_max_high=f_max_high, future_min_low=f_min_low,
+            pool_touches=pool_touches, n_future_bars=int(n_future),
         ))
     return snaps
 
 
 # ---------------------------------------------------------------------------
-# Direction model
+# Direction model — single horizon
 # ---------------------------------------------------------------------------
 
 @dataclass
 class DirectionModel:
+    horizon: int = 78                                # 1 NSE trading session
     feature_names: List[str] = field(default_factory=list)
     train_n: int = 0
     val_n: int = 0
@@ -265,22 +296,25 @@ class DirectionModel:
         from sklearn.isotonic import IsotonicRegression
         from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
-        if len(snapshots) < 30:
-            raise ValueError(f"need >= 30 snapshots, got {len(snapshots)}")
-
-        X_df = pd.DataFrame([s.state for s in snapshots], columns=STATE_FEATURE_NAMES).fillna(0.0)
-        y = np.array([s.direction_label for s in snapshots], dtype=int)
+        usable = [(s.state, s.direction_label(self.horizon)) for s in snapshots
+                  if s.n_future_bars >= self.horizon and s.direction_label(self.horizon) is not None]
+        if len(usable) < 30:
+            raise ValueError(f"DirectionModel needs >= 30 valid snapshots at horizon "
+                              f"{self.horizon}, got {len(usable)}")
+        X_df = pd.DataFrame([u[0] for u in usable], columns=STATE_FEATURE_NAMES).fillna(0.0)
+        y = np.array([u[1] for u in usable], dtype=int)
         self.feature_names = list(X_df.columns)
         self.base_rate = float(y.mean())
 
         rng = np.random.default_rng(seed)
-        pos = np.where(y == 1)[0]; neg = np.where(y == 0)[0]
+        pos, neg = np.where(y == 1)[0], np.where(y == 0)[0]
         rng.shuffle(pos); rng.shuffle(neg)
         n_vp = max(1, int(round(len(pos) * val_frac)))
         n_vn = max(1, int(round(len(neg) * val_frac)))
         val_idx = np.concatenate([pos[:n_vp], neg[:n_vn]])
         tr_idx = np.concatenate([pos[n_vp:], neg[n_vn:]])
         rng.shuffle(val_idx); rng.shuffle(tr_idx)
+
         X_tr, y_tr = X_df.iloc[tr_idx].values, y[tr_idx]
         X_v, y_v = X_df.iloc[val_idx].values, y[val_idx]
 
@@ -308,7 +342,7 @@ class DirectionModel:
     def predict_state(self, state: Dict[str, float]) -> float:
         X = pd.DataFrame([state], columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
-        return float(self._iso.transform(raw)[0])
+        return float(np.clip(self._iso.transform(raw)[0], 0.0, 1.0))
 
     def predict_batch(self, X: pd.DataFrame) -> np.ndarray:
         X = X.reindex(columns=self.feature_names).fillna(0.0).values
@@ -323,7 +357,7 @@ class DirectionModel:
 
 
 # ---------------------------------------------------------------------------
-# Proximity model
+# Proximity model — horizon-specific
 # ---------------------------------------------------------------------------
 
 _POOL_FEATURE_NAMES = ["distance_atr", "side_above",
@@ -338,15 +372,12 @@ def _pool_features_for_snapshot(pool: Pool, dist_atr: float, side: str,
     earliest = min((c.ts for c in pool.contributors), default=pool.formed_at)
     age_bars = (pool.available_at - earliest).total_seconds() / base_period_seconds \
                if pool.available_at >= earliest else 0.0
-    # width_atr requires ATR median, approximated by ratio to first contributor's half_width? Use
-    # raw width (the proximity model can scale it). Better: width in INR / current atr (caller
-    # passes ATR? simpler: use width in price units, model learns scale relative to other feats).
     return {
         "distance_atr": float(dist_atr),
         "side_above": 1.0 if side == "above" else 0.0,
         "pool_quality": float(quality_pred),
         "pool_score": float(pool.score),
-        "pool_width_atr": float(pool.width),       # raw price width; comparable across pools
+        "pool_width_atr": float(pool.width),
         "pool_n_tfs": float(len(set(pool.tfs))),
         "pool_n_contributors": float(len(pool.contributors)),
         "pool_age_at_avail_bars": float(age_bars),
@@ -355,12 +386,14 @@ def _pool_features_for_snapshot(pool: Pool, dist_atr: float, side: str,
 
 @dataclass
 class ProximityModel:
+    horizon: int = 78
     feature_names: List[str] = field(default_factory=list)
     train_n: int = 0
     val_n: int = 0
     val_brier: float = 0.0
     val_logloss: float = 0.0
     val_auc: float = 0.0
+    val_decile_lift: float = 0.0
     base_rate: float = 0.0
 
     def fit(self, snapshots: List[Snapshot], pools: List[Pool],
@@ -370,17 +403,18 @@ class ProximityModel:
         from sklearn.isotonic import IsotonicRegression
         from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
-        rows = []
-        labels = []
+        rows, labels = [], []
         for s in snapshots:
-            for (pi, touched, dist, side) in s.pool_touches:
+            if s.n_future_bars < self.horizon:
+                continue
+            for (pi, touched, dist, side) in s.pool_touch_labels(self.horizon):
                 pool = pools[pi]
                 pool_feat = _pool_features_for_snapshot(pool, dist, side, float(quality_preds[pi]))
-                merged = {**s.state, **pool_feat}
-                rows.append(merged)
+                rows.append({**s.state, **pool_feat})
                 labels.append(touched)
         if len(rows) < 100:
-            raise ValueError(f"need >= 100 (snapshot, pool) rows, got {len(rows)}")
+            raise ValueError(f"ProximityModel at horizon {self.horizon} needs >= 100 rows, "
+                              f"got {len(rows)}")
 
         feature_cols = STATE_FEATURE_NAMES + _POOL_FEATURE_NAMES
         X_df = pd.DataFrame(rows, columns=feature_cols).fillna(0.0)
@@ -389,7 +423,7 @@ class ProximityModel:
         self.base_rate = float(y.mean())
 
         rng = np.random.default_rng(seed)
-        pos = np.where(y == 1)[0]; neg = np.where(y == 0)[0]
+        pos, neg = np.where(y == 1)[0], np.where(y == 0)[0]
         rng.shuffle(pos); rng.shuffle(neg)
         n_vp = max(1, int(round(len(pos) * val_frac)))
         n_vn = max(1, int(round(len(neg) * val_frac)))
@@ -418,6 +452,14 @@ class ProximityModel:
         self.val_brier = float(brier_score_loss(y_v, val_cal))
         self.val_logloss = float(log_loss(y_v, np.clip(val_cal, 1e-6, 1 - 1e-6)))
         self.val_auc = float(roc_auc_score(y_v, val_cal)) if len(set(y_v)) > 1 else 0.0
+        # Decile lift on validation
+        if len(val_cal) >= 20:
+            order = np.argsort(val_cal)
+            nv = len(val_cal)
+            bot = order[: nv // 10]; top = order[-nv // 10:]
+            br = float(y_v[bot].mean()) if len(bot) else 0.0
+            tr = float(y_v[top].mean()) if len(top) else 0.0
+            self.val_decile_lift = (tr / br) if br > 0 else float("inf")
         return self
 
     def predict_one(self, pool: Pool, dist_atr: float, side: str,
@@ -436,142 +478,175 @@ class ProximityModel:
 
 
 # ---------------------------------------------------------------------------
-# Evaluation
+# Evaluation (multi-horizon proximity, plus joint score sanity check)
 # ---------------------------------------------------------------------------
 
 @dataclass
+class HorizonProxStats:
+    horizon: int
+    n: int
+    auc: float
+    brier: float
+    decile_lift: float
+    base_rate: float
+
+
+@dataclass
 class TimingReport:
+    direction_horizon: int = 0
     direction_n: int = 0
     direction_brier: float = 0.0
     direction_logloss: float = 0.0
     direction_auc: float = 0.0
-    direction_top_quartile_acc: float = 0.0   # acc when |pred-0.5| is highest 25%
-    proximity_n: int = 0
-    proximity_brier: float = 0.0
-    proximity_logloss: float = 0.0
-    proximity_auc: float = 0.0
-    proximity_decile_lift: float = 0.0
-    # Combined ranking quality (using joint quality × touch_prob)
+    direction_top_quartile_acc: float = 0.0
+
+    proximity_per_horizon: List[HorizonProxStats] = field(default_factory=list)
+
+    # Joint sanity check using primary (shortest) proximity horizon
+    primary_prox_horizon: int = 0
+    n_joint_evaluated: int = 0
     joint_top_quartile_respect: float = 0.0
     joint_bottom_quartile_respect: float = 0.0
     joint_lift: float = 0.0
-    n_joint_evaluated: int = 0
 
 
 def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[PoolResult],
-                     direction_model: DirectionModel, proximity_model: ProximityModel,
+                     direction_model: DirectionModel,
+                     proximity_models: Dict[int, ProximityModel],
                      quality_preds: np.ndarray) -> TimingReport:
     from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
     rpt = TimingReport()
 
-    # Direction eval
+    # Direction OOS evaluation at the direction model's horizon
     if direction_model is not None and snapshots:
-        X = pd.DataFrame([s.state for s in snapshots], columns=STATE_FEATURE_NAMES).fillna(0.0)
-        y = np.array([s.direction_label for s in snapshots], dtype=int)
-        p = direction_model.predict_batch(X)
-        rpt.direction_n = int(len(y))
-        rpt.direction_brier = float(brier_score_loss(y, p))
-        rpt.direction_logloss = float(log_loss(y, np.clip(p, 1e-6, 1 - 1e-6)))
-        if len(set(y)) > 1:
-            rpt.direction_auc = float(roc_auc_score(y, p))
-        # Top-quartile confidence accuracy
-        conf = np.abs(p - 0.5)
-        if len(p):
-            thr = float(np.quantile(conf, 0.75))
-            conf_mask = conf >= thr
-            if conf_mask.sum() > 0:
-                pred_dir = (p[conf_mask] >= 0.5).astype(int)
-                rpt.direction_top_quartile_acc = float((pred_dir == y[conf_mask]).mean())
+        usable = [s for s in snapshots
+                  if s.n_future_bars >= direction_model.horizon
+                  and s.direction_label(direction_model.horizon) is not None]
+        if usable:
+            X = pd.DataFrame([s.state for s in usable], columns=STATE_FEATURE_NAMES).fillna(0.0)
+            y = np.array([s.direction_label(direction_model.horizon) for s in usable], dtype=int)
+            p = direction_model.predict_batch(X)
+            rpt.direction_horizon = direction_model.horizon
+            rpt.direction_n = int(len(y))
+            rpt.direction_brier = float(brier_score_loss(y, p))
+            rpt.direction_logloss = float(log_loss(y, np.clip(p, 1e-6, 1 - 1e-6)))
+            if len(set(y)) > 1:
+                rpt.direction_auc = float(roc_auc_score(y, p))
+            conf = np.abs(p - 0.5)
+            if len(p):
+                thr = float(np.quantile(conf, 0.75))
+                m = conf >= thr
+                if m.sum() > 0:
+                    pred_dir = (p[m] >= 0.5).astype(int)
+                    rpt.direction_top_quartile_acc = float((pred_dir == y[m]).mean())
 
-    # Proximity eval
-    if proximity_model is not None and snapshots:
-        rows = []
-        labels = []
-        joint_scores = []
-        actual_touched = []
-        actual_outcome_respected = []
+    # Proximity OOS evaluation per horizon
+    primary_horizon = None
+    primary_p_touch = None
+    primary_pi_array = None
+    primary_touched_array = None
+    for h in sorted(proximity_models.keys()):
+        pm = proximity_models[h]
+        rows, labels, pis, touched_lst = [], [], [], []
         for s in snapshots:
-            for (pi, touched, dist, side) in s.pool_touches:
+            if s.n_future_bars < h:
+                continue
+            for (pi, touched, dist, side) in s.pool_touch_labels(h):
                 pool = pools[pi]
                 pf = _pool_features_for_snapshot(pool, dist, side, float(quality_preds[pi]))
                 rows.append({**s.state, **pf})
                 labels.append(touched)
-                joint_scores.append(float(quality_preds[pi]) * float(touched))  # placeholder; replace below
-        if rows:
-            X = pd.DataFrame(rows, columns=proximity_model.feature_names).fillna(0.0)
-            y = np.array(labels, dtype=int)
-            raw = proximity_model._gbm.predict(
-                X.values, num_iteration=proximity_model._gbm.best_iteration
-            )
-            p_touch = np.clip(proximity_model._iso.transform(raw), 0.0, 1.0)
-            rpt.proximity_n = int(len(y))
-            rpt.proximity_brier = float(brier_score_loss(y, p_touch))
-            rpt.proximity_logloss = float(log_loss(y, np.clip(p_touch, 1e-6, 1 - 1e-6)))
-            if len(set(y)) > 1:
-                rpt.proximity_auc = float(roc_auc_score(y, p_touch))
-            # Decile lift on touch prediction
-            if len(p_touch) >= 20:
-                order = np.argsort(p_touch)
-                n = len(p_touch)
-                bottom = order[: n // 10]
-                top = order[-n // 10:]
-                bot_rate = float(y[bottom].mean()) if len(bottom) else 0.0
-                top_rate = float(y[top].mean()) if len(top) else 0.0
-                rpt.proximity_decile_lift = (top_rate / bot_rate) if bot_rate > 0 else float("inf")
+                pis.append(pi)
+                touched_lst.append(touched)
+        if not rows:
+            continue
+        X = pd.DataFrame(rows, columns=pm.feature_names).fillna(0.0)
+        y = np.array(labels, dtype=int)
+        raw = pm._gbm.predict(X.values, num_iteration=pm._gbm.best_iteration)
+        p = np.clip(pm._iso.transform(raw), 0.0, 1.0)
+        if len(set(y)) > 1:
+            auc = float(roc_auc_score(y, p))
+        else:
+            auc = 0.0
+        br = float(brier_score_loss(y, p))
+        # Decile lift
+        decile_lift = 0.0
+        if len(p) >= 20:
+            order = np.argsort(p)
+            nv = len(p)
+            bot = order[: nv // 10]; top = order[-nv // 10:]
+            bot_rate = float(y[bot].mean()) if len(bot) else 0.0
+            top_rate = float(y[top].mean()) if len(top) else 0.0
+            decile_lift = (top_rate / bot_rate) if bot_rate > 0 else float("inf")
+        rpt.proximity_per_horizon.append(HorizonProxStats(
+            horizon=h, n=int(len(y)), auc=auc, brier=br,
+            decile_lift=decile_lift, base_rate=float(y.mean()),
+        ))
+        if primary_horizon is None:
+            primary_horizon = h
+            primary_p_touch = p
+            primary_pi_array = pis
+            primary_touched_array = touched_lst
 
-            # Joint score evaluation: rank pools by (quality × touch_prob) and check that the
-            # top-quartile-scored pools that ACTUALLY got touched were also more likely to be
-            # respected than the bottom-quartile-scored touched pools. This is the headline
-            # "is the combined signal tradeable" check.
-            flat = [(pi, touched) for s in snapshots for (pi, touched, _, _) in s.pool_touches]
-            joint = []
-            for k, (pi, touched) in enumerate(flat):
-                if touched != 1:
-                    continue
-                r = results[pi]
-                if r.is_respect:
-                    label = 1
-                elif r.is_break:
-                    label = 0
-                else:
-                    continue  # ambiguous outcome — skip
-                score = float(quality_preds[pi]) * float(p_touch[k])
-                joint.append((score, label))
-            if len(joint) >= 20:
-                joint_sorted = sorted(joint, key=lambda x: x[0])
-                m = len(joint_sorted)
-                bot = joint_sorted[: m // 4]
-                top = joint_sorted[-m // 4:]
-                bot_resp = float(np.mean([r for _, r in bot]))
-                top_resp = float(np.mean([r for _, r in top]))
-                rpt.joint_bottom_quartile_respect = bot_resp
-                rpt.joint_top_quartile_respect = top_resp
-                rpt.joint_lift = (top_resp / bot_resp) if bot_resp > 0 else float("inf")
-                rpt.n_joint_evaluated = m
+    # Joint sanity check at the primary (shortest) proximity horizon
+    if primary_horizon is not None:
+        rpt.primary_prox_horizon = primary_horizon
+        joint = []
+        for k, (pi, touched) in enumerate(zip(primary_pi_array, primary_touched_array)):
+            if touched != 1:
+                continue
+            r = results[pi]
+            if r.is_respect:
+                label = 1
+            elif r.is_break:
+                label = 0
+            else:
+                continue
+            score = float(quality_preds[pi]) * float(primary_p_touch[k])
+            joint.append((score, label))
+        if len(joint) >= 20:
+            joint.sort(key=lambda x: x[0])
+            m = len(joint)
+            bot = joint[: m // 4]
+            top = joint[-m // 4:]
+            rpt.joint_bottom_quartile_respect = float(np.mean([r for _, r in bot]))
+            rpt.joint_top_quartile_respect = float(np.mean([r for _, r in top]))
+            rpt.joint_lift = (rpt.joint_top_quartile_respect /
+                              rpt.joint_bottom_quartile_respect
+                              if rpt.joint_bottom_quartile_respect > 0 else float("inf"))
+            rpt.n_joint_evaluated = m
 
     return rpt
 
 
 def print_timing_report(rpt: TimingReport, file=None) -> None:
     print("\n=== Track 3: Direction + Timing Models (OOS) ===", file=file)
-    print(f"\n[direction model]   target = (max_up >= max_dn) in next H bars", file=file)
-    print(f"  OOS samples:            {rpt.direction_n}", file=file)
-    print(f"  Brier:                  {rpt.direction_brier:.4f}", file=file)
-    print(f"  Log loss:               {rpt.direction_logloss:.4f}", file=file)
-    print(f"  AUC-ROC:                {rpt.direction_auc:.3f}  (0.5=random, 0.55+=useful)", file=file)
-    print(f"  Top-quartile-confidence accuracy:  {rpt.direction_top_quartile_acc:.1%}  "
-          f"(when model is sure)", file=file)
+    print(f"\n[direction model]   horizon = {rpt.direction_horizon} bars  "
+          f"(~{rpt.direction_horizon * 5 / 60:.1f}h on 5m base)", file=file)
+    print(f"  OOS samples:                    {rpt.direction_n}", file=file)
+    print(f"  Brier:                          {rpt.direction_brier:.4f}", file=file)
+    print(f"  Log loss:                       {rpt.direction_logloss:.4f}", file=file)
+    print(f"  AUC-ROC:                        {rpt.direction_auc:.3f}", file=file)
+    print(f"  Top-quartile-confidence acc:    {rpt.direction_top_quartile_acc:.1%}  "
+          f"(accuracy when model is most certain)", file=file)
 
-    print(f"\n[proximity model]   target = pool touched within H bars from snapshot", file=file)
-    print(f"  OOS (snapshot,pool) rows:  {rpt.proximity_n}", file=file)
-    print(f"  Brier:                  {rpt.proximity_brier:.4f}", file=file)
-    print(f"  Log loss:               {rpt.proximity_logloss:.4f}", file=file)
-    print(f"  AUC-ROC:                {rpt.proximity_auc:.3f}", file=file)
-    print(f"  Decile lift:            {rpt.proximity_decile_lift:.2f}x", file=file)
+    if rpt.proximity_per_horizon:
+        print(f"\n[proximity models per horizon]   target = pool touched within H bars",
+              file=file)
+        print(f"  {'horizon':<8} {'~hours':<8} {'n_oos':>7} {'AUC':>6} {'Brier':>7} "
+              f"{'base_rate':>10} {'decile_lift':>12}", file=file)
+        for s in rpt.proximity_per_horizon:
+            hours = s.horizon * 5 / 60.0
+            lift_str = "inf" if s.decile_lift == float("inf") else f"{s.decile_lift:.1f}x"
+            print(f"  {s.horizon:<8} {hours:<7.1f}h {s.n:>7} {s.auc:>6.3f} {s.brier:>7.4f} "
+                  f"{s.base_rate:>9.1%} {lift_str:>12}", file=file)
 
-    print(f"\n[joint score ranking]  quality × touch_prob, scored on actually-touched pools",
+    print(f"\n[joint score sanity check]  Q × T_h{rpt.primary_prox_horizon} on touched pools",
           file=file)
-    print(f"  decisive pools evaluated:   {rpt.n_joint_evaluated}", file=file)
-    print(f"  Top quartile respect rate:  {rpt.joint_top_quartile_respect:.1%}", file=file)
-    print(f"  Bottom quartile respect:    {rpt.joint_bottom_quartile_respect:.1%}", file=file)
-    print(f"  Joint lift:                 {rpt.joint_lift:.2f}x", file=file)
+    print(f"  n decisive:             {rpt.n_joint_evaluated}", file=file)
+    print(f"  Top quartile respect:   {rpt.joint_top_quartile_respect:.1%}", file=file)
+    print(f"  Bottom quartile:        {rpt.joint_bottom_quartile_respect:.1%}", file=file)
+    print(f"  Joint lift:             {rpt.joint_lift:.2f}x", file=file)
+    if rpt.joint_lift < 1.2:
+        print(f"  → joint score does NOT rank touched pools well. Use T as filter "
+              f"(tradeable today), Q for ranking among tradeable.", file=file)

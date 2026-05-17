@@ -89,7 +89,7 @@ class WalkForwardReport:
     directional_report: Optional[DirectionalReport] = None
     # Track 3: direction + proximity models and their OOS evaluation.
     direction_model: Optional[DirectionModel] = None
-    proximity_model: Optional[ProximityModel] = None
+    proximity_models: Dict[int, ProximityModel] = field(default_factory=dict)
     timing_report: Optional[TimingReport] = None
 
 
@@ -278,13 +278,12 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             print(f"[walkforward] ML training skipped: {e}")
 
     # Track 3: direction + proximity models on time-series snapshots.
-    # We need predictions for ALL pools (not just OOS ones) to train proximity, so we generate
-    # quality predictions for every pool the system saw — train + OOS — using the ML model.
+    # Generate snapshots ONCE at the max horizon; derive per-horizon labels on demand. Train one
+    # DirectionModel (primary horizon 78 bars = 1 NSE session) and THREE ProximityModels
+    # (78, 156, 312 bars = today, 2 days, 4 days).
     if report.ml_model is not None and len(report.oos_pools) > 0:
         try:
             base = tf_data["base"]
-            # Build a unified pool list = train_pools_for_ml + oos_pools (in order). The
-            # `quality_preds` array must align with this list.
             unified_pools = list(report.train_pools_for_ml) + list(report.oos_pools)
             unified_results = list(report.train_results_for_ml) + list(report.oos_results)
             feat_for_quality = Featurizer(base)
@@ -292,7 +291,9 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             quality_preds = report.ml_model.predict(X_uni, pools=unified_pools)
 
             state_feat = StateFeaturizer(base)
-            timing_horizon = max(40, cfg.test_horizon_bars // 4)
+            PROX_HORIZONS = [78, 156, 312]            # 1 day, 2 days, 4 days on NSE 5m
+            DIR_HORIZON = 78                            # match "today" planning
+            MAX_HORIZON = max(PROX_HORIZONS + [DIR_HORIZON])
             sample_every = max(20, cfg.test_horizon_bars // 6)
 
             train_snaps: List = []
@@ -300,30 +301,37 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             for fr in report.folds:
                 tr = generate_snapshots(base, unified_pools, unified_results, state_feat,
                                          window_start=fr.train_start, window_end=fr.train_end,
-                                         sample_every=sample_every, horizon=timing_horizon)
+                                         sample_every=sample_every, max_horizon=MAX_HORIZON)
                 os_ = generate_snapshots(base, unified_pools, unified_results, state_feat,
                                           window_start=fr.test_start, window_end=fr.test_end,
-                                          sample_every=sample_every, horizon=timing_horizon)
+                                          sample_every=sample_every, max_horizon=MAX_HORIZON)
                 train_snaps.extend(tr)
                 oos_snaps.extend(os_)
 
             if len(train_snaps) >= 30:
-                dir_m = DirectionModel().fit(train_snaps, seed=cfg.opt_seed + 100)
-                report.direction_model = dir_m
-            try:
-                if len(train_snaps) >= 30:
-                    prox_m = ProximityModel().fit(train_snaps, unified_pools, quality_preds,
-                                                    seed=cfg.opt_seed + 200)
-                    report.proximity_model = prox_m
-            except ValueError as ve:
-                # Not enough (snapshot, pool) rows
-                print(f"[walkforward] proximity model skipped: {ve}")
+                try:
+                    dir_m = DirectionModel(horizon=DIR_HORIZON).fit(
+                        train_snaps, seed=cfg.opt_seed + 100,
+                    )
+                    report.direction_model = dir_m
+                except ValueError as ve:
+                    print(f"[walkforward] direction model skipped: {ve}")
 
-            if (report.direction_model is not None and report.proximity_model is not None
+                for h in PROX_HORIZONS:
+                    try:
+                        pm = ProximityModel(horizon=h).fit(
+                            train_snaps, unified_pools, quality_preds,
+                            seed=cfg.opt_seed + 200 + h,
+                        )
+                        report.proximity_models[h] = pm
+                    except ValueError as ve:
+                        print(f"[walkforward] proximity h={h} skipped: {ve}")
+
+            if (report.direction_model is not None and report.proximity_models
                     and oos_snaps):
                 report.timing_report = evaluate_timing(
                     oos_snaps, unified_pools, unified_results,
-                    report.direction_model, report.proximity_model, quality_preds,
+                    report.direction_model, report.proximity_models, quality_preds,
                 )
         except Exception as e:
             print(f"[walkforward] Track 3 (direction/timing) skipped: {e}")
@@ -413,10 +421,13 @@ def print_report(report: WalkForwardReport, file=None) -> None:
             print(f"\n[direction model — top 8 features by gain]", file=file)
             for name, gain in report.direction_model.feature_importance(8):
                 print(f"  {name:<32} {gain:>10.1f}", file=file)
-        if report.proximity_model is not None and report.proximity_model.feature_names:
-            print(f"\n[proximity model — top 8 features by gain]", file=file)
-            for name, gain in report.proximity_model.feature_importance(8):
-                print(f"  {name:<32} {gain:>10.1f}", file=file)
+        if report.proximity_models:
+            shortest = min(report.proximity_models.keys())
+            pm = report.proximity_models[shortest]
+            if pm.feature_names:
+                print(f"\n[proximity model (h={shortest}) — top 8 features by gain]", file=file)
+                for name, gain in pm.feature_importance(8):
+                    print(f"  {name:<32} {gain:>10.1f}", file=file)
 
     gap = report.mean_overfit_gap
     if gap > 0.15:

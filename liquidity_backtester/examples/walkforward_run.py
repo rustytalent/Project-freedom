@@ -143,28 +143,45 @@ def main():
     model = wf.stratified_model
     ml = wf.ml_model
     dir_m = wf.direction_model
-    prox_m = wf.proximity_model
+    prox_models = wf.proximity_models if wf.proximity_models else {}
     # Pre-build feature matrix for the final-config pools so we can ML-predict on demand.
     feat = Featurizer(tf["base"]) if ml is not None else None
     state_feat = StateFeaturizer(tf["base"]) if dir_m is not None else None
 
-    # Compute the current state vector ONCE (most recent bar) so proximity model can use it for
-    # every pool prediction.
+    # Compute the current state vector ONCE (most recent bar).
     current_state = None
     direction_p_up = None
     if state_feat is not None:
         j_now = len(tf["base"]) - 1
-        # Active pools at "now" = pools whose available_at <= now AND not broken.
         live = [p for p, r in zip(pools, results)
                 if p.available_at <= tf["base"].index[j_now] and not r.is_break]
         current_state = state_feat.features_at(j_now, live)
         if dir_m is not None:
             direction_p_up = dir_m.predict_state(current_state)
 
+    # Direction interpretation thresholds. With AUC ~0.70 and top-quartile-confidence ~89%,
+    # |p-0.5| >= 0.10 is meaningful; we use 0.10 as the alignment threshold.
+    DIR_ALIGN_MARGIN = 0.10
+
+    def direction_tag(side_str: str) -> str:
+        if direction_p_up is None:
+            return ""
+        if direction_p_up >= 0.5 + DIR_ALIGN_MARGIN:
+            return "DIR_ALIGN" if side_str == "above" else "DIR_FIGHT"
+        if direction_p_up <= 0.5 - DIR_ALIGN_MARGIN:
+            return "DIR_ALIGN" if side_str == "below" else "DIR_FIGHT"
+        return "DIR_NEUTRAL"
+
     if direction_p_up is not None:
-        print(f"\n[direction prediction at now]  P(up over next 50 bars) = "
-              f"{direction_p_up:.0%}   (model AUC OOS = "
-              f"{wf.timing_report.direction_auc if wf.timing_report else 0:.2f})")
+        dir_word = "UP" if direction_p_up >= 0.5 else "DOWN"
+        conf_word = "STRONG" if abs(direction_p_up - 0.5) >= DIR_ALIGN_MARGIN else "WEAK"
+        auc_str = (f"OOS AUC {wf.timing_report.direction_auc:.2f}, "
+                   f"top-quartile-confidence acc "
+                   f"{wf.timing_report.direction_top_quartile_acc:.0%}"
+                   if wf.timing_report else "")
+        print(f"\n[direction prediction at now]  P(up | next "
+              f"{dir_m.horizon} bars) = {direction_p_up:.1%}   "
+              f"[{conf_word} {dir_word}]   ({auc_str})")
 
     def ml_predict_one(pool):
         if ml is None or feat is None:
@@ -172,44 +189,131 @@ def main():
         X = feat.transform_batch([pool])
         return float(ml.predict(X, pools=[pool])[0])
 
-    def prox_predict_one(pool, dist_atr, side):
-        if prox_m is None or current_state is None:
+    def prox_predict(pool, dist_atr, side_str, horizon):
+        pm = prox_models.get(horizon)
+        if pm is None or current_state is None:
             return None
         q = ml_predict_one(pool) or 0.5
-        return prox_m.predict_one(pool, dist_atr, side, current_state, q)
+        return pm.predict_one(pool, dist_atr, side_str, current_state, q)
 
-    for tag, side in (("ABOVE (sell-side, upside target)", "above"),
-                      ("BELOW (buy-side, downside target)", "below")):
-        print(f"\n--- NEXT POOL {tag} ---")
-        nearest = nearest_untouched(pools, results, current, side, k=3)
-        if not nearest:
-            print(f"  (no qualifying pool {side} current price)")
-            continue
-        for rank, (p, r) in enumerate(nearest, 1):
-            srcs = sorted({c.source.split('@')[0] for c in p.contributors})
-            tf_list = "+".join(p.tfs)
-            dist = (p.mid - current) if side == "above" else (current - p.mid)
+    # Tradeable filter thresholds — tunable.
+    TRADEABLE_T_TODAY = 0.05      # 5% minimum touch probability today to be tradeable today
+    TRADEABLE_Q = 0.55            # 55% minimum quality
+
+    sorted_horizons = sorted(prox_models.keys())     # e.g. [78, 156, 312]
+    primary_h = sorted_horizons[0] if sorted_horizons else None    # "today"
+
+    # Gather candidates from both sides.
+    candidates = []
+    for side_str in ("above", "below"):
+        nearest = nearest_untouched(pools, results, current, side_str, k=5)
+        for p, r in nearest:
+            dist = (p.mid - current) if side_str == "above" else (current - p.mid)
             dist_atr = dist / max(atr_proxy, 1e-9)
-            print(f"  #{rank} zone {p.price_low:.2f}-{p.price_high:.2f}  mid {p.mid:.2f}  "
-                  f"score {p.score:.2f}  outcome {r.outcome}")
-            print(f"      distance: {'+' if side == 'above' else '-'}{dist_atr:.2f} ATRs")
-            print(f"      formed:   {p.formed_at}")
-            print(f"      known_at: {p.available_at}")
-            print(f"      TFs:      {tf_list}")
-            print(f"      drivers:  {', '.join(srcs)}")
-            if model is not None:
-                bucket, src = model.predict(p)
-                print(f"      [stratified] P(respect):  {bucket.rate_broad:.0%}  "
-                      f"[{bucket.ci_low:.0%}-{bucket.ci_high:.0%}]   "
-                      f"strict={bucket.rate_strict:.0%}   bucket={src}  (n={bucket.tested})")
             q = ml_predict_one(p)
-            if q is not None:
-                print(f"      [Q] quality:   P(respect | touched)  = {q:.0%}")
-            t = prox_predict_one(p, dist_atr, side)
-            if t is not None:
-                joint = q * t if q is not None else None
-                joint_str = f"   JOINT = Q × T = {joint:.0%}" if joint is not None else ""
-                print(f"      [T] touch:     P(touched in 50 bars) = {t:.0%}{joint_str}")
+            t_by_h = {}
+            for h in sorted_horizons:
+                t_by_h[h] = prox_predict(p, dist_atr, side_str, h)
+            candidates.append({
+                "pool": p, "result": r, "side": side_str,
+                "dist_atr": dist_atr, "q": q, "t_by_h": t_by_h,
+                "dir_tag": direction_tag(side_str),
+            })
+
+    # Best Setup Today: tradeable + highest expected value (Q × T_today × direction-alignment bonus)
+    def ev_score(c):
+        q = c.get("q") or 0.0
+        t = c["t_by_h"].get(primary_h) if primary_h else None
+        if t is None:
+            return 0.0
+        bonus = 1.0
+        if c["dir_tag"] == "DIR_ALIGN":
+            bonus = 1.15
+        elif c["dir_tag"] == "DIR_FIGHT":
+            bonus = 0.85
+        return q * t * bonus
+
+    tradeable = [c for c in candidates
+                  if c.get("q") is not None
+                  and primary_h is not None
+                  and c["t_by_h"].get(primary_h) is not None
+                  and c["t_by_h"][primary_h] >= TRADEABLE_T_TODAY
+                  and c["q"] >= TRADEABLE_Q]
+    watchlist = [c for c in candidates if c not in tradeable]
+
+    tradeable.sort(key=ev_score, reverse=True)
+    watchlist.sort(key=lambda c: -(c.get("q") or 0.0))
+
+    # ===== BEST SETUP TODAY =====
+    print("\n================ TODAY'S TRADING PLAN ================")
+    if tradeable:
+        best = tradeable[0]
+        p = best["pool"]; r = best["result"]
+        srcs = sorted({c.source.split('@')[0] for c in p.contributors})
+        side_label = "BELOW (buy)" if best["side"] == "below" else "ABOVE (sell)"
+        t_today = best["t_by_h"].get(primary_h)
+        q = best["q"]
+        print(f">>> BEST SETUP TODAY <<<")
+        print(f"  Pool ₹{p.price_low:.2f}-{p.price_high:.2f}  mid ₹{p.mid:.2f}  "
+              f"[{side_label}]")
+        print(f"  Distance: {best['dist_atr']:.2f} ATRs from current ₹{current:.2f}  "
+              f"({best['dir_tag']})")
+        print(f"  Quality Q = {q:.1%}   Touch T_today = {t_today:.1%}   "
+              f"EV(today) ≈ {q * t_today:.1%}")
+        print(f"  Drivers: {', '.join(srcs)}   |  TFs: {'+'.join(p.tfs)}")
+        if best["side"] == "below":
+            print(f"  Action: LIMIT BUY at ₹{p.price_high:.2f}, stop "
+                  f"₹{p.price_low - 0.5 * atr_proxy:.2f}, "
+                  f"target ₹{p.price_high + 2 * atr_proxy:.2f}+")
+        else:
+            print(f"  Action: LIMIT SELL at ₹{p.price_low:.2f}, stop "
+                  f"₹{p.price_high + 0.5 * atr_proxy:.2f}, "
+                  f"target ₹{p.price_low - 2 * atr_proxy:.2f}-")
+    else:
+        print(">>> NO TRADEABLE SETUP TODAY <<<")
+        print(f"  No pool has both T_today >= {TRADEABLE_T_TODAY:.0%} "
+              f"AND Q >= {TRADEABLE_Q:.0%}.")
+        print(f"  Watch the levels below for tomorrow / later in the week.")
+    print("======================================================")
+
+    # ===== TRADEABLE TODAY =====
+    print(f"\n--- TRADEABLE TODAY  (T_today >= {TRADEABLE_T_TODAY:.0%} AND "
+          f"Q >= {TRADEABLE_Q:.0%}) ---")
+    if not tradeable:
+        print("  (none — all pools are either too far or low-quality)")
+    else:
+        for rank, c in enumerate(tradeable, 1):
+            p = c["pool"]; r = c["result"]
+            srcs = sorted({c2.source.split('@')[0] for c2 in p.contributors})
+            side_str_long = "BELOW" if c["side"] == "below" else "ABOVE"
+            t_today = c["t_by_h"].get(primary_h)
+            q = c["q"]
+            t_strs = "  ".join(
+                f"T_h{h}={c['t_by_h'][h]:.1%}" for h in sorted_horizons
+                if c['t_by_h'].get(h) is not None
+            )
+            print(f"  #{rank} ₹{p.price_low:.2f}-{p.price_high:.2f} "
+                  f"[{side_str_long}, {c['dist_atr']:.1f} ATR, {c['dir_tag']}]")
+            print(f"       Q={q:.1%}   {t_strs}   "
+                  f"EV(today)={q * t_today:.1%}   outcome_was={r.outcome}")
+            print(f"       drivers: {', '.join(srcs)}   TFs: {'+'.join(p.tfs)}")
+
+    # ===== WATCH LIST =====
+    print(f"\n--- WATCH LIST  (T_today < {TRADEABLE_T_TODAY:.0%} or Q < {TRADEABLE_Q:.0%}) ---")
+    if not watchlist:
+        print("  (none)")
+    else:
+        for c in watchlist[:6]:
+            p = c["pool"]
+            side_str_long = "BELOW" if c["side"] == "below" else "ABOVE"
+            q = c.get("q") or 0.0
+            t_strs = "  ".join(
+                f"T_h{h}={c['t_by_h'][h]:.1%}" if c['t_by_h'].get(h) is not None else f"T_h{h}=n/a"
+                for h in sorted_horizons
+            )
+            print(f"  ₹{p.price_low:.2f}-{p.price_high:.2f} "
+                  f"[{side_str_long}, {c['dist_atr']:.1f} ATR, {c['dir_tag']}]   "
+                  f"Q={q:.1%}   {t_strs}")
 
     # ---- 4. Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
