@@ -37,19 +37,32 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _synthetic(symbol: str, interval: str, n_bars: int = 4000, seed: int = 42) -> pd.DataFrame:
-    """Geometric-Brownian-ish OHLCV with realistic wicks and occasional jumps."""
+    """Geometric-Brownian-ish OHLCV with realistic wicks and occasional jumps.
+
+    Starting price is picked by a tiny symbol→price heuristic so the chart looks plausible for
+    that asset (e.g. HDFCBANK ≈ ₹1800). This is only used when no real data source is reachable.
+    """
     rng = np.random.default_rng(abs(hash(symbol)) % (2**32) ^ seed)
     freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "60m": "60min",
                 "1h": "60min", "1d": "1D", "1D": "1D"}
     freq = freq_map.get(interval, "5min")
     idx = pd.date_range("2024-01-02 09:30", periods=n_bars, freq=freq)
-    rets = rng.normal(0, 0.0015, n_bars)
+    sym_u = symbol.upper()
+    if "HDFCBANK" in sym_u:
+        start_price, vol_scale = 1800.0, 1.0
+    elif sym_u.endswith(".NS") or sym_u.endswith(".BO"):
+        start_price, vol_scale = 1200.0, 1.0
+    elif "BTC" in sym_u:
+        start_price, vol_scale = 65000.0, 2.0
+    else:
+        start_price, vol_scale = 150.0, 1.0
+    rets = rng.normal(0, 0.0015 * vol_scale, n_bars)
     jump_mask = rng.random(n_bars) < 0.01
-    rets[jump_mask] += rng.normal(0, 0.01, jump_mask.sum())
-    close = 150 * np.exp(np.cumsum(rets))
+    rets[jump_mask] += rng.normal(0, 0.01 * vol_scale, jump_mask.sum())
+    close = start_price * np.exp(np.cumsum(rets))
     open_ = np.concatenate([[close[0]], close[:-1]])
-    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.001, n_bars)))
-    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.001, n_bars)))
+    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.001 * vol_scale, n_bars)))
+    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.001 * vol_scale, n_bars)))
     vol = rng.integers(1_000, 50_000, n_bars).astype(float)
     return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": vol}, index=idx).rename_axis("ts")
 
