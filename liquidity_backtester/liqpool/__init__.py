@@ -5,6 +5,8 @@ from .tester import test_pools, PoolResult, summarise
 from .optimizer import optimize
 from .plotting import plot_chart
 from . import correlation
+from . import walkforward
+from . import stats
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -14,4 +16,6 @@ __all__ = [
     "optimize",
     "plot_chart",
     "correlation",
+    "walkforward",
+    "stats",
 ]

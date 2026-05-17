@@ -83,13 +83,23 @@ def _objective(stats: dict, weights: FactorWeights, lam: float = 0.02) -> float:
 
 
 def optimize(tf_data: Dict[str, pd.DataFrame], cfg: Config,
-             progress: Callable[[int, dict], None] | None = None
+             progress: Callable[[int, dict], None] | None = None,
+             evaluator: Callable[[list, list], dict] | None = None,
              ) -> Tuple[Config, List[dict]]:
     """Returns (best_cfg, trial_log).
 
-    The base TF dataframe is reused across all trials, so cost per trial is just pool build + test."""
+    The base TF dataframe is reused across all trials, so cost per trial is just pool build + test.
+
+    `evaluator` lets the caller score the trial on a subset of pools (e.g. only those formed in a
+    walk-forward training window). It receives the full (pools, results) from a trial and must
+    return a `summarise`-style dict containing at least `respect_rate` and `tested_n`. When None,
+    we use the standard `summarise(results)` over all pools.
+    """
     rng = random.Random(cfg.opt_seed)
     np.random.seed(cfg.opt_seed)
+
+    if evaluator is None:
+        evaluator = lambda pools, results: summarise(results)
 
     trial_log: List[dict] = []
     best: Tuple[float, Config] = (-1e18, cfg)
@@ -102,7 +112,6 @@ def optimize(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             trial.weights = _sample_weights(rng)
             trial.detect = _sample_detect(cfg.detect, rng)
         else:
-            # local refinement around current best
             sigma = max(0.05, 0.4 * (1 - (t - n_explore) / max(1, cfg.opt_iterations - n_explore)))
             trial = copy.deepcopy(best[1])
             trial.weights = _perturb_weights(best[1].weights, sigma, rng)
@@ -112,7 +121,7 @@ def optimize(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             pools = build_pools(tf_data, trial)
             pools = project_to_base(pools, tf_data["base"].index)
             results = test_pools(tf_data["base"], pools, trial)
-            stats = summarise(results)
+            stats = evaluator(pools, results)
         except Exception as e:
             stats = {"error": str(e), "respect_rate": 0.0, "tested_n": 0, "n": 0,
                      "break_rate": 0.0, "untouched_rate": 1.0}
