@@ -35,6 +35,8 @@ from .stratified import StratifiedRespectModel
 from .featurize import Featurizer
 from .ml_model import PoolRespectModel, trainable_mask, labels as ml_labels
 from .directional import evaluate as directional_evaluate, DirectionalReport
+from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, ProximityModel,
+                     evaluate_timing, TimingReport)
 
 
 @dataclass
@@ -85,6 +87,10 @@ class WalkForwardReport:
     ml_model: Optional[PoolRespectModel] = None
     ml_oos_predictions: Optional[List[float]] = None   # P(respect) for each oos_pools entry
     directional_report: Optional[DirectionalReport] = None
+    # Track 3: direction + proximity models and their OOS evaluation.
+    direction_model: Optional[DirectionModel] = None
+    proximity_model: Optional[ProximityModel] = None
+    timing_report: Optional[TimingReport] = None
 
 
 def _fold_windows(base_index: pd.DatetimeIndex, n_folds: int, train_frac: float,
@@ -271,6 +277,57 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         except Exception as e:
             print(f"[walkforward] ML training skipped: {e}")
 
+    # Track 3: direction + proximity models on time-series snapshots.
+    # We need predictions for ALL pools (not just OOS ones) to train proximity, so we generate
+    # quality predictions for every pool the system saw — train + OOS — using the ML model.
+    if report.ml_model is not None and len(report.oos_pools) > 0:
+        try:
+            base = tf_data["base"]
+            # Build a unified pool list = train_pools_for_ml + oos_pools (in order). The
+            # `quality_preds` array must align with this list.
+            unified_pools = list(report.train_pools_for_ml) + list(report.oos_pools)
+            unified_results = list(report.train_results_for_ml) + list(report.oos_results)
+            feat_for_quality = Featurizer(base)
+            X_uni = feat_for_quality.transform_batch(unified_pools)
+            quality_preds = report.ml_model.predict(X_uni, pools=unified_pools)
+
+            state_feat = StateFeaturizer(base)
+            timing_horizon = max(40, cfg.test_horizon_bars // 4)
+            sample_every = max(20, cfg.test_horizon_bars // 6)
+
+            train_snaps: List = []
+            oos_snaps: List = []
+            for fr in report.folds:
+                tr = generate_snapshots(base, unified_pools, unified_results, state_feat,
+                                         window_start=fr.train_start, window_end=fr.train_end,
+                                         sample_every=sample_every, horizon=timing_horizon)
+                os_ = generate_snapshots(base, unified_pools, unified_results, state_feat,
+                                          window_start=fr.test_start, window_end=fr.test_end,
+                                          sample_every=sample_every, horizon=timing_horizon)
+                train_snaps.extend(tr)
+                oos_snaps.extend(os_)
+
+            if len(train_snaps) >= 30:
+                dir_m = DirectionModel().fit(train_snaps, seed=cfg.opt_seed + 100)
+                report.direction_model = dir_m
+            try:
+                if len(train_snaps) >= 30:
+                    prox_m = ProximityModel().fit(train_snaps, unified_pools, quality_preds,
+                                                    seed=cfg.opt_seed + 200)
+                    report.proximity_model = prox_m
+            except ValueError as ve:
+                # Not enough (snapshot, pool) rows
+                print(f"[walkforward] proximity model skipped: {ve}")
+
+            if (report.direction_model is not None and report.proximity_model is not None
+                    and oos_snaps):
+                report.timing_report = evaluate_timing(
+                    oos_snaps, unified_pools, unified_results,
+                    report.direction_model, report.proximity_model, quality_preds,
+                )
+        except Exception as e:
+            print(f"[walkforward] Track 3 (direction/timing) skipped: {e}")
+
     return report
 
 
@@ -347,6 +404,19 @@ def print_report(report: WalkForwardReport, file=None) -> None:
     if report.directional_report is not None:
         from .directional import print_report as _print_dir
         _print_dir(report.directional_report, file=file)
+
+    # Track 3 timing report + feature importances
+    if report.timing_report is not None:
+        from .timing import print_timing_report as _print_timing
+        _print_timing(report.timing_report, file=file)
+        if report.direction_model is not None and report.direction_model.feature_names:
+            print(f"\n[direction model — top 8 features by gain]", file=file)
+            for name, gain in report.direction_model.feature_importance(8):
+                print(f"  {name:<32} {gain:>10.1f}", file=file)
+        if report.proximity_model is not None and report.proximity_model.feature_names:
+            print(f"\n[proximity model — top 8 features by gain]", file=file)
+            for name, gain in report.proximity_model.feature_importance(8):
+                print(f"  {name:<32} {gain:>10.1f}", file=file)
 
     gap = report.mean_overfit_gap
     if gap > 0.15:

@@ -12,6 +12,7 @@ from . import regime
 from . import featurize
 from . import ml_model
 from . import directional
+from . import timing
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -28,4 +29,5 @@ __all__ = [
     "featurize",
     "ml_model",
     "directional",
+    "timing",
 ]

@@ -25,6 +25,7 @@ from liqpool.optimizer import optimize
 from liqpool.walkforward import walk_forward, print_report as print_wf_report
 from liqpool.stratified import print_model as print_stratified_model
 from liqpool.featurize import Featurizer
+from liqpool.timing import StateFeaturizer
 
 
 def nearest_untouched(pools, results, current_price, side, k=3):
@@ -141,14 +142,41 @@ def main():
 
     model = wf.stratified_model
     ml = wf.ml_model
+    dir_m = wf.direction_model
+    prox_m = wf.proximity_model
     # Pre-build feature matrix for the final-config pools so we can ML-predict on demand.
     feat = Featurizer(tf["base"]) if ml is not None else None
+    state_feat = StateFeaturizer(tf["base"]) if dir_m is not None else None
+
+    # Compute the current state vector ONCE (most recent bar) so proximity model can use it for
+    # every pool prediction.
+    current_state = None
+    direction_p_up = None
+    if state_feat is not None:
+        j_now = len(tf["base"]) - 1
+        # Active pools at "now" = pools whose available_at <= now AND not broken.
+        live = [p for p, r in zip(pools, results)
+                if p.available_at <= tf["base"].index[j_now] and not r.is_break]
+        current_state = state_feat.features_at(j_now, live)
+        if dir_m is not None:
+            direction_p_up = dir_m.predict_state(current_state)
+
+    if direction_p_up is not None:
+        print(f"\n[direction prediction at now]  P(up over next 50 bars) = "
+              f"{direction_p_up:.0%}   (model AUC OOS = "
+              f"{wf.timing_report.direction_auc if wf.timing_report else 0:.2f})")
 
     def ml_predict_one(pool):
         if ml is None or feat is None:
             return None
         X = feat.transform_batch([pool])
         return float(ml.predict(X, pools=[pool])[0])
+
+    def prox_predict_one(pool, dist_atr, side):
+        if prox_m is None or current_state is None:
+            return None
+        q = ml_predict_one(pool) or 0.5
+        return prox_m.predict_one(pool, dist_atr, side, current_state, q)
 
     for tag, side in (("ABOVE (sell-side, upside target)", "above"),
                       ("BELOW (buy-side, downside target)", "below")):
@@ -174,10 +202,14 @@ def main():
                 print(f"      [stratified] P(respect):  {bucket.rate_broad:.0%}  "
                       f"[{bucket.ci_low:.0%}-{bucket.ci_high:.0%}]   "
                       f"strict={bucket.rate_strict:.0%}   bucket={src}  (n={bucket.tested})")
-            ml_p = ml_predict_one(p)
-            if ml_p is not None:
-                print(f"      [ML model ]  P(respect):  {ml_p:.0%}    "
-                      f"(LightGBM + isotonic + bucket-shrinkage, calibrated on OOS)")
+            q = ml_predict_one(p)
+            if q is not None:
+                print(f"      [Q] quality:   P(respect | touched)  = {q:.0%}")
+            t = prox_predict_one(p, dist_atr, side)
+            if t is not None:
+                joint = q * t if q is not None else None
+                joint_str = f"   JOINT = Q × T = {joint:.0%}" if joint is not None else ""
+                print(f"      [T] touch:     P(touched in 50 bars) = {t:.0%}{joint_str}")
 
     # ---- 4. Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
