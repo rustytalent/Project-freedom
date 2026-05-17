@@ -32,6 +32,9 @@ from .tester import test_pools, summarise, PoolResult
 from .optimizer import optimize
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .stratified import StratifiedRespectModel
+from .featurize import Featurizer
+from .ml_model import PoolRespectModel, trainable_mask, labels as ml_labels
+from .directional import evaluate as directional_evaluate, DirectionalReport
 
 
 @dataclass
@@ -74,6 +77,14 @@ class WalkForwardReport:
     oos_pools: List[Pool] = field(default_factory=list)
     oos_results: List[PoolResult] = field(default_factory=list)
     stratified_model: Optional[StratifiedRespectModel] = None
+    # Train-window pool/result pairs across folds; used to TRAIN the ML model (each pool's
+    # outcome was determined by data inside its fold's train window only).
+    train_pools_for_ml: List[Pool] = field(default_factory=list)
+    train_results_for_ml: List[PoolResult] = field(default_factory=list)
+    # ML model fit on train pools across folds, calibrated on OOS pools, then evaluated.
+    ml_model: Optional[PoolRespectModel] = None
+    ml_oos_predictions: Optional[List[float]] = None   # P(respect) for each oos_pools entry
+    directional_report: Optional[DirectionalReport] = None
 
 
 def _fold_windows(base_index: pd.DatetimeIndex, n_folds: int, train_frac: float,
@@ -160,6 +171,13 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.oos_pools.extend(p for p, _ in oos_pairs)
         report.oos_results.extend(r for _, r in oos_pairs)
 
+        # Also collect TRAIN-window pairs to use as ML training data later. These are pools whose
+        # outcome was determined by data inside this fold's train window only (no leak into test).
+        train_pairs = [(p, r) for p, r in zip(pools, results)
+                        if _in_window(p, tr_s, tr_e, horizon_time)]
+        report.train_pools_for_ml.extend(p for p, _ in train_pairs)
+        report.train_results_for_ml.extend(r for _, r in train_pairs)
+
         oos_outs = [1 if r.is_respect else 0 for r in oos_kept if r.is_tested]
         ci_lo, ci_hi = wilson_score_interval(sum(oos_outs), len(oos_outs), ci=0.90)
         report.raw_oos_outcomes.extend(oos_outs)
@@ -202,6 +220,56 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.stratified_model = StratifiedRespectModel.fit(
             report.oos_pools, report.oos_results, min_sample=8,
         )
+
+    # Track 2: ML model. Train on per-fold train-window outcomes, calibrate on OOS, evaluate
+    # directional metrics. Each step is a try because lightgbm/sklearn might not be installed
+    # in slimmer environments.
+    if report.train_pools_for_ml and report.oos_pools:
+        try:
+            base = tf_data["base"]
+            feat = Featurizer(base)
+            train_mask = trainable_mask(report.train_results_for_ml)
+            if train_mask.sum() >= 20:
+                X_train = feat.transform_batch(
+                    [p for p, keep in zip(report.train_pools_for_ml, train_mask) if keep]
+                )
+                y_train = ml_labels(
+                    [r for r, keep in zip(report.train_results_for_ml, train_mask) if keep]
+                )
+                model = PoolRespectModel().fit(X_train, y_train,
+                                                val_frac=0.25, seed=cfg.opt_seed)
+                # Predict on OOS pool set (every OOS pool, decisive or not — for ranking/touch
+                # evaluation; only decisive ones are used for calibration metrics).
+                X_oos = feat.transform_batch(report.oos_pools)
+                # First a pass without bucket calibration so we can fit bucket calibration
+                # on (predicted, actual) for decisive OOS pools only.
+                p_raw = model.predict_raw(X_oos)
+                oos_decisive_mask = trainable_mask(report.oos_results)
+                if oos_decisive_mask.sum() >= 20:
+                    y_oos_dec = ml_labels(
+                        [r for r, m in zip(report.oos_results, oos_decisive_mask) if m]
+                    )
+                    pools_dec = [p for p, m in zip(report.oos_pools, oos_decisive_mask) if m]
+                    p_raw_dec = p_raw[oos_decisive_mask]
+                    model.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=10)
+
+                # Final calibrated predictions on the FULL OOS set (with bucket shrinkage)
+                p_final = model.predict(X_oos, pools=report.oos_pools)
+                report.ml_model = model
+                report.ml_oos_predictions = [float(v) for v in p_final]
+
+                # Directional evaluation: needs the full pool/result/pred arrays and the base df.
+                # `start_after` = first OOS test window start (so the time-loop doesn't sample
+                # times where most OOS pools haven't become available yet).
+                first_oos_start = min((fr.test_start for fr in report.folds), default=None)
+                report.directional_report = directional_evaluate(
+                    report.oos_pools, report.oos_results, p_final, base,
+                    horizon_bars=max(50, cfg.test_horizon_bars // 3),
+                    sample_every=max(20, cfg.test_horizon_bars // 5),
+                    start_after=first_oos_start,
+                )
+        except Exception as e:
+            print(f"[walkforward] ML training skipped: {e}")
 
     return report
 
@@ -252,6 +320,33 @@ def print_report(report: WalkForwardReport, file=None) -> None:
             v = oc.get(k, 0)
             pct = (v / sum(oc.values()) * 100) if oc else 0.0
             print(f"  {k:<22} {v:>5}  ({pct:>4.1f}%)", file=file)
+
+    # ML model fit summary + directional report
+    if report.ml_model is not None:
+        m = report.ml_model
+        print(f"\n[ML model fit]  (LightGBM + isotonic + bucket shrinkage)", file=file)
+        print(f"  train pools:            {m.train_n}", file=file)
+        print(f"  validation pools:       {m.val_n}", file=file)
+        print(f"  base rate:              {m.base_rate:.1%}", file=file)
+        print(f"  val Brier / log-loss:   {m.val_brier:.4f}  /  {m.val_logloss:.4f}", file=file)
+        print(f"  val AUC-ROC:            {m.val_auc:.3f}", file=file)
+        if m.bucket_calib:
+            print(f"\n[ML bucket-level OOS shrinkage]   "
+                  f"(applied on top of global isotonic)", file=file)
+            print(f"  {'TFs':<5} {'factor':<8} {'n_oos':>6} {'emp_rate':>9} {'pull':>6}",
+                  file=file)
+            for (tfb, fam), bc in sorted(m.bucket_calib.items(),
+                                          key=lambda kv: -kv[1].pull_weight):
+                print(f"  {tfb:<5} {fam:<8} {bc.n_oos:>6} {bc.empirical_rate:>8.1%} "
+                      f"{bc.pull_weight:>5.2f}", file=file)
+        if m.feature_names:
+            print(f"\n[ML feature importance — top 10 by gain]", file=file)
+            for name, gain in m.feature_importance(10):
+                print(f"  {name:<32} {gain:>10.1f}", file=file)
+
+    if report.directional_report is not None:
+        from .directional import print_report as _print_dir
+        _print_dir(report.directional_report, file=file)
 
     gap = report.mean_overfit_gap
     if gap > 0.15:

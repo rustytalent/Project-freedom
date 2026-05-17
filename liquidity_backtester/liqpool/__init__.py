@@ -8,6 +8,10 @@ from . import correlation
 from . import walkforward
 from . import stats
 from . import stratified
+from . import regime
+from . import featurize
+from . import ml_model
+from . import directional
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -20,4 +24,8 @@ __all__ = [
     "walkforward",
     "stats",
     "stratified",
+    "regime",
+    "featurize",
+    "ml_model",
+    "directional",
 ]

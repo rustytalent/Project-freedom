@@ -24,6 +24,7 @@ from liqpool.pools import project_to_base
 from liqpool.optimizer import optimize
 from liqpool.walkforward import walk_forward, print_report as print_wf_report
 from liqpool.stratified import print_model as print_stratified_model
+from liqpool.featurize import Featurizer
 
 
 def nearest_untouched(pools, results, current_price, side, k=3):
@@ -139,6 +140,15 @@ def main():
           f"different pools get different probabilities by feature profile.")
 
     model = wf.stratified_model
+    ml = wf.ml_model
+    # Pre-build feature matrix for the final-config pools so we can ML-predict on demand.
+    feat = Featurizer(tf["base"]) if ml is not None else None
+
+    def ml_predict_one(pool):
+        if ml is None or feat is None:
+            return None
+        X = feat.transform_batch([pool])
+        return float(ml.predict(X, pools=[pool])[0])
 
     for tag, side in (("ABOVE (sell-side, upside target)", "above"),
                       ("BELOW (buy-side, downside target)", "below")):
@@ -161,10 +171,13 @@ def main():
             print(f"      drivers:  {', '.join(srcs)}")
             if model is not None:
                 bucket, src = model.predict(p)
-                print(f"      P(respect | this pool):  {bucket.rate_broad:.0%}  "
+                print(f"      [stratified] P(respect):  {bucket.rate_broad:.0%}  "
                       f"[{bucket.ci_low:.0%}-{bucket.ci_high:.0%}]   "
-                      f"strict={bucket.rate_strict:.0%}   "
-                      f"bucket={src}  (OOS n={bucket.tested})")
+                      f"strict={bucket.rate_strict:.0%}   bucket={src}  (n={bucket.tested})")
+            ml_p = ml_predict_one(p)
+            if ml_p is not None:
+                print(f"      [ML model ]  P(respect):  {ml_p:.0%}    "
+                      f"(LightGBM + isotonic + bucket-shrinkage, calibrated on OOS)")
 
     # ---- 4. Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
