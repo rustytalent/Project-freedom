@@ -1,11 +1,14 @@
-"""Walk-forward pool tester.
+"""Walk-forward pool tester (forward-bias-free).
 
-For each pool we look at the future bars on the base TF and classify the outcome:
-  - untouched: price never entered the zone within the horizon
-  - respected: price touched the zone and then reversed >= reaction_atr*ATR within respect_within_bars,
-               *without* closing through the zone
-  - broken: a bar closed beyond the zone by break_close_buffer_atr*ATR
-We also record max excursion through the zone and time-to-touch / time-to-break."""
+For each pool we start scanning the base TF *strictly after* `pool.available_at` — the moment
+the latest contributor would have been visible to a real trader — and classify:
+  - untouched           : price never entered the zone within the horizon
+  - respected           : price touched the zone and then reversed >= reaction_atr*ATR within
+                          respect_within_bars *without* closing through it
+  - broken              : a bar closed beyond the zone by break_close_buffer_atr*ATR
+  - horizon_insufficient: pool became available so close to the data end that we couldn't test it
+                          (excluded from respect/break rates so optimisation isn't fooled)
+We also record max excursion through the zone, time-to-touch / time-to-break, reaction size."""
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import List
@@ -55,19 +58,20 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
     h, l, c = df_base["high"].values, df_base["low"].values, df_base["close"].values
     pos_of_ts = {ts: i for i, ts in enumerate(idx)}
     results: List[PoolResult] = []
+    # Need at least this many forward bars to call a test meaningful.
+    min_horizon = max(cfg.respect_within_bars + 1, 10)
 
     for k, p in enumerate(pools):
-        # Start scanning at the first bar strictly after formation.
-        start = pos_of_ts.get(p.formed_at)
-        if start is None:
-            # Pool formed_at not in base index: find the next bar by searchsorted.
-            start = int(np.searchsorted(idx.values, np.datetime64(p.formed_at)))
-        start = max(start + 1, 0)
+        # Walk from the first bar STRICTLY AFTER the pool became known to a trader. searchsorted
+        # with side='right' returns the index where idx > available_at — the bar after.
+        start = int(np.searchsorted(idx.values, np.datetime64(p.available_at), side="right"))
         end = min(start + cfg.test_horizon_bars, len(df_base))
+        forward_bars = max(0, end - start)
 
-        if start >= end:
+        if forward_bars < min_horizon:
+            # Not enough future data on the base TF to honestly test this pool.
             results.append(PoolResult(k, p.side, p.formed_at, p.price_low, p.price_high, p.score,
-                                       outcome="untouched", tfs=list(p.tfs)))
+                                       outcome="horizon_insufficient", tfs=list(p.tfs)))
             continue
 
         touched_at = None
@@ -141,18 +145,23 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
 def summarise(results: List[PoolResult]) -> dict:
     if not results:
         return {"n": 0, "respect_rate": 0.0, "break_rate": 0.0, "untouched_rate": 0.0,
-                "tested_n": 0, "median_bars_to_touch": None, "avg_score": 0.0}
-    touched = [r for r in results if r.outcome != "untouched"]
-    respected = [r for r in results if r.outcome == "respected"]
-    broken = [r for r in results if r.outcome == "broken"]
-    untouched = [r for r in results if r.outcome == "untouched"]
+                "tested_n": 0, "horizon_insufficient": 0,
+                "median_bars_to_touch": None, "avg_score": 0.0}
+    insufficient = [r for r in results if r.outcome == "horizon_insufficient"]
+    eligible = [r for r in results if r.outcome != "horizon_insufficient"]
+    touched = [r for r in eligible if r.outcome in ("respected", "broken")]
+    respected = [r for r in eligible if r.outcome == "respected"]
+    broken = [r for r in eligible if r.outcome == "broken"]
+    untouched = [r for r in eligible if r.outcome == "untouched"]
     bars_to_touch = [r.bars_to_touch for r in touched if r.bars_to_touch is not None]
     return {
         "n": len(results),
+        "eligible_n": len(eligible),
         "tested_n": len(touched),
+        "horizon_insufficient": len(insufficient),
         "respect_rate": (len(respected) / len(touched)) if touched else 0.0,
         "break_rate": (len(broken) / len(touched)) if touched else 0.0,
-        "untouched_rate": len(untouched) / len(results),
+        "untouched_rate": (len(untouched) / len(eligible)) if eligible else 0.0,
         "median_bars_to_touch": float(np.median(bars_to_touch)) if bars_to_touch else None,
         "avg_score": float(np.mean([r.score for r in results])),
     }

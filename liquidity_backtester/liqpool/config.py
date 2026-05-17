@@ -72,7 +72,8 @@ class Config:
     end: str | None = None
 
     # Higher TFs to compute features on. Their pools get projected onto the base 5m chart.
-    higher_tfs: List[str] = field(default_factory=lambda: ["15min", "60min", "240min", "1D", "1W"])
+    # Default: 5m base + 15m + 1H + 3H + 1D + 1W (the multi-resolution stack).
+    higher_tfs: List[str] = field(default_factory=lambda: ["15min", "60min", "180min", "1D", "1W"])
 
     # Tester: how far forward (in 5m bars) we evaluate each pool, and what counts as respect/break.
     test_horizon_bars: int = 200

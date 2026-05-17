@@ -19,7 +19,9 @@ class Pool:
     side: str                          # "high" (sell-side / supply) or "low" (buy-side / demand)
     price_low: float
     price_high: float
-    formed_at: pd.Timestamp
+    formed_at: pd.Timestamp            # latest contributor formation time (price-wise)
+    available_at: pd.Timestamp         # when the LAST contributor became known to a trader.
+                                       # Tester walks forward strictly after this — no look-ahead.
     contributors: List[LevelCandidate] = field(default_factory=list)
     score: float = 0.0
     tfs: List[str] = field(default_factory=list)
@@ -39,6 +41,7 @@ class Pool:
             "price_high": self.price_high,
             "mid": self.mid,
             "formed_at": self.formed_at,
+            "available_at": self.available_at,
             "score": self.score,
             "tfs": self.tfs,
             "n_contributors": len(self.contributors),
@@ -106,6 +109,8 @@ def cluster_candidates(cands: List[LevelCandidate], merge_tol: float,
                 price_low=float(pool_low),
                 price_high=float(pool_high),
                 formed_at=max(c.ts for c in group),
+                # Honest "available to trader" time = when the LATEST contributor became known.
+                available_at=max(c.known_at for c in group),
                 contributors=list(group),
                 tfs=sorted({c.tf for c in group}),
             ))
@@ -204,16 +209,20 @@ def build_pools(tf_data: Dict[str, pd.DataFrame], cfg: Config) -> List[Pool]:
 
 
 def project_to_base(pools: List[Pool], base_index: pd.DatetimeIndex) -> List[Pool]:
-    """A pool's `formed_at` may come from a higher TF (period start). Clamp to the base index so
-    plotting/testing on the 5m chart always has a valid anchor."""
+    """Drop pools whose `available_at` falls outside the base TF window; clamp `formed_at` so
+    plotting on the 5m chart always has a valid anchor. We drop (not clamp) pools whose
+    `available_at` is after the base data ends, because there's no forward data to test them on
+    and forcing them in would be misleading."""
     if len(base_index) == 0:
         return pools
     bmin, bmax = base_index[0], base_index[-1]
     out = []
     for p in pools:
+        if p.available_at > bmax:
+            continue
         if p.formed_at < bmin:
             p.formed_at = bmin
-        if p.formed_at > bmax:
-            continue
+        if p.available_at < bmin:
+            p.available_at = bmin
         out.append(p)
     return out
