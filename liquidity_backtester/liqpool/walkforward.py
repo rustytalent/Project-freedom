@@ -31,6 +31,7 @@ from .pools import build_pools, project_to_base, Pool
 from .tester import test_pools, summarise, PoolResult
 from .optimizer import optimize
 from .stats import wilson_score_interval, bootstrap_proportion_ci
+from .stratified import StratifiedRespectModel
 
 
 @dataclass
@@ -60,11 +61,19 @@ class WalkForwardReport:
     n_total_oos_pools: int = 0
     n_total_oos_tested: int = 0
     oos_respect_pooled: float = 0.0
+    oos_respect_strict: float = 0.0
     oos_respect_median_fold: float = 0.0
     oos_respect_ci_wilson: Tuple[float, float] = (0.0, 0.0)
     oos_respect_ci_bootstrap: Tuple[float, float] = (0.0, 0.0)
     mean_overfit_gap: float = 0.0
     raw_oos_outcomes: List[int] = field(default_factory=list)
+    oos_outcome_counts: Dict[str, int] = field(default_factory=dict)
+    # OOS (pool, result) pairs accumulated across folds — used to fit the stratified model.
+    # Pools come from each fold's best config (which was trained WITHOUT seeing that pool's
+    # outcome), so this is a clean OOS calibration set.
+    oos_pools: List[Pool] = field(default_factory=list)
+    oos_results: List[PoolResult] = field(default_factory=list)
+    stratified_model: Optional[StratifiedRespectModel] = None
 
 
 def _fold_windows(base_index: pd.DatetimeIndex, n_folds: int, train_frac: float,
@@ -145,10 +154,17 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         ts = summarise(train_kept)
         os_ = summarise(oos_kept)
 
-        oos_outs = [1 if r.outcome == "respected" else 0
-                    for r in oos_kept if r.outcome in ("respected", "broken")]
+        # Save OOS (pool, result) pairs for the stratified-probability model fit later.
+        oos_pairs = [(p, r) for p, r in zip(pools, results)
+                     if _in_window(p, te_s, te_e, horizon_time)]
+        report.oos_pools.extend(p for p, _ in oos_pairs)
+        report.oos_results.extend(r for _, r in oos_pairs)
+
+        oos_outs = [1 if r.is_respect else 0 for r in oos_kept if r.is_tested]
         ci_lo, ci_hi = wilson_score_interval(sum(oos_outs), len(oos_outs), ci=0.90)
         report.raw_oos_outcomes.extend(oos_outs)
+        for r in oos_kept:
+            report.oos_outcome_counts[r.outcome] = report.oos_outcome_counts.get(r.outcome, 0) + 1
 
         report.folds.append(FoldResult(
             fold=fold_idx,
@@ -170,11 +186,21 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.n_total_oos_tested = n_tested
         report.n_total_oos_pools = sum(fr.test_n_pools for fr in report.folds)
         report.oos_respect_pooled = (n_resp / n_tested) if n_tested else 0.0
+        # Strict rate = respected_strong / (respected_strong + broken_strong) across OOS
+        s_resp = report.oos_outcome_counts.get("respected_strong", 0)
+        s_break = report.oos_outcome_counts.get("broken_strong", 0)
+        report.oos_respect_strict = (s_resp / (s_resp + s_break)) if (s_resp + s_break) else 0.0
         fold_rates = [fr.test_respect for fr in report.folds if fr.test_n_tested > 0]
         report.oos_respect_median_fold = float(np.median(fold_rates)) if fold_rates else 0.0
         report.oos_respect_ci_wilson = wilson_score_interval(n_resp, n_tested, ci=0.90)
         report.oos_respect_ci_bootstrap = bootstrap_proportion_ci(outs, ci=0.90, n_boot=2000)
         report.mean_overfit_gap = float(np.mean([fr.overfit_gap for fr in report.folds]))
+
+    # Fit the stratified per-pool probability model on the union of OOS pool sets.
+    if report.oos_pools:
+        report.stratified_model = StratifiedRespectModel.fit(
+            report.oos_pools, report.oos_results, min_sample=8,
+        )
 
     return report
 
@@ -203,15 +229,27 @@ def print_report(report: WalkForwardReport, file=None) -> None:
     print(f"\n[aggregated out-of-sample]", file=file)
     print(f"  OOS pools (eligible):    {report.n_total_oos_pools}", file=file)
     print(f"  OOS pools (tested):      {report.n_total_oos_tested}", file=file)
-    print(f"  OOS respect rate:        {report.oos_respect_pooled:.1%}  "
-          f"  Wilson  90% CI: {report.oos_respect_ci_wilson[0]:.1%} – "
+    print(f"  Respect (broad):         {report.oos_respect_pooled:.1%}  "
+          f"  Wilson 90% CI: {report.oos_respect_ci_wilson[0]:.1%} – "
           f"{report.oos_respect_ci_wilson[1]:.1%}", file=file)
-    print(f"  OOS respect rate:        {report.oos_respect_pooled:.1%}  "
-          f"  Boot    90% CI: {report.oos_respect_ci_bootstrap[0]:.1%} – "
+    print(f"  Respect (broad):         {report.oos_respect_pooled:.1%}  "
+          f"  Boot   90% CI: {report.oos_respect_ci_bootstrap[0]:.1%} – "
           f"{report.oos_respect_ci_bootstrap[1]:.1%}", file=file)
+    print(f"  Respect (strict):        {report.oos_respect_strict:.1%}  "
+          f"(decisive outcomes only: respected_strong vs broken_strong)", file=file)
     print(f"  Median per-fold OOS:     {report.oos_respect_median_fold:.1%}", file=file)
     print(f"  Mean overfit gap:        {report.mean_overfit_gap:+.1%}  "
           f"(train_respect minus OOS — how much in-sample numbers are inflated)", file=file)
+
+    # Outcome texture
+    oc = report.oos_outcome_counts
+    if oc:
+        print(f"\n[OOS outcome breakdown]", file=file)
+        for k in ("respected_strong", "respected_weak", "broken_weak", "broken_strong",
+                  "touched_no_signal", "untouched"):
+            v = oc.get(k, 0)
+            pct = (v / sum(oc.values()) * 100) if oc else 0.0
+            print(f"  {k:<22} {v:>5}  ({pct:>4.1f}%)", file=file)
 
     gap = report.mean_overfit_gap
     if gap > 0.15:

@@ -8,10 +8,16 @@ from .tester import PoolResult
 
 
 def _color_for(p: Pool, outcome: str | None) -> tuple[str, str]:
-    if outcome == "respected":
-        line = "rgba(46,160,67,0.9)"; fill = "rgba(46,160,67,0.18)"
-    elif outcome == "broken":
-        line = "rgba(220,80,60,0.9)"; fill = "rgba(220,80,60,0.15)"
+    if outcome == "respected_strong":
+        line = "rgba(46,160,67,1.0)"; fill = "rgba(46,160,67,0.25)"
+    elif outcome == "respected_weak":
+        line = "rgba(120,180,90,0.85)"; fill = "rgba(120,180,90,0.15)"
+    elif outcome == "broken_strong":
+        line = "rgba(220,80,60,1.0)"; fill = "rgba(220,80,60,0.22)"
+    elif outcome == "broken_weak":
+        line = "rgba(220,140,90,0.85)"; fill = "rgba(220,140,90,0.13)"
+    elif outcome == "touched_no_signal":
+        line = "rgba(180,160,80,0.8)"; fill = "rgba(180,160,80,0.10)"
     elif outcome == "untouched":
         line = "rgba(140,140,160,0.8)"; fill = "rgba(140,140,160,0.10)"
     else:

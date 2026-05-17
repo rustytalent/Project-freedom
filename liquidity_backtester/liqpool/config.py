@@ -75,11 +75,22 @@ class Config:
     # Default: 5m base + 15m + 1H + 3H + 1D + 1W (the multi-resolution stack).
     higher_tfs: List[str] = field(default_factory=lambda: ["15min", "60min", "180min", "1D", "1W"])
 
-    # Tester: how far forward (in 5m bars) we evaluate each pool, and what counts as respect/break.
+    # Tester: how far forward (in 5m bars) we evaluate each pool. The tester now classifies into
+    # tiers via two symmetric thresholds.
     test_horizon_bars: int = 200
-    respect_reaction_atr: float = 1.0   # price must move this many ATRs away from pool after touching
-    respect_within_bars: int = 20       # within this many bars after first touch
-    break_close_buffer_atr: float = 0.10 # close must be beyond pool by this much to count as broken
+
+    # Two-tier reaction / break thresholds (in ATR units).
+    #   weak_reaction_atr  : enough reverse move post-touch to count as a 'mild' respect.
+    #   strong_reaction_atr: definitive rejection.
+    #   weak_break_atr     : close beyond zone by this much = mild break (could be a wick close).
+    #   strong_break_atr   : close beyond zone by this much = decisive break.
+    # The previous 1.0 / 0.10 settings were break-biased (it was easy to "break" but hard to
+    # "respect"); the new defaults are symmetric in weak/weak and strong/strong.
+    weak_reaction_atr: float = 0.5
+    strong_reaction_atr: float = 1.5
+    weak_break_atr: float = 0.20
+    strong_break_atr: float = 0.50
+    respect_within_bars: int = 20
 
     # Minimum confluence score for a pool to be drawn / tested.
     min_pool_score: float = 1.0

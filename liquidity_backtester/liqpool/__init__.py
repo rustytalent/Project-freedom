@@ -7,6 +7,7 @@ from .plotting import plot_chart
 from . import correlation
 from . import walkforward
 from . import stats
+from . import stratified
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -18,4 +19,5 @@ __all__ = [
     "correlation",
     "walkforward",
     "stats",
+    "stratified",
 ]

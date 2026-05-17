@@ -51,12 +51,12 @@ def _stats(pairs: List[Tuple[Pool, PoolResult]]) -> Dict:
     if n == 0:
         return {"n": 0, "tested": 0, "respect": 0.0, "break": 0.0, "untested_rate": 0.0}
     eligible = [(p, r) for p, r in pairs if r.outcome != "horizon_insufficient"]
-    touched = [(p, r) for p, r in eligible if r.outcome in ("respected", "broken")]
+    touched = [(p, r) for p, r in eligible if r.is_tested]
     if not touched:
         return {"n": n, "tested": 0, "respect": 0.0, "break": 0.0,
                 "untested_rate": 1.0 - len(touched) / max(len(eligible), 1)}
-    respected = sum(1 for _, r in touched if r.outcome == "respected")
-    broken = sum(1 for _, r in touched if r.outcome == "broken")
+    respected = sum(1 for _, r in touched if r.is_respect)
+    broken = sum(1 for _, r in touched if r.is_break)
     return {
         "n": n,
         "tested": len(touched),

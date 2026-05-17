@@ -25,7 +25,7 @@ def nearest_untouched(pools, results, current_price: float, side: str, k: int = 
     cand = []
     for i, p in enumerate(pools):
         r = by_idx.get(i)
-        if r is None or r.outcome in ("broken", "horizon_insufficient"):
+        if r is None or r.is_break or r.outcome == "horizon_insufficient":
             continue
         if side == "above" and p.price_low > current_price:
             cand.append((p, r))

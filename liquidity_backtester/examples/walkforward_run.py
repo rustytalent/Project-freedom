@@ -23,6 +23,7 @@ from liqpool import Config, fetch, multi_timeframe, build_pools, test_pools, plo
 from liqpool.pools import project_to_base
 from liqpool.optimizer import optimize
 from liqpool.walkforward import walk_forward, print_report as print_wf_report
+from liqpool.stratified import print_model as print_stratified_model
 
 
 def nearest_untouched(pools, results, current_price, side, k=3):
@@ -30,7 +31,7 @@ def nearest_untouched(pools, results, current_price, side, k=3):
     cand = []
     for i, p in enumerate(pools):
         r = by_idx.get(i)
-        if r is None or r.outcome in ("broken", "horizon_insufficient"):
+        if r is None or r.is_break or r.outcome == "horizon_insufficient":
             continue
         if side == "above" and p.price_low > current_price:
             cand.append((p, r))
@@ -94,6 +95,10 @@ def main():
                        progress=prog)
     print_wf_report(wf)
 
+    # Stratified per-pool probability model fit on OOS data (used below for next-pool predictions)
+    if wf.stratified_model is not None:
+        print_stratified_model(wf.stratified_model)
+
     # ---- 2. Final fit on FULL history (this is the "deployment" config) ----
     print(f"\n--- FINAL FIT on full history  ({args.final_iters} iters) ---")
     final_cfg = copy.deepcopy(cfg)
@@ -117,22 +122,23 @@ def main():
     in_sample = summarise(results)
     _print_summary("FINAL in-sample stats:", in_sample)
 
-    # The honest expected performance for this config in the wild is the OOS CI from walk-forward.
+    # Two honest numbers from walk-forward:
+    #   broad rate  = weak+strong respects vs all breaks
+    #   strict rate = strong respects vs strong breaks ONLY (decisive outcomes)
     print(f"\n  in-sample respect:       {in_sample['respect_rate']:.1%}  (optimistic)")
-    print(f"  honest OOS estimate:     {wf.oos_respect_pooled:.1%}  "
-          f"[{wf.oos_respect_ci_wilson[0]:.1%} – {wf.oos_respect_ci_wilson[1]:.1%}]  ← this is "
-          f"the number to trust")
+    print(f"  OOS respect (broad):     {wf.oos_respect_pooled:.1%}  "
+          f"[{wf.oos_respect_ci_wilson[0]:.1%} – {wf.oos_respect_ci_wilson[1]:.1%}]")
+    print(f"  OOS respect (strict):    {wf.oos_respect_strict:.1%}  "
+          f"(decisive outcomes only — usually the meaningful signal)")
 
     # ---- 3. Next pool ----
     current = float(base["close"].iloc[-1])
     atr_proxy = float((base["high"] - base["low"]).rolling(14).mean().iloc[-1])
     print(f"\nlast close: {current:.2f}   (14-bar avg range ≈ {atr_proxy:.2f})")
-    print(f"each pool's 'expected respect' shown below comes from the OOS CI, NOT the inflated "
-          f"in-sample number.")
+    print(f"each pool's 'expected respect' is looked up in the STRATIFIED OOS model — "
+          f"different pools get different probabilities by feature profile.")
 
-    expected_lo = wf.oos_respect_ci_wilson[0]
-    expected = wf.oos_respect_pooled
-    expected_hi = wf.oos_respect_ci_wilson[1]
+    model = wf.stratified_model
 
     for tag, side in (("ABOVE (sell-side, upside target)", "above"),
                       ("BELOW (buy-side, downside target)", "below")):
@@ -153,8 +159,12 @@ def main():
             print(f"      known_at: {p.available_at}")
             print(f"      TFs:      {tf_list}")
             print(f"      drivers:  {', '.join(srcs)}")
-            print(f"      expected respect (OOS estimate): {expected:.0%}  "
-                  f"[{expected_lo:.0%} – {expected_hi:.0%}]")
+            if model is not None:
+                bucket, src = model.predict(p)
+                print(f"      P(respect | this pool):  {bucket.rate_broad:.0%}  "
+                      f"[{bucket.ci_low:.0%}-{bucket.ci_high:.0%}]   "
+                      f"strict={bucket.rate_strict:.0%}   "
+                      f"bucket={src}  (OOS n={bucket.tested})")
 
     # ---- 4. Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
