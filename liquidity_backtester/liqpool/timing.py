@@ -387,6 +387,7 @@ def _pool_features_for_snapshot(pool: Pool, dist_atr: float, side: str,
 @dataclass
 class ProximityModel:
     horizon: int = 78
+    base_period_seconds: float = 300.0      # inferred and overridden by walkforward at fit time
     feature_names: List[str] = field(default_factory=list)
     train_n: int = 0
     val_n: int = 0
@@ -409,7 +410,10 @@ class ProximityModel:
                 continue
             for (pi, touched, dist, side) in s.pool_touch_labels(self.horizon):
                 pool = pools[pi]
-                pool_feat = _pool_features_for_snapshot(pool, dist, side, float(quality_preds[pi]))
+                pool_feat = _pool_features_for_snapshot(
+                    pool, dist, side, float(quality_preds[pi]),
+                    base_period_seconds=self.base_period_seconds,
+                )
                 rows.append({**s.state, **pool_feat})
                 labels.append(touched)
         if len(rows) < 100:
@@ -464,7 +468,10 @@ class ProximityModel:
 
     def predict_one(self, pool: Pool, dist_atr: float, side: str,
                     state: Dict[str, float], quality_pred: float) -> float:
-        pool_feat = _pool_features_for_snapshot(pool, dist_atr, side, quality_pred)
+        pool_feat = _pool_features_for_snapshot(
+            pool, dist_atr, side, quality_pred,
+            base_period_seconds=self.base_period_seconds,
+        )
         merged = {**state, **pool_feat}
         X = pd.DataFrame([merged], columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
@@ -553,7 +560,10 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
                 continue
             for (pi, touched, dist, side) in s.pool_touch_labels(h):
                 pool = pools[pi]
-                pf = _pool_features_for_snapshot(pool, dist, side, float(quality_preds[pi]))
+                pf = _pool_features_for_snapshot(
+                    pool, dist, side, float(quality_preds[pi]),
+                    base_period_seconds=pm.base_period_seconds,
+                )
                 rows.append({**s.state, **pf})
                 labels.append(touched)
                 pis.append(pi)

@@ -28,12 +28,16 @@ from liqpool.featurize import Featurizer
 from liqpool.timing import StateFeaturizer
 
 
-def nearest_untouched(pools, results, current_price, side, k=3):
-    by_idx = {r.pool_idx: r for r in results}
+def nearest_untouched(pools, results, current_price, side, k=3, now_ts=None):
+    """Top-k highest-score pools on `side` (above/below current price) that haven't been broken,
+    haven't been touched already, and have a testable outcome. `now_ts` lets us exclude pools
+    whose `touched_at` already happened before the most recent bar — those are "consumed" levels
+    that shouldn't appear in a forward-looking watchlist."""
     cand = []
-    for i, p in enumerate(pools):
-        r = by_idx.get(i)
-        if r is None or r.is_break or r.outcome == "horizon_insufficient":
+    for p, r in zip(pools, results):
+        if r.is_break or r.outcome == "horizon_insufficient":
+            continue
+        if now_ts is not None and r.touched_at is not None and r.touched_at <= now_ts:
             continue
         if side == "above" and p.price_low > current_price:
             cand.append((p, r))
@@ -148,13 +152,19 @@ def main():
     feat = Featurizer(tf["base"]) if ml is not None else None
     state_feat = StateFeaturizer(tf["base"]) if dir_m is not None else None
 
-    # Compute the current state vector ONCE (most recent bar).
+    # Compute the current state vector ONCE (most recent bar). The "live" filter MUST match the
+    # training-time filter in timing.generate_snapshots — otherwise the state feature distribution
+    # at predict time differs from training. Training excluded already-touched and already-broken
+    # pools; we do the same here.
     current_state = None
     direction_p_up = None
+    now_ts = tf["base"].index[-1]
     if state_feat is not None:
         j_now = len(tf["base"]) - 1
         live = [p for p, r in zip(pools, results)
-                if p.available_at <= tf["base"].index[j_now] and not r.is_break]
+                if p.available_at <= now_ts
+                and not r.is_break
+                and (r.touched_at is None or r.touched_at > now_ts)]
         current_state = state_feat.features_at(j_now, live)
         if dir_m is not None:
             direction_p_up = dir_m.predict_state(current_state)
@@ -193,7 +203,11 @@ def main():
         pm = prox_models.get(horizon)
         if pm is None or current_state is None:
             return None
-        q = ml_predict_one(pool) or 0.5
+        # Use explicit None check — `or 0.5` would substitute 0.5 when q is exactly 0.0 too,
+        # corrupting the proximity model's quality feature.
+        q = ml_predict_one(pool)
+        if q is None:
+            q = 0.5
         return pm.predict_one(pool, dist_atr, side_str, current_state, q)
 
     # Tradeable filter thresholds — tunable.
@@ -206,7 +220,7 @@ def main():
     # Gather candidates from both sides.
     candidates = []
     for side_str in ("above", "below"):
-        nearest = nearest_untouched(pools, results, current, side_str, k=5)
+        nearest = nearest_untouched(pools, results, current, side_str, k=5, now_ts=now_ts)
         for p, r in nearest:
             dist = (p.mid - current) if side_str == "above" else (current - p.mid)
             dist_atr = dist / max(atr_proxy, 1e-9)

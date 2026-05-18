@@ -329,7 +329,7 @@ def print_report(rpt: DirectionalReport, file=None) -> None:
             print(f"  {d['tf_bucket']:<5} {d['factor']:<8} {d['n']:>5} "
                   f"{d['mean_pred']:>9.1%} {d['actual_rate']:>8.1%} {d['bias']:>+7.1%}", file=file)
 
-    print(f"\n=== Directional Bias Metrics  (sampled every N bars, horizon H bars) ===",
+    print(f"\n=== Directional Bias Metrics  [LEGACY — superseded by Track 3 below] ===",
           file=file)
     print(f"  sample points:          {rpt.n_sample_times}", file=file)
     print(f"  directional accuracy:   {rpt.directional_accuracy:.1%}  "

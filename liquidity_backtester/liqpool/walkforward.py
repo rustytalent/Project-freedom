@@ -119,10 +119,26 @@ def _fold_windows(base_index: pd.DatetimeIndex, n_folds: int, train_frac: float,
     return windows
 
 
-def _in_window(pool: Pool, w_start: pd.Timestamp, w_end: pd.Timestamp,
-               horizon_time: pd.Timedelta) -> bool:
-    """Pool's full forward horizon must lie inside the window — guarantees no data leak."""
-    return w_start <= pool.available_at < (w_end - horizon_time)
+def _safe_end_ts(base_index: pd.DatetimeIndex, w_end_ts: pd.Timestamp,
+                 horizon_bars: int) -> Optional[pd.Timestamp]:
+    """Return the latest `available_at` value such that walking `horizon_bars` forward in BAR
+    INDEX terms stays at or before `w_end_ts`. This is intentionally bar-aware: 150 5m bars on
+    NSE intraday span ~2 calendar days because of overnight gaps, so a calendar-time cutoff like
+    `w_end - bars × period` would leak overnight."""
+    w_end_pos = int(np.searchsorted(base_index.values, np.datetime64(w_end_ts), side="right"))
+    safe_pos = w_end_pos - horizon_bars - 1
+    if safe_pos < 0:
+        return None
+    return base_index[safe_pos]
+
+
+def _in_window(pool: Pool, w_start: pd.Timestamp,
+               w_safe_end: Optional[pd.Timestamp]) -> bool:
+    """Bar-aware window check: pool's available_at must lie in [w_start, w_safe_end].
+    `w_safe_end` is precomputed via _safe_end_ts and accounts for non-uniform bar spacing."""
+    if w_safe_end is None:
+        return False
+    return w_start <= pool.available_at <= w_safe_end
 
 
 def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
@@ -135,8 +151,6 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
     if len(base) < 200:
         raise ValueError(f"need >= 200 base bars for walk-forward, have {len(base)}")
 
-    base_period = pd.Timedelta(pd.Series(base.index).diff().dropna().median())
-    horizon_time = cfg.test_horizon_bars * base_period
     min_train = pd.Timedelta(days=min_train_days)
 
     windows = _fold_windows(base.index, n_folds, train_frac, min_train)
@@ -155,32 +169,36 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         fold_cfg.opt_iterations = iters
         fold_cfg.opt_seed = cfg.opt_seed + fold_idx
 
+        # Precompute bar-aware end timestamps for this fold's train and test windows.
+        tr_safe_end = _safe_end_ts(base.index, tr_e, cfg.test_horizon_bars)
+        te_safe_end = _safe_end_ts(base.index, te_e, cfg.test_horizon_bars)
+
         # Training-only evaluator: score pools fully testable within train (no future-leak)
-        def train_eval(pools, results, _tr_s=tr_s, _tr_e=tr_e):
-            kept = [r for p, r in zip(pools, results) if _in_window(p, _tr_s, _tr_e, horizon_time)]
+        def train_eval(pools, results, _tr_s=tr_s, _tr_safe=tr_safe_end):
+            kept = [r for p, r in zip(pools, results) if _in_window(p, _tr_s, _tr_safe)]
             return summarise(kept)
 
         best_cfg, _ = optimize(tf_data, fold_cfg, evaluator=train_eval)
 
-        # Evaluate best on OOS test slice with the same no-leak rule
+        # Evaluate best on OOS test slice with the same bar-aware no-leak rule.
         pools = project_to_base(build_pools(tf_data, best_cfg), tf_data["base"].index)
         results = test_pools(tf_data["base"], pools, best_cfg)
-        train_kept = [r for p, r in zip(pools, results) if _in_window(p, tr_s, tr_e, horizon_time)]
-        oos_kept = [r for p, r in zip(pools, results) if _in_window(p, te_s, te_e, horizon_time)]
+        train_kept = [r for p, r in zip(pools, results) if _in_window(p, tr_s, tr_safe_end)]
+        oos_kept = [r for p, r in zip(pools, results) if _in_window(p, te_s, te_safe_end)]
 
         ts = summarise(train_kept)
         os_ = summarise(oos_kept)
 
         # Save OOS (pool, result) pairs for the stratified-probability model fit later.
         oos_pairs = [(p, r) for p, r in zip(pools, results)
-                     if _in_window(p, te_s, te_e, horizon_time)]
+                     if _in_window(p, te_s, te_safe_end)]
         report.oos_pools.extend(p for p, _ in oos_pairs)
         report.oos_results.extend(r for _, r in oos_pairs)
 
         # Also collect TRAIN-window pairs to use as ML training data later. These are pools whose
         # outcome was determined by data inside this fold's train window only (no leak into test).
         train_pairs = [(p, r) for p, r in zip(pools, results)
-                        if _in_window(p, tr_s, tr_e, horizon_time)]
+                        if _in_window(p, tr_s, tr_safe_end)]
         report.train_pools_for_ml.extend(p for p, _ in train_pairs)
         report.train_results_for_ml.extend(r for _, r in train_pairs)
 
@@ -295,6 +313,11 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             DIR_HORIZON = 78                            # match "today" planning
             MAX_HORIZON = max(PROX_HORIZONS + [DIR_HORIZON])
             sample_every = max(20, cfg.test_horizon_bars // 6)
+            # Base period in seconds inferred from the actual index — used to normalise pool age.
+            _diffs = pd.Series(base.index).diff().dropna()
+            base_period_seconds = float(_diffs.median().total_seconds()) if len(_diffs) else 300.0
+            if base_period_seconds <= 0:
+                base_period_seconds = 300.0
 
             train_snaps: List = []
             oos_snaps: List = []
@@ -319,7 +342,8 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
 
                 for h in PROX_HORIZONS:
                     try:
-                        pm = ProximityModel(horizon=h).fit(
+                        pm = ProximityModel(horizon=h,
+                                              base_period_seconds=base_period_seconds).fit(
                             train_snaps, unified_pools, quality_preds,
                             seed=cfg.opt_seed + 200 + h,
                         )

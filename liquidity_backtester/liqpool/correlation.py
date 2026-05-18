@@ -168,7 +168,6 @@ def filter_by_required(pools: List[Pool], results: List[PoolResult],
             continue
         if len(set(p.tfs)) < min_distinct_tfs:
             continue
-        # Reindex pool_idx so downstream code that uses it as a key remains consistent.
         out_p.append(p)
         out_r.append(r)
     return out_p, out_r

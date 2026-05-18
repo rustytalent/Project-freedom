@@ -118,7 +118,10 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
     min_horizon = max(cfg.respect_within_bars + 1, 10)
 
     for k, p in enumerate(pools):
-        start = int(np.searchsorted(idx.values, np.datetime64(p.available_at), side="right"))
+        # `known_at` is bar-aligned by construction (close-of-confirmation-bar = open-of-next).
+        # side="left" lands on that next bar — the first one a real-time trader can actually act
+        # on. side="right" would skip it and cost us one valid bar of forward data.
+        start = int(np.searchsorted(idx.values, np.datetime64(p.available_at), side="left"))
         end = min(start + cfg.test_horizon_bars, len(df_base))
         forward_bars = max(0, end - start)
 

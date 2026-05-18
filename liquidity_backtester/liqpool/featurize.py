@@ -48,6 +48,12 @@ class Featurizer:
         self.atr_series = atr(df_base, atr_period).bfill()
         self.median_atr = float(self.atr_series.median())
         self.regime_df = compute_regime_series(df_base)
+        # Base-period in seconds, computed from the actual index. Used for age normalisation.
+        # Defaults to 300s (5m) if we can't infer (e.g., single-bar df).
+        diffs = pd.Series(df_base.index).diff().dropna()
+        self.base_period_seconds = float(diffs.median().total_seconds()) if len(diffs) else 300.0
+        if self.base_period_seconds <= 0:
+            self.base_period_seconds = 300.0
         # Pre-build the canonical feature column list for stable ML input.
         self.feature_names = self._build_feature_names()
 
@@ -88,7 +94,7 @@ class Featurizer:
         med_strength = float(np.median([c.strength for c in ctrs])) if ctrs else 0.0
         earliest_ts = min((c.ts for c in ctrs), default=pool.formed_at)
         if pool.available_at and earliest_ts and pool.available_at >= earliest_ts:
-            age_bars = (pool.available_at - earliest_ts).total_seconds() / (5 * 60)
+            age_bars = (pool.available_at - earliest_ts).total_seconds() / self.base_period_seconds
         else:
             age_bars = 0.0
 

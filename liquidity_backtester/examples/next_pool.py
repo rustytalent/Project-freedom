@@ -18,14 +18,15 @@ from liqpool.pools import project_to_base
 from liqpool.optimizer import optimize
 
 
-def nearest_untouched(pools, results, current_price: float, side: str, k: int = 3):
-    """Top-k highest-score pools on `side` (above/below current price) that the tester classified
-    as 'untouched' or 'respected' (i.e. not broken and not horizon-insufficient)."""
-    by_idx = {r.pool_idx: r for r in results}
+def nearest_untouched(pools, results, current_price: float, side: str, k: int = 3,
+                       now_ts=None):
+    """Top-k highest-score pools on `side` (above/below current price) that are not broken, not
+    horizon-insufficient, and not already touched before `now_ts`."""
     cand = []
-    for i, p in enumerate(pools):
-        r = by_idx.get(i)
-        if r is None or r.is_break or r.outcome == "horizon_insufficient":
+    for p, r in zip(pools, results):
+        if r.is_break or r.outcome == "horizon_insufficient":
+            continue
+        if now_ts is not None and r.touched_at is not None and r.touched_at <= now_ts:
             continue
         if side == "above" and p.price_low > current_price:
             cand.append((p, r))
@@ -137,7 +138,8 @@ def main():
     for tag, side in (("ABOVE (sell-side liquidity, upside target)", "above"),
                       ("BELOW (buy-side liquidity, downside target)", "below")):
         print(f"\n--- NEXT POOL {tag} ---")
-        nearest = nearest_untouched(pools, results, current_price, side, k=3)
+        nearest = nearest_untouched(pools, results, current_price, side, k=3,
+                                     now_ts=base.index[-1])
         if not nearest:
             print(f"  (no qualifying pool {side} current price)")
             continue
