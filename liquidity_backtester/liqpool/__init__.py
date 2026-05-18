@@ -14,6 +14,7 @@ from . import ml_model
 from . import directional
 from . import timing
 from . import multi_asset
+from . import sectors
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -32,4 +33,5 @@ __all__ = [
     "directional",
     "timing",
     "multi_asset",
+    "sectors",
 ]

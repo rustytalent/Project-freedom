@@ -22,7 +22,10 @@ from liqpool.timing import StateFeaturizer
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols",
-                    default="HDFCBANK.NS,ICICIBANK.NS,KOTAKBANK.NS,SBIN.NS,AXISBANK.NS",
+                    default=("HDFCBANK.NS,ICICIBANK.NS,SBIN.NS,AXISBANK.NS,"
+                              "TCS.NS,INFY.NS,HCLTECH.NS,"
+                              "MARUTI.NS,TATAMOTORS.NS,"
+                              "HINDUNILVR.NS"),
                     help="comma-separated NSE symbols")
     ap.add_argument("--base", default="5m")
     ap.add_argument("--period", default="60d")
@@ -307,8 +310,75 @@ def main():
               f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}]   "
               f"Q={c['q']:.1%}  {t_strs}")
 
+    # ---- Sector intelligence (Track 4.5 — basket-aware, money-flow rotation) ----
+    from liqpool.sectors import (
+        sector_of, group_by_sector, compute_sector_metrics,
+        sector_correlation_matrix, detect_rotation, per_sector_oos,
+        serialise_sector_intel,
+    )
+
+    print("\n================ SECTOR INTELLIGENCE ================")
+
+    asset_dfs_for_sectors = {sym: ad.base_df for sym, ad in report.assets.items()}
+    sec_metrics = compute_sector_metrics(asset_dfs_for_sectors)
+    sec_oos = per_sector_oos(report.assets and
+                              [p for ad in report.assets.values() for p in ad.walkforward.oos_pools],
+                              [r for ad in report.assets.values() for r in ad.walkforward.oos_results])
+    rotation = detect_rotation(sec_metrics)
+    corr_df = sector_correlation_matrix(asset_dfs_for_sectors)
+
+    # Per-sector pooled OOS + recent momentum
+    if sec_metrics or sec_oos:
+        print("\n[per-sector basket]")
+        print(f"  {'sector':<10} {'symbols':<28} {'oos_resp':>9} {'strict':>8} "
+              f"{'ret_5d':>8} {'ret_20d':>9} {'ret_60d':>9} {'vol_20d':>9}")
+        all_secs = sorted(set(sec_metrics.keys()) | set(sec_oos.keys()))
+        for sec in all_secs:
+            m = sec_metrics.get(sec, {})
+            o = sec_oos.get(sec, {})
+            syms = ",".join([s.replace(".NS", "") for s in m.get("symbols", o.get("symbols", []))])
+            if len(syms) > 26:
+                syms = syms[:24] + ".."
+            resp = o.get("respect")
+            strict = o.get("strict_respect")
+            resp_s = f"{resp:>8.1%}" if resp is not None else "    n/a"
+            strict_s = f"{strict:>7.1%}" if strict is not None else "    n/a"
+            ret5 = m.get("ret_5d", 0.0)
+            ret20 = m.get("ret_20d", 0.0)
+            ret60 = m.get("ret_60d", 0.0)
+            vol = m.get("vol_20d_annualised", 0.0)
+            print(f"  {sec:<10} {syms:<28} {resp_s} {strict_s} "
+                  f"{ret5:>+7.1%} {ret20:>+8.1%} {ret60:>+8.1%} {vol:>8.1%}")
+
+    # Rotation signal narrative
+    if rotation and rotation.get("narrative"):
+        print(f"\n[money-flow rotation]")
+        print(f"  {rotation['narrative']}")
+        if rotation.get("rotation_in"):
+            print(f"  → bias TOWARD pools in: {', '.join(rotation['rotation_in'])}")
+        if rotation.get("rotation_out"):
+            print(f"  → bias AGAINST pools in: {', '.join(rotation['rotation_out'])}")
+
+    # Correlation matrix (only if >=2 sectors)
+    if corr_df is not None and not corr_df.empty and len(corr_df) >= 2:
+        print(f"\n[sector correlation matrix — daily returns over period]")
+        # Compact print
+        col_w = 9
+        secs = list(corr_df.columns)
+        header = " " * 12 + "".join(f"{s[:7]:>{col_w}}" for s in secs)
+        print("  " + header)
+        for s in secs:
+            row = f"  {s[:10]:<10}" + " " * 2
+            for s2 in secs:
+                row += f"{corr_df.loc[s, s2]:>{col_w}.2f}"
+            print(row)
+
     # ---- Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    sector_intel = serialise_sector_intel(sec_metrics, sec_oos, rotation, corr_df)
+    sector_intel_path = out / "sector_data.json"
+    sector_intel_path.write_text(json.dumps(sector_intel, indent=2, default=str))
+
     summary = {
         "symbols": symbols,
         "total_oos_tested": report.total_oos_tested,
@@ -326,6 +396,7 @@ def main():
     out_json = out / "multi_asset_summary.json"
     out_json.write_text(json.dumps(summary, indent=2, default=str))
     print(f"\nartifacts: {out_json}")
+    print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
 
     # Per-asset chart
     for symbol, ad in report.assets.items():
