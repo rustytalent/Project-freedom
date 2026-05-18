@@ -314,26 +314,92 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
     print(f"  Pooled OOS broad:       {report.pooled_oos_respect:.1%}   "
           f"Wilson CI {report.pooled_oos_ci_wilson[0]:.1%}–"
           f"{report.pooled_oos_ci_wilson[1]:.1%}", file=file)
+    print(f"  Pooled OOS broad:       {report.pooled_oos_respect:.1%}   "
+          f"Boot   CI {report.pooled_oos_ci_bootstrap[0]:.1%}–"
+          f"{report.pooled_oos_ci_bootstrap[1]:.1%}", file=file)
     print(f"  Pooled OOS strict:      {report.pooled_oos_strict:.1%}", file=file)
     print(f"  Mean per-asset overfit gap: {report.mean_overfit_gap:+.1%}", file=file)
 
+    # -- Per-asset breakdown --
+    print(f"\n[per-asset OOS]   (tighter slices, smaller samples per row)", file=file)
+    print(f"  {'symbol':<14} {'oos_n':>6} {'tested':>7} {'respect':>8} {'strict':>8} "
+          f"{'gap':>7}", file=file)
+    for sym, ad in report.assets.items():
+        wf = ad.walkforward
+        outs = wf.raw_oos_outcomes
+        n = len(outs)
+        rate = (sum(outs) / n) if n else 0.0
+        srh = sum(1 for r in wf.oos_results
+                   if r.outcome in ("respected_strong", "swept_and_reclaimed"))
+        sbk = sum(1 for r in wf.oos_results if r.outcome == "broken_strong")
+        strict = srh / (srh + sbk) if (srh + sbk) else 0.0
+        print(f"  {sym:<14} {wf.n_total_oos_pools:>6} {n:>7} {rate:>7.1%} {strict:>7.1%} "
+              f"{wf.mean_overfit_gap:>+6.1%}", file=file)
+
+    # -- Combined OOS outcome breakdown (all assets pooled) --
+    counts: Dict[str, int] = {}
+    for ad in report.assets.values():
+        for k, v in ad.walkforward.oos_outcome_counts.items():
+            counts[k] = counts.get(k, 0) + v
+    if counts:
+        total = sum(counts.values())
+        print(f"\n[combined OOS outcome breakdown]   {total} eligible pools across assets",
+              file=file)
+        for k in ("respected_strong", "swept_and_reclaimed", "respected_weak",
+                  "broken_weak", "broken_strong",
+                  "touched_no_signal", "untouched"):
+            v = counts.get(k, 0)
+            pct = (v / total * 100) if total else 0.0
+            print(f"  {k:<22} {v:>5}  ({pct:>4.1f}%)", file=file)
+
+    # -- Unified ML model fit + calibration --
     if report.unified_ml is not None:
         m = report.unified_ml
         print(f"\n[unified ML quality model]   train n={m.train_n} val n={m.val_n}", file=file)
         print(f"  Val Brier / log-loss:   {m.val_brier:.4f} / {m.val_logloss:.4f}", file=file)
         print(f"  Val AUC-ROC:            {m.val_auc:.3f}", file=file)
         print(f"  Base rate:              {m.base_rate:.1%}", file=file)
-        print(f"\n[unified ML feature importance — top 10]", file=file)
-        for name, gain in m.feature_importance(10):
+        print(f"\n[unified ML feature importance — top 15]", file=file)
+        for name, gain in m.feature_importance(15):
             print(f"  {name:<34} {gain:>10.1f}", file=file)
+        if m.bucket_calib:
+            print(f"\n[unified bucket-level OOS shrinkage]", file=file)
+            print(f"  {'TFs':<5} {'factor':<8} {'n_oos':>6} {'emp_rate':>9} {'pull':>6}",
+                  file=file)
+            for (tfb, fam), bc in sorted(m.bucket_calib.items(),
+                                          key=lambda kv: -kv[1].pull_weight):
+                print(f"  {tfb:<5} {fam:<8} {bc.n_oos:>6} {bc.empirical_rate:>8.1%} "
+                      f"{bc.pull_weight:>5.2f}", file=file)
 
+    # -- Unified Stratified bucket model --
+    if report.unified_stratified is not None:
+        from .stratified import print_model as _print_strat
+        _print_strat(report.unified_stratified, file=file)
+
+    # -- Unified direction + proximity models --
     if report.unified_timing_report is not None:
         tr = report.unified_timing_report
         print(f"\n[unified direction model]  horizon={tr.direction_horizon}b", file=file)
+        print(f"  OOS samples:            {tr.direction_n}", file=file)
+        print(f"  Brier / log-loss:       {tr.direction_brier:.4f} / "
+              f"{tr.direction_logloss:.4f}", file=file)
         print(f"  OOS AUC:                {tr.direction_auc:.3f}", file=file)
         print(f"  Top-quartile-confidence:{tr.direction_top_quartile_acc:.1%}", file=file)
+
         print(f"\n[unified proximity models]", file=file)
         for s in tr.proximity_per_horizon:
             lift_str = "inf" if s.decile_lift == float("inf") else f"{s.decile_lift:.1f}x"
-            print(f"  h={s.horizon:<4} AUC={s.auc:.3f}  base_rate={s.base_rate:.1%}  "
-                  f"decile_lift={lift_str}  n={s.n}", file=file)
+            print(f"  h={s.horizon:<4} AUC={s.auc:.3f}  brier={s.brier:.4f}  "
+                  f"base_rate={s.base_rate:.1%}  decile_lift={lift_str}  n={s.n}", file=file)
+
+        # Feature importances
+        if report.unified_direction is not None:
+            print(f"\n[unified direction model — top 8 features]", file=file)
+            for name, gain in report.unified_direction.feature_importance(8):
+                print(f"  {name:<32} {gain:>10.1f}", file=file)
+        if report.unified_proximity:
+            shortest = min(report.unified_proximity.keys())
+            pm = report.unified_proximity[shortest]
+            print(f"\n[unified proximity h={shortest} — top 8 features]", file=file)
+            for name, gain in pm.feature_importance(8):
+                print(f"  {name:<32} {gain:>10.1f}", file=file)
