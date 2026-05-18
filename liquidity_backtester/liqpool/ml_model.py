@@ -105,13 +105,17 @@ class PoolRespectModel:
             objective="binary",
             metric="binary_logloss",
             learning_rate=0.05,
-            num_leaves=15,
-            max_depth=4,
-            min_data_in_leaf=8,
-            feature_fraction=0.85,
-            bagging_fraction=0.85,
+            # Tighter than initial defaults — with only ~500 train pools, max_depth=4 with
+            # min_data_in_leaf=8 overfit (train AUC 0.83 vs OOS 0.56). Tighter trees and stronger
+            # L2 reduce the gap; accept a small drop in best-case AUC for better generalization.
+            num_leaves=8,
+            max_depth=3,
+            min_data_in_leaf=15,
+            feature_fraction=0.80,
+            bagging_fraction=0.80,
             bagging_freq=5,
-            lambda_l2=2.0,
+            lambda_l2=5.0,
+            lambda_l1=0.5,
             verbose=-1,
             seed=seed,
         )

@@ -258,8 +258,40 @@ def main():
     tradeable.sort(key=ev_score, reverse=True)
     watchlist.sort(key=lambda c: -(c.get("q") or 0.0))
 
-    # ===== BEST SETUP TODAY =====
+    # Touch density today: highest T_today across ALL candidates (tradeable + watchlist). Tells
+    # the user "how active is today's setup-space" at a glance.
+    all_t_today = [c["t_by_h"].get(primary_h) for c in candidates
+                   if primary_h is not None and c["t_by_h"].get(primary_h) is not None]
+    max_t_today = max(all_t_today) if all_t_today else 0.0
+    max_t_2d = max(
+        (c["t_by_h"].get(sorted_horizons[1] if len(sorted_horizons) > 1 else None) or 0.0)
+        for c in candidates
+    ) if candidates and len(sorted_horizons) > 1 else 0.0
+
+    # Day verdict heuristic: TRADE if we have a tradeable setup, WATCH if no setup today but
+    # something looks promising for tomorrow, NO_TRADE if nothing is close.
+    best_ev = ev_score(tradeable[0]) if tradeable else 0.0
+    if tradeable and best_ev >= 0.20:
+        verdict = "TRADE_HIGH_CONFIDENCE"
+    elif tradeable:
+        verdict = "TRADE_CAUTIOUS"
+    elif max_t_today >= 0.02 or max_t_2d >= 0.20:
+        verdict = "WATCH (no setup today; pool likely tradeable in 1-2 days)"
+    else:
+        verdict = "NO_TRADE (no actionable pool within reach)"
+
+    # ===== TODAY'S TRADING PLAN =====
     print("\n================ TODAY'S TRADING PLAN ================")
+    print(f"  Last close:       ₹{current:.2f}   ATR(14):  ₹{atr_proxy:.2f}")
+    if direction_p_up is not None:
+        dir_conf = abs(direction_p_up - 0.5)
+        dir_band = "STRONG" if dir_conf >= DIR_ALIGN_MARGIN else "WEAK"
+        dir_word = "UP" if direction_p_up >= 0.5 else "DOWN"
+        print(f"  Direction:        {direction_p_up:.0%} UP  →  {dir_band} {dir_word}")
+    print(f"  Touch density:    max T_today = {max_t_today:.1%}   "
+          f"max T_2d = {max_t_2d:.1%}")
+    print(f"  VERDICT:          {verdict}")
+    print("------------------------------------------------------")
     if tradeable:
         top_setup = tradeable[0]
         p = top_setup["pool"]; r = top_setup["result"]
