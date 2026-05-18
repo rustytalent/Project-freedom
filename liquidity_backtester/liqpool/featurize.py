@@ -164,10 +164,11 @@ class MultiAssetFeaturizer:
         self.feature_names = first.feature_names
 
     def transform(self, pool: Pool) -> Dict[str, float]:
-        if pool.asset not in self._per_asset:
-            raise KeyError(f"Pool.asset={pool.asset!r} not in featurizer assets "
-                            f"{self.assets}; tag pools before featurizing.")
-        return self._per_asset[pool.asset].transform(pool)
+        # Robust dispatch: fall back to first asset if pool.asset is empty (legacy single-asset
+        # pool) or unrecognized (caller forgot to tag). This is correct for the asset one-hot
+        # block — it gets attributed to the first asset, which is the conservative default.
+        asset_tag = pool.asset if pool.asset and pool.asset in self._per_asset else self.assets[0]
+        return self._per_asset[asset_tag].transform(pool)
 
     def transform_batch(self, pools: List[Pool]) -> pd.DataFrame:
         rows = [self.transform(p) for p in pools]

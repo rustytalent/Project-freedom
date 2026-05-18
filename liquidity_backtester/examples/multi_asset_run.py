@@ -84,6 +84,7 @@ def main():
     TRADEABLE_Q = 0.55
 
     candidates = []        # cross-asset list
+    per_asset_summary = {} # symbol -> {current, atr, direction, top_q, top_t_today}
 
     for symbol, ad in report.assets.items():
         base = ad.base_df
@@ -128,6 +129,8 @@ def main():
         below = sorted([(p, r) for p, r in active if p.price_high < current],
                         key=lambda x: -x[0].score)[:5]
 
+        asset_candidates = []   # candidates for THIS asset, used to populate per_asset_summary
+
         for side_str, pool_list in (("above", above), ("below", below)):
             for p, r in pool_list:
                 dist = (p.mid - current) if side_str == "above" else (current - p.mid)
@@ -142,13 +145,26 @@ def main():
                 bonus = 1.15 if tag == "DIR_ALIGN" else (0.85 if tag == "DIR_FIGHT" else 1.0)
                 t_today = t_by_h.get(primary_h, 0.0)
                 ev = q * t_today * bonus
-                candidates.append({
+                cand = {
                     "symbol": symbol, "pool": p, "result": r, "side": side_str,
                     "dist_atr": dist_atr, "q": q, "t_by_h": t_by_h,
                     "dir_tag": tag, "ev": ev,
                     "current": current, "atr_proxy": atr_proxy,
                     "dir_p_up": dir_p_up,
-                })
+                }
+                candidates.append(cand)
+                asset_candidates.append(cand)
+
+        # Summarise THIS asset's situation (used in the per-asset dashboard table).
+        top_q = max((c["q"] for c in asset_candidates), default=0.0)
+        top_t = max((c["t_by_h"].get(primary_h, 0.0) for c in asset_candidates), default=0.0)
+        top_ev = max((c["ev"] for c in asset_candidates), default=0.0)
+        per_asset_summary[symbol] = {
+            "current": current, "atr_proxy": atr_proxy,
+            "dir_p_up": dir_p_up,
+            "n_candidates": len(asset_candidates),
+            "top_q": top_q, "top_t_today": top_t, "top_ev": top_ev,
+        }
 
     candidates.sort(key=lambda c: -c["ev"])
 
@@ -156,26 +172,70 @@ def main():
                   if c["q"] >= TRADEABLE_Q and c["t_by_h"].get(primary_h, 0.0) >= TRADEABLE_T_TODAY]
     watchlist = [c for c in candidates if c not in tradeable]
 
-    # Day verdict
+    # Day verdict — explicitly track the "best observed T" pool too so the user can see
+    # a high-T pool that failed the Q threshold (the Q/T anti-correlation case).
     best_ev = tradeable[0]["ev"] if tradeable else 0.0
-    max_t_today = max((c["t_by_h"].get(primary_h, 0.0) for c in candidates), default=0.0)
+    max_t_today_cand = max(candidates, key=lambda c: c["t_by_h"].get(primary_h, 0.0)) \
+                       if candidates else None
+    max_t_today = (max_t_today_cand["t_by_h"].get(primary_h, 0.0)
+                   if max_t_today_cand else 0.0)
     max_t_2d = (max((c["t_by_h"].get(PROX_HORIZONS[1], 0.0) for c in candidates), default=0.0)
                 if len(PROX_HORIZONS) > 1 else 0.0)
+
     if tradeable and best_ev >= 0.20:
         verdict = "TRADE_HIGH_CONFIDENCE"
+        verdict_why = f"top setup EV={best_ev:.0%}"
     elif tradeable:
         verdict = "TRADE_CAUTIOUS"
+        verdict_why = f"top setup EV={best_ev:.0%}"
+    elif max_t_today >= 0.30 and max_t_today_cand is not None:
+        verdict = "WATCH"
+        verdict_why = (f"a touch is likely (T_today={max_t_today:.0%} on "
+                       f"{max_t_today_cand['symbol']}) but Q={max_t_today_cand['q']:.0%} "
+                       f"is below the {TRADEABLE_Q:.0%} tradeable threshold")
     elif max_t_today >= 0.02 or max_t_2d >= 0.20:
-        verdict = "WATCH (no setup today; pool likely tradeable in 1-2 days)"
+        verdict = "WATCH"
+        verdict_why = (f"no setup today; max T_today={max_t_today:.0%}, "
+                       f"max T_2d={max_t_2d:.0%} (1-2 day setup possible)")
     else:
-        verdict = "NO_TRADE (no actionable pool across the basket)"
+        verdict = "NO_TRADE"
+        verdict_why = "no actionable pool across the basket"
 
-    print(f"  Assets in basket:   {', '.join(report.assets.keys())}")
-    print(f"  Cross-asset best EV today: {best_ev:.1%}")
-    print(f"  Max T_today across all:    {max_t_today:.1%}    "
-          f"Max T_2d: {max_t_2d:.1%}")
-    print(f"  VERDICT:            {verdict}")
+    print(f"  Assets in basket:           {', '.join(report.assets.keys())}")
+    print(f"  Best tradeable EV today:    {best_ev:.1%}  "
+          f"({'qualified' if tradeable else 'none qualified'})")
+    if max_t_today_cand is not None:
+        sym_t = max_t_today_cand["symbol"]
+        q_t = max_t_today_cand["q"]
+        print(f"  Best observed T_today:      {max_t_today:.1%}  "
+              f"on [{sym_t}] @ ₹{max_t_today_cand['pool'].mid:.2f}  "
+              f"(Q={q_t:.0%}, dir={max_t_today_cand['dir_tag']})")
+    print(f"  Max T_2d (any pool):        {max_t_2d:.1%}")
+    print(f"  VERDICT:                    {verdict}")
+    print(f"  Why:                        {verdict_why}")
     print("----------------------------------------------------------")
+
+    # Per-asset compact dashboard
+    print("\n[per-asset dashboard]")
+    print(f"  {'symbol':<14} {'price':>10} {'P(up)':>7} {'bias':>10} "
+          f"{'top_Q':>7} {'top_T_today':>13} {'top_EV':>8}")
+    for sym, s in per_asset_summary.items():
+        p_up = s["dir_p_up"]
+        if p_up is None:
+            p_up_str = "n/a"
+            bias_str = "n/a"
+        else:
+            p_up_str = f"{p_up:.0%}"
+            if p_up >= 0.5 + DIR_ALIGN_MARGIN:
+                bias_str = "STRONG UP"
+            elif p_up <= 0.5 - DIR_ALIGN_MARGIN:
+                bias_str = "STRONG DOWN"
+            elif p_up >= 0.5:
+                bias_str = "weak up"
+            else:
+                bias_str = "weak down"
+        print(f"  {sym:<14} ₹{s['current']:>8.2f}  {p_up_str:>6}  {bias_str:>10} "
+              f"{s['top_q']:>6.0%} {s['top_t_today']:>12.0%} {s['top_ev']:>7.0%}")
 
     if tradeable:
         top = tradeable[0]
@@ -216,8 +276,30 @@ def main():
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}]   "
                   f"Q={c['q']:.1%}  {t_strs}  EV={c['ev']:.1%}")
 
-    print(f"\n--- WATCH LIST  (top 10 by Q, not tradeable today) ---")
-    for c in sorted(watchlist, key=lambda x: -x["q"])[:10]:
+    # IMMINENT TOUCH list: pools likely to be touched today regardless of quality. Surfaces
+    # the high-T-but-low-Q pools that the Q-sorted watch list hides. These are warnings rather
+    # than trades — "price is coming here, decide what to do when it arrives".
+    IMMINENT_THRESHOLD = 0.20
+    imminent = sorted(
+        [c for c in candidates if c["t_by_h"].get(primary_h, 0.0) >= IMMINENT_THRESHOLD],
+        key=lambda x: -x["t_by_h"].get(primary_h, 0.0),
+    )
+    print(f"\n--- IMMINENT TOUCH  (T_today ≥ {IMMINENT_THRESHOLD:.0%}, any Q) ---")
+    if not imminent:
+        print(f"  (no pool likely to be touched today across the basket)")
+    else:
+        for c in imminent[:10]:
+            p = c["pool"]
+            side_lbl = "BELOW" if c["side"] == "below" else "ABOVE"
+            t_strs = "  ".join(f"T_h{h}={c['t_by_h'].get(h, 0.0):.1%}" for h in PROX_HORIZONS)
+            q_tag = "Q-OK" if c["q"] >= TRADEABLE_Q else "Q-LOW"
+            print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f}  "
+                  f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, {q_tag}]   "
+                  f"Q={c['q']:.1%}  {t_strs}")
+
+    print(f"\n--- QUALITY WATCH  (top 10 by Q, T_today below tradeable threshold) ---")
+    for c in sorted([c for c in watchlist if c["t_by_h"].get(primary_h, 0.0) < TRADEABLE_T_TODAY],
+                     key=lambda x: -x["q"])[:10]:
         p = c["pool"]
         side_lbl = "BELOW" if c["side"] == "below" else "ABOVE"
         t_strs = "  ".join(f"T_h{h}={c['t_by_h'].get(h, 0.0):.1%}" for h in PROX_HORIZONS)
