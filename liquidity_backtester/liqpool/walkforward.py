@@ -146,7 +146,12 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
                  iters_per_fold: Optional[int] = None,
                  min_train_days: int = 10,
                  progress: Optional[Callable[[int, int, str], None]] = None,
+                 train_models: bool = True,
                  ) -> WalkForwardReport:
+    """Walk-forward CV over folds, plus (optionally) train per-asset ML/direction/proximity
+    models on the collected data. Multi-asset runs set `train_models=False` and train ONE
+    unified set of models on the combined pool sets across all assets — that's where the data-
+    multiplier lift comes from."""
     base = tf_data["base"]
     if len(base) < 200:
         raise ValueError(f"need >= 200 base bars for walk-forward, have {len(base)}")
@@ -238,6 +243,10 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.oos_respect_ci_wilson = wilson_score_interval(n_resp, n_tested, ci=0.90)
         report.oos_respect_ci_bootstrap = bootstrap_proportion_ci(outs, ci=0.90, n_boot=2000)
         report.mean_overfit_gap = float(np.mean([fr.overfit_gap for fr in report.folds]))
+
+    if not train_models:
+        # Multi-asset caller will train unified models on the combined pool sets across assets.
+        return report
 
     # Fit the stratified per-pool probability model on the union of OOS pool sets.
     if report.oos_pools:

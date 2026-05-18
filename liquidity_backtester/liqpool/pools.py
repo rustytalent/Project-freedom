@@ -25,6 +25,7 @@ class Pool:
     contributors: List[LevelCandidate] = field(default_factory=list)
     score: float = 0.0
     tfs: List[str] = field(default_factory=list)
+    asset: str = ""                    # symbol this pool belongs to (Track 4 multi-asset)
 
     @property
     def mid(self) -> float:

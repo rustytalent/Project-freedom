@@ -13,6 +13,7 @@ from . import featurize
 from . import ml_model
 from . import directional
 from . import timing
+from . import multi_asset
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -30,4 +31,5 @@ __all__ = [
     "ml_model",
     "directional",
     "timing",
+    "multi_asset",
 ]
