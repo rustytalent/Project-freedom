@@ -247,21 +247,21 @@ def main():
     # ===== BEST SETUP TODAY =====
     print("\n================ TODAY'S TRADING PLAN ================")
     if tradeable:
-        best = tradeable[0]
-        p = best["pool"]; r = best["result"]
+        top_setup = tradeable[0]
+        p = top_setup["pool"]; r = top_setup["result"]
         srcs = sorted({c.source.split('@')[0] for c in p.contributors})
-        side_label = "BELOW (buy)" if best["side"] == "below" else "ABOVE (sell)"
-        t_today = best["t_by_h"].get(primary_h)
-        q = best["q"]
+        side_label = "BELOW (buy)" if top_setup["side"] == "below" else "ABOVE (sell)"
+        t_today = top_setup["t_by_h"].get(primary_h)
+        q = top_setup["q"]
         print(f">>> BEST SETUP TODAY <<<")
         print(f"  Pool ₹{p.price_low:.2f}-{p.price_high:.2f}  mid ₹{p.mid:.2f}  "
               f"[{side_label}]")
-        print(f"  Distance: {best['dist_atr']:.2f} ATRs from current ₹{current:.2f}  "
-              f"({best['dir_tag']})")
+        print(f"  Distance: {top_setup['dist_atr']:.2f} ATRs from current ₹{current:.2f}  "
+              f"({top_setup['dir_tag']})")
         print(f"  Quality Q = {q:.1%}   Touch T_today = {t_today:.1%}   "
               f"EV(today) ≈ {q * t_today:.1%}")
         print(f"  Drivers: {', '.join(srcs)}   |  TFs: {'+'.join(p.tfs)}")
-        if best["side"] == "below":
+        if top_setup["side"] == "below":
             print(f"  Action: LIMIT BUY at ₹{p.price_high:.2f}, stop "
                   f"₹{p.price_low - 0.5 * atr_proxy:.2f}, "
                   f"target ₹{p.price_high + 2 * atr_proxy:.2f}+")
