@@ -158,9 +158,14 @@ def compute_sector_metrics(asset_dfs: Dict[str, pd.DataFrame]) -> Dict[str, Dict
             continue
 
         def cum(n: int) -> float:
-            if len(ret) < n:
+            # Use whatever rows we have. Resampling 60 days of 5m data gives ~59 daily returns
+            # (one less than the bar count). The previous strict `if len(ret) < n: return 0.0`
+            # check meant ret_60d returned 0% whenever the data window was exactly 60 days —
+            # a silent bug that broke the rotation signal across most sectors.
+            n_actual = min(n, len(ret))
+            if n_actual < 2:
                 return 0.0
-            return float((1.0 + ret.iloc[-n:]).prod() - 1.0)
+            return float((1.0 + ret.iloc[-n_actual:]).prod() - 1.0)
 
         out[sector] = {
             "symbols": by_sector.get(sector, []),

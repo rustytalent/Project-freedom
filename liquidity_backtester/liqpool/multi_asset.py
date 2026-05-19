@@ -53,6 +53,10 @@ class AssetData:
 @dataclass
 class MultiAssetReport:
     assets: Dict[str, AssetData] = field(default_factory=dict)
+    # Symbols that were dropped during fetch (either failed completely or fell back to
+    # synthetic data — we don't want synthetic data polluting the unified ML training).
+    skipped_symbols: List[str] = field(default_factory=list)
+    skip_reasons: Dict[str, str] = field(default_factory=dict)
     # Combined OOS pool/result population across assets
     total_train_pools: int = 0
     total_oos_pools: int = 0
@@ -96,10 +100,29 @@ def run_multi_asset(symbols: List[str], cfg: Config,
     overfit_gaps: List[float] = []
     asset_dfs: Dict[str, pd.DataFrame] = {}
 
+    # Synthetic-data sentinel: the _synthetic() fallback in data.py always builds an index
+    # starting at 2024-01-02 09:30:00. If we see that timestamp at base.index[0], the asset
+    # didn't have real data and was filled in with random-walk. Skip those — mixing synthetic
+    # data into the unified training would pollute the model AND corrupt cross-asset sector
+    # metrics (date-range mismatches give wrong correlation matrices).
+    _SYNTHETIC_SENTINEL = pd.Timestamp("2024-01-02 09:30:00")
+
     for symbol in symbols:
         if progress:
             progress(symbol, "fetch")
-        base = fetch(symbol, cfg.base_interval, cfg.period)
+        try:
+            base = fetch(symbol, cfg.base_interval, cfg.period)
+        except Exception as e:
+            print(f"  [{symbol}] SKIPPED — fetch failed: {e}")
+            report.skipped_symbols.append(symbol)
+            report.skip_reasons[symbol] = f"fetch failed: {e}"
+            continue
+        if len(base) > 0 and base.index[0] == _SYNTHETIC_SENTINEL:
+            print(f"  [{symbol}] SKIPPED — yfinance returned no data; "
+                  f"refusing to train on synthetic fallback (would pollute basket)")
+            report.skipped_symbols.append(symbol)
+            report.skip_reasons[symbol] = "yfinance returned no data; would have used synthetic"
+            continue
         tf = multi_timeframe(base, cfg.higher_tfs)
         asset_dfs[symbol] = base
 
@@ -146,7 +169,14 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         )
 
     if not report.assets:
-        raise ValueError("no assets ran successfully")
+        msg = ("no assets ran successfully — all symbols either failed to fetch or fell back "
+                "to synthetic data. Check yfinance connectivity and symbol spelling.")
+        if report.skipped_symbols:
+            msg += f"\nSkipped: " + ", ".join(
+                f"{s} ({report.skip_reasons.get(s, 'unknown')})"
+                for s in report.skipped_symbols
+            )
+        raise ValueError(msg)
 
     # ----------------------------------------------------------------------
     # Combined OOS stats

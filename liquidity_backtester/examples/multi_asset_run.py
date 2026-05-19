@@ -72,6 +72,12 @@ def main():
                               min_train_days=args.min_train_days,
                               progress=prog)
 
+    if report.skipped_symbols:
+        print("\n⚠  WARNING — assets dropped from run:")
+        for sym in report.skipped_symbols:
+            print(f"   - {sym}: {report.skip_reasons.get(sym, 'unknown')}")
+        print(f"   (running with {len(report.assets)} of {len(symbols)} requested assets)")
+
     print_multi_asset_summary(report)
 
     # ---- Cross-asset prediction at "now" ----
