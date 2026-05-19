@@ -15,6 +15,10 @@ from . import directional
 from . import timing
 from . import multi_asset
 from . import sectors
+from . import journal as journal_module
+from . import sizing
+from . import drift
+# broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
     "Config", "FactorWeights", "DetectionParams",
@@ -34,4 +38,7 @@ __all__ = [
     "timing",
     "multi_asset",
     "sectors",
+    "journal_module",
+    "sizing",
+    "drift",
 ]
