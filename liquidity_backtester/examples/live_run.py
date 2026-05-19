@@ -34,7 +34,9 @@ from liqpool import Config
 from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.timing import StateFeaturizer
-from liqpool.sectors import sector_of
+from liqpool.sectors import (sector_of, per_asset_reliability, reliability_multiplier,
+                              sector_momentum_alignment, compute_sector_metrics,
+                              detect_rotation)
 from liqpool.journal import TradeJournal
 from liqpool.sizing import SizingConfig, AccountState, size_setup, format_sizing_line
 from liqpool.drift import (DriftThresholds, extract_drift_metrics, check_drift,
@@ -117,13 +119,24 @@ def cmd_morning(args):
                                      severity=a["severity"])
         return
 
-    # Compute current state and rank candidates cross-asset (same logic as multi_asset_run.py)
+    # Compute current state and rank candidates cross-asset.
     primary_h = sorted(report.unified_proximity.keys())[0] if report.unified_proximity else None
     TRADEABLE_T_TODAY = args.min_t
     TRADEABLE_Q = args.min_q
     DIR_ALIGN_MARGIN = 0.10
 
+    # Interpretation inputs — precompute once for the whole run.
+    asset_reliability = per_asset_reliability(report)
+    asset_dfs_now = {s: ad.base_df for s, ad in report.assets.items()}
+    sector_metrics = compute_sector_metrics(asset_dfs_now)
+    rotation = detect_rotation(sector_metrics)
+    pooled_baseline = max(report.pooled_oos_respect, 0.30)
+
+    # Per-asset dashboard — restored from multi_asset_run.py because seeing each asset's
+    # state side-by-side is the most useful single view.
+    per_asset_view = {}
     candidates = []
+
     for symbol, ad in report.assets.items():
         if not ad.final_pools:
             continue
@@ -157,6 +170,7 @@ def cmd_morning(args):
         below = sorted([(p, r) for p, r in active if p.price_high < current],
                         key=lambda x: -x[0].score)[:5]
 
+        asset_top_ev = 0.0
         for side_str, plist in (("above", above), ("below", below)):
             for p, r in plist:
                 dist_atr = (abs(p.mid - current)) / max(atr_proxy, 1e-9)
@@ -165,20 +179,76 @@ def cmd_morning(args):
                 t_today = (report.unified_proximity[primary_h].predict_one(
                     p, dist_atr, side_str, current_state, q) if primary_h is not None else 0.0)
                 tag = dir_tag(side_str)
-                bonus = 1.15 if tag == "DIR_ALIGN" else (0.85 if tag == "DIR_FIGHT" else 1.0)
-                ev = q * t_today * bonus
+                bonus_dir = (1.15 if tag == "DIR_ALIGN"
+                              else (0.85 if tag == "DIR_FIGHT" else 1.0))
+
+                # NEW: reliability multiplier — per-asset historical OOS respect vs basket avg.
+                # TCS at 34% (vs basket 44%) → 0.77; HDFCBANK at 62% → 1.40 (capped at 1.5).
+                rel_mult = reliability_multiplier(
+                    asset_reliability.get(symbol, pooled_baseline), pooled_baseline,
+                    cap_low=0.5, cap_high=1.5,
+                )
+
+                # NEW: sector momentum alignment — a sell setup in a sector with positive 5d
+                # return fights the tape (0.85); a buy setup in a positive sector aligns (1.15).
+                sec = sector_of(symbol)
+                trade_side_word = "buy" if side_str == "below" else "sell"
+                sec_mult = sector_momentum_alignment(sector_metrics, sec, trade_side_word)
+
+                ev = q * t_today * bonus_dir * rel_mult * sec_mult
                 candidates.append({
                     "symbol": symbol, "side": side_str, "pool": p, "result": r,
                     "dist_atr": dist_atr, "q": q, "t_today": t_today,
                     "dir_tag": tag, "dir_p_up": dir_p_up, "ev": ev,
                     "current": current, "atr_proxy": atr_proxy,
-                    "sector": sector_of(symbol),
+                    "sector": sec,
+                    "reliability": asset_reliability.get(symbol, pooled_baseline),
+                    "reliability_mult": rel_mult,
+                    "sector_mult": sec_mult,
+                    "dir_mult": bonus_dir,
+                    "ev_raw_qtimes_t": q * t_today,
+                    "current_state": current_state,
                 })
+                asset_top_ev = max(asset_top_ev, ev)
+
+        per_asset_view[symbol] = {
+            "current": current, "atr_proxy": atr_proxy,
+            "dir_p_up": dir_p_up, "sector": sector_of(symbol),
+            "reliability": asset_reliability.get(symbol, pooled_baseline),
+            "top_ev": asset_top_ev,
+        }
 
     tradeable = sorted([c for c in candidates
                           if c["q"] >= TRADEABLE_Q and c["t_today"] >= TRADEABLE_T_TODAY],
                          key=lambda c: -c["ev"])
 
+    # ----- Per-asset dashboard -----
+    print("\n================ PER-ASSET DASHBOARD ================")
+    print(f"  {'symbol':<14} {'sector':<9} {'price':>10} {'P(up)':>7} {'bias':>11} "
+          f"{'oos_resp':>9} {'rel_mult':>9} {'top_ev':>8}")
+    for sym, v in per_asset_view.items():
+        p_up = v["dir_p_up"]
+        if p_up is None:
+            p_up_str = "n/a"; bias = "n/a"
+        else:
+            p_up_str = f"{p_up:.0%}"
+            if p_up >= 0.5 + DIR_ALIGN_MARGIN:    bias = "STRONG UP"
+            elif p_up <= 0.5 - DIR_ALIGN_MARGIN:  bias = "STRONG DOWN"
+            elif p_up >= 0.5:                      bias = "weak up"
+            else:                                   bias = "weak down"
+        rel = v["reliability"]
+        rel_mult = reliability_multiplier(rel, pooled_baseline)
+        rel_flag = "⚠ " if rel_mult < 0.85 else ""
+        print(f"  {sym:<14} {v['sector']:<9} ₹{v['current']:>8.2f} {p_up_str:>6} "
+              f"{bias:>11} {rel:>8.0%} {rel_flag}{rel_mult:>6.2f}× "
+              f"{v['top_ev']:>7.0%}")
+
+    if rotation and rotation.get("narrative"):
+        print(f"\n[market flow]  {rotation['narrative']}")
+
+    # ----- Tradeable setups (with diversification across sectors) -----
+    # Diversification: from the EV-sorted tradeable list, pick at most ONE setup per sector
+    # for the "BEST OF DAY" highlight. Other setups still listed but flagged "additional".
     print("\n================ TODAY'S TRADEABLE SETUPS (sized) ================")
     if not tradeable:
         print("  No tradeable setups today.")
@@ -249,6 +319,51 @@ def cmd_morning(args):
         print(f"     entry=₹{entry:.2f}  stop=₹{stop:.2f}  target=₹{target:.2f}  "
               f"R:R={(abs(target-entry)/abs(entry-stop)):.1f}:1")
         print(format_sizing_line(setup_dict, decision))
+
+        # ---- Interpretation card: WHY does the model say what it says? ----
+        # EV chain breakdown
+        print(f"     EV chain: Q={c['q']:.2f} × T={c['t_today']:.2f} × "
+              f"dir={c['dir_mult']:.2f} × reliab={c['reliability_mult']:.2f} "
+              f"× sector={c['sector_mult']:.2f} = {c['ev']:.0%}")
+        # Reliability badge
+        rel = c["reliability"]
+        if c["reliability_mult"] < 0.85:
+            print(f"     ⚠ Reliability: {c['symbol']} OOS respect {rel:.0%} vs basket "
+                  f"{pooled_baseline:.0%} → setup down-weighted ×{c['reliability_mult']:.2f}")
+        elif c["reliability_mult"] > 1.15:
+            print(f"     ✓ Reliability: {c['symbol']} OOS respect {rel:.0%} vs basket "
+                  f"{pooled_baseline:.0%} → setup boosted ×{c['reliability_mult']:.2f}")
+        # Quality drivers — top features that pushed Q up or down for THIS pool
+        try:
+            X_for_pool = report.unified_featurizer.transform_batch([p])
+            qexp = report.unified_ml.explain_prediction(X_for_pool, top_k=4)[0]
+            print(f"     Quality drivers (Q top features in logit space):")
+            for fname, fcontrib in qexp["top_features"]:
+                sign = "+" if fcontrib >= 0 else "−"
+                print(f"        {sign} {fname:<30}  {fcontrib:+.3f}")
+        except Exception as e:
+            pass
+        # Direction drivers
+        if report.unified_direction is not None and c["dir_p_up"] is not None:
+            try:
+                dexp = report.unified_direction.explain_state(c["current_state"], top_k=3)
+                bias = "UP" if c["dir_p_up"] >= 0.5 else "DOWN"
+                print(f"     Direction drivers (P(up)={c['dir_p_up']:.0%} {bias}):")
+                for fname, fcontrib in dexp["top_features"]:
+                    sign = "+" if fcontrib >= 0 else "−"
+                    print(f"        {sign} {fname:<30}  {fcontrib:+.3f}")
+            except Exception as e:
+                pass
+        # Sector context summary
+        sec_m = sector_metrics.get(c["sector"], {})
+        if sec_m:
+            r5 = sec_m.get("ret_5d", 0.0)
+            r60 = sec_m.get("ret_60d", 0.0)
+            sec_status = ("LEAD" if c["sector"] in (rotation or {}).get("rotation_in", [])
+                           else "LAG" if c["sector"] in (rotation or {}).get("rotation_out", [])
+                           else "FLAT")
+            print(f"     Sector context: {c['sector']} 5d={r5:+.1%} 60d={r60:+.1%} → "
+                  f"{sec_status}; sector_mult={c['sector_mult']:.2f}")
 
         alert_entry = journal.log_alert(
             symbol=c["symbol"], pool_id=f"{c['symbol']}_{p.formed_at}",

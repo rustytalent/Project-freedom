@@ -292,6 +292,54 @@ def per_sector_oos(oos_pools, oos_results) -> Dict[str, Dict]:
 # Helpers for runtime serialisation (Track 5 will ingest sector_data.json)
 # ---------------------------------------------------------------------------
 
+def per_asset_reliability(report, pooled_floor: float = 0.30) -> Dict[str, float]:
+    """For each asset in the report, return its OOS broad respect rate (a 'reliability score').
+    Used downstream by live_run.py to multiply EV: a stock with 33% OOS gets down-weighted
+    vs the basket average, a stock with 62% gets up-weighted.
+
+    Floors at `pooled_floor` so an asset with 0 tested pools doesn't kill all its setups.
+    """
+    out: Dict[str, float] = {}
+    for sym, ad in report.assets.items():
+        outs = ad.walkforward.raw_oos_outcomes
+        if not outs:
+            out[sym] = pooled_floor
+            continue
+        out[sym] = max(pooled_floor, float(sum(outs) / len(outs)))
+    return out
+
+
+def reliability_multiplier(asset_reliability: float, basket_baseline: float,
+                            cap_low: float = 0.5, cap_high: float = 1.5) -> float:
+    """Convert raw reliability into an EV multiplier, capped to [cap_low, cap_high].
+    1.0 means 'asset is exactly at basket avg' — neutral weight."""
+    if basket_baseline <= 0:
+        return 1.0
+    raw = asset_reliability / basket_baseline
+    return max(cap_low, min(cap_high, raw))
+
+
+def sector_momentum_alignment(sector_metrics: Dict[str, Dict], sector: str,
+                                trade_side: str) -> float:
+    """Multiplier that boosts trades aligned with sector momentum and penalises ones against it.
+
+    `trade_side`: "buy" for setups below current price (long bias), "sell" for above (short bias).
+    Sector ret_5d > 0 + buy trade → momentum-aligned. Returns 1.15.
+    Sector ret_5d < 0 + sell trade → momentum-aligned. Returns 1.15.
+    Aligned against sector momentum → 0.85.
+    Within ±0.5% → neutral 1.0 (avoid noise).
+    """
+    m = sector_metrics.get(sector)
+    if not m:
+        return 1.0
+    ret_5d = float(m.get("ret_5d", 0.0))
+    if abs(ret_5d) < 0.005:
+        return 1.0
+    sector_bullish = ret_5d > 0
+    trade_bullish = (trade_side == "buy")
+    return 1.15 if sector_bullish == trade_bullish else 0.85
+
+
 def serialise_sector_intel(sector_metrics: Dict[str, Dict],
                            sector_oos: Dict[str, Dict],
                            rotation: Dict,

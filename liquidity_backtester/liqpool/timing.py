@@ -355,6 +355,22 @@ class DirectionModel:
         gains = self._gbm.feature_importance(importance_type="gain")
         return sorted(zip(self.feature_names, gains), key=lambda x: -x[1])[:top_k]
 
+    def explain_state(self, state: Dict[str, float], top_k: int = 5) -> Dict:
+        """Per-prediction feature contribution explanation. See PoolRespectModel.explain_prediction."""
+        if not hasattr(self, "_gbm"):
+            return {}
+        X = pd.DataFrame([state], columns=self.feature_names).fillna(0.0).values
+        contribs = self._gbm.predict(X, pred_contrib=True,
+                                       num_iteration=self._gbm.best_iteration)[0]
+        base = float(contribs[-1])
+        feat = list(zip(self.feature_names, [float(v) for v in contribs[:-1]]))
+        feat.sort(key=lambda kv: -abs(kv[1]))
+        return {
+            "base_logit": base,
+            "raw_prediction_logit": float(contribs.sum()),
+            "top_features": feat[:top_k],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Proximity model — horizon-specific

@@ -195,3 +195,33 @@ class PoolRespectModel:
         gains = self._gbm.feature_importance(importance_type="gain")
         pairs = sorted(zip(self.feature_names, gains), key=lambda x: -x[1])
         return pairs[:top_k]
+
+    def explain_prediction(self, X: pd.DataFrame, top_k: int = 5) -> List[Dict]:
+        """Per-row feature contribution explanations (SHAP-like via LightGBM's pred_contrib).
+
+        For each row in X, returns a dict:
+            {
+              "base_logit": <model prior in logit space>,
+              "raw_prediction_logit": <pre-isotonic prediction>,
+              "top_features": [(feature_name, logit_contribution), ...]
+            }
+        Contributions are in LOGIT space (before sigmoid + isotonic). Positive = pushed
+        prediction up; negative = pushed it down. Sum of all contributions ≈ raw_prediction_logit.
+        Top features are sorted by |contribution| so both pro and con drivers surface."""
+        if not hasattr(self, "_gbm"):
+            return []
+        X_arr = X[self.feature_names].values
+        contribs = self._gbm.predict(X_arr, pred_contrib=True,
+                                       num_iteration=self._gbm.best_iteration)
+        # contribs shape: (n, n_features + 1). Last column is the base value.
+        out = []
+        for row in contribs:
+            base = float(row[-1])
+            feat_contribs = list(zip(self.feature_names, [float(v) for v in row[:-1]]))
+            feat_contribs.sort(key=lambda kv: -abs(kv[1]))
+            out.append({
+                "base_logit": base,
+                "raw_prediction_logit": float(row.sum()),
+                "top_features": feat_contribs[:top_k],
+            })
+        return out
