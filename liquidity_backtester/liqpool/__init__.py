@@ -18,6 +18,7 @@ from . import sectors
 from . import journal as journal_module
 from . import sizing
 from . import drift
+from . import event_engine
 # broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "journal_module",
     "sizing",
     "drift",
+    "event_engine",
 ]

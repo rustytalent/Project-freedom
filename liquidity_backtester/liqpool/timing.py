@@ -342,12 +342,17 @@ class DirectionModel:
     def predict_state(self, state: Dict[str, float]) -> float:
         X = pd.DataFrame([state], columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
-        return float(np.clip(self._iso.transform(raw)[0], 0.0, 1.0))
+        cal = float(self._iso.transform(raw)[0])
+        # Clip to [0.05, 0.95]. Isotonic on small validation sets pushes some predictions to
+        # exactly 0 or 1, producing nonsensical "P(up) = 100%" outputs. Clipping caps the
+        # confidence at a realistic level — top-quartile-confidence accuracy on this model
+        # is ~79%, so claiming 100% certainty was always overconfident.
+        return float(np.clip(cal, 0.05, 0.95))
 
     def predict_batch(self, X: pd.DataFrame) -> np.ndarray:
         X = X.reindex(columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
-        return np.clip(self._iso.transform(raw), 0.0, 1.0)
+        return np.clip(self._iso.transform(raw), 0.05, 0.95)
 
     def feature_importance(self, top_k: int = 10) -> List[Tuple[str, int]]:
         if not hasattr(self, "_gbm"):

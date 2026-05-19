@@ -74,19 +74,31 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
     if use_cache and fp.exists():
         return pd.read_parquet(fp)
 
-    df: pd.DataFrame | None = None
-    try:
-        import yfinance as yf
-        if start or end:
-            raw = yf.download(symbol, interval=interval, start=start, end=end,
-                              progress=False, auto_adjust=False, threads=False)
-        else:
-            raw = yf.download(symbol, interval=interval, period=period,
-                              progress=False, auto_adjust=False, threads=False)
-        if raw is not None and not raw.empty:
-            df = _normalize_ohlcv(raw)
-    except Exception as e:
-        print(f"[data] yfinance fetch failed: {e}")
+    def _yf_download(sym: str) -> pd.DataFrame | None:
+        try:
+            import yfinance as yf
+            if start or end:
+                raw = yf.download(sym, interval=interval, start=start, end=end,
+                                  progress=False, auto_adjust=False, threads=False)
+            else:
+                raw = yf.download(sym, interval=interval, period=period,
+                                  progress=False, auto_adjust=False, threads=False)
+            if raw is not None and not raw.empty:
+                return _normalize_ohlcv(raw)
+        except Exception as e:
+            print(f"[data] yfinance fetch failed for {sym}: {e}")
+        return None
+
+    df = _yf_download(symbol)
+
+    # Fallback: many NSE symbols (e.g. TATAMOTORS) sometimes 404 on .NS but resolve on .BO
+    # (BSE listing). The price data is essentially the same for liquid names. Try once.
+    if (df is None or df.empty) and symbol.endswith(".NS"):
+        bo_symbol = symbol.replace(".NS", ".BO")
+        print(f"[data] {symbol} not available on NSE; trying {bo_symbol} (BSE) ...")
+        df = _yf_download(bo_symbol)
+        if df is not None and not df.empty:
+            print(f"[data] using {bo_symbol} (BSE) data in place of {symbol}")
 
     if (df is None or df.empty) and allow_synthetic:
         print(f"[data] using synthetic data for {symbol} {interval} (yfinance unavailable or empty)")
@@ -95,7 +107,42 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
     if df is None or df.empty:
         raise RuntimeError(f"No data for {symbol} @ {interval}")
 
+    # Data quality validation — log + drop bars with broken OHLC, mark short series.
+    df = _validate_ohlcv(df, symbol)
+
     df.to_parquet(fp)
+    return df
+
+
+def _validate_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Sanity-check bars before they hit pool detection. Drops rows that violate OHLC
+    invariants (high >= max(o,c), low <= min(o,c)) and reports counts. Doesn't drop volume=0
+    rows because some sessions legitimately have low volume on illiquid times — we just
+    log if too many are zero."""
+    n_in = len(df)
+    if n_in == 0:
+        return df
+
+    # OHLC invariants
+    bad_high = (df["high"] < df[["open", "close"]].max(axis=1)) | (df["high"] < df["low"])
+    bad_low = (df["low"] > df[["open", "close"]].min(axis=1))
+    bad_mask = bad_high | bad_low
+    n_bad = int(bad_mask.sum())
+    if n_bad > 0:
+        print(f"[data] {symbol}: dropping {n_bad} bars with broken OHLC invariants")
+        df = df.loc[~bad_mask]
+
+    # Volume sanity (warn only)
+    if "volume" in df.columns:
+        zero_vol = int((df["volume"] <= 0).sum())
+        if zero_vol > 0 and zero_vol > 0.05 * len(df):
+            print(f"[data] {symbol}: warning — {zero_vol} / {len(df)} bars have zero volume")
+
+    # Minimum bar count
+    if len(df) < 200:
+        print(f"[data] {symbol}: warning — only {len(df)} bars after cleaning "
+              f"(was {n_in}); models may be unstable")
+
     return df
 
 

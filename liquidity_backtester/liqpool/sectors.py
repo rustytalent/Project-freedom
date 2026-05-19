@@ -294,10 +294,12 @@ def per_sector_oos(oos_pools, oos_results) -> Dict[str, Dict]:
 
 def per_asset_reliability(report, pooled_floor: float = 0.30) -> Dict[str, float]:
     """For each asset in the report, return its OOS broad respect rate (a 'reliability score').
-    Used downstream by live_run.py to multiply EV: a stock with 33% OOS gets down-weighted
-    vs the basket average, a stock with 62% gets up-weighted.
+    Used downstream by live_run.py to multiply EV.
 
     Floors at `pooled_floor` so an asset with 0 tested pools doesn't kill all its setups.
+    Prefer `per_asset_reliability_shrunk` for live trading — it Bayesian-shrinks small
+    samples toward basket baseline so a 55-sample 33% rate doesn't get treated the same
+    as a 300-sample 33% rate.
     """
     out: Dict[str, float] = {}
     for sym, ad in report.assets.items():
@@ -306,6 +308,34 @@ def per_asset_reliability(report, pooled_floor: float = 0.30) -> Dict[str, float
             out[sym] = pooled_floor
             continue
         out[sym] = max(pooled_floor, float(sum(outs) / len(outs)))
+    return out
+
+
+def per_asset_reliability_shrunk(report, basket_baseline: float,
+                                   shrinkage_n: int = 80,
+                                   low_conf_n: int = 80
+                                   ) -> Dict[str, Dict]:
+    """Beta-Binomial-style empirical Bayes: pull the per-asset OOS respect rate toward
+    `basket_baseline` with weight `shrinkage_n`. A 55-pool asset with 33% rate gets pulled
+    toward the basket average (45%); a 300-pool asset stays close to its empirical rate.
+
+    Returns per-asset dict { 'shrunk_respect', 'raw_respect', 'n', 'is_low_conf' }.
+    `is_low_conf` flags assets with n < low_conf_n so the dashboard can warn.
+    """
+    out: Dict[str, Dict] = {}
+    for sym, ad in report.assets.items():
+        outs = ad.walkforward.raw_oos_outcomes
+        n = len(outs)
+        raw = (sum(outs) / n) if n else basket_baseline
+        # Beta(α=baseline*shrinkage_n, β=(1-baseline)*shrinkage_n) prior; posterior mean is:
+        # (sum_y + α) / (n + α + β) = (sum_y + baseline*shrinkage_n) / (n + shrinkage_n)
+        shrunk = (sum(outs) + basket_baseline * shrinkage_n) / (n + shrinkage_n)
+        out[sym] = {
+            "shrunk_respect": float(shrunk),
+            "raw_respect": float(raw),
+            "n": int(n),
+            "is_low_conf": n < low_conf_n,
+        }
     return out
 
 

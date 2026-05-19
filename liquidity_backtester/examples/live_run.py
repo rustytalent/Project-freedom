@@ -34,9 +34,13 @@ from liqpool import Config
 from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.timing import StateFeaturizer
-from liqpool.sectors import (sector_of, per_asset_reliability, reliability_multiplier,
+from liqpool.sectors import (sector_of, per_asset_reliability, per_asset_reliability_shrunk,
+                              reliability_multiplier,
                               sector_momentum_alignment, compute_sector_metrics,
                               detect_rotation)
+from liqpool.event_engine import (EventDrivenEngine, EventEngineConfig, PoolState,
+                                    make_pool_state, yfinance_recent_5m, run_live_loop,
+                                    TriggerEvent)
 from liqpool.journal import TradeJournal
 from liqpool.sizing import SizingConfig, AccountState, size_setup, format_sizing_line
 from liqpool.drift import (DriftThresholds, extract_drift_metrics, check_drift,
@@ -126,11 +130,27 @@ def cmd_morning(args):
     DIR_ALIGN_MARGIN = 0.10
 
     # Interpretation inputs — precompute once for the whole run.
-    asset_reliability = per_asset_reliability(report)
     asset_dfs_now = {s: ad.base_df for s, ad in report.assets.items()}
     sector_metrics = compute_sector_metrics(asset_dfs_now)
     rotation = detect_rotation(sector_metrics)
     pooled_baseline = max(report.pooled_oos_respect, 0.30)
+    # Bayesian-shrunk reliability so small-sample assets don't get extreme multipliers.
+    reliability_full = per_asset_reliability_shrunk(report, pooled_baseline,
+                                                     shrinkage_n=80, low_conf_n=80)
+    asset_reliability = {s: v["shrunk_respect"] for s, v in reliability_full.items()}
+
+    # Time-of-day gate (BUG 4): if too little of the trading session remains, suppress
+    # NEW tradeable alerts. NSE trades 09:15–15:30 IST. Within the last 90 minutes
+    # (after 14:00 IST), an alert is unlikely to even be touched today, let alone produce
+    # a clean entry, so we down-grade everything to WATCH.
+    now_ist = (pd.Timestamp.utcnow() + pd.Timedelta(hours=5, minutes=30))
+    close_today_ist = (now_ist.normalize() + pd.Timedelta(hours=15, minutes=30))
+    minutes_until_close = max(-1.0, (close_today_ist - now_ist).total_seconds() / 60.0)
+    suppress_new_alerts = (now_ist.dayofweek < 5    # weekday
+                            and 0 <= minutes_until_close < 90)
+    if suppress_new_alerts:
+        print(f"\n⏰ Time-of-day gate: {minutes_until_close:.0f} min until session close. "
+              f"Suppressing NEW tradeable alerts (still showing watch list).")
 
     # Per-asset dashboard — restored from multi_asset_run.py because seeing each asset's
     # state side-by-side is the most useful single view.
@@ -218,14 +238,18 @@ def cmd_morning(args):
             "top_ev": asset_top_ev,
         }
 
-    tradeable = sorted([c for c in candidates
-                          if c["q"] >= TRADEABLE_Q and c["t_today"] >= TRADEABLE_T_TODAY],
-                         key=lambda c: -c["ev"])
+    if suppress_new_alerts:
+        tradeable = []
+    else:
+        tradeable = sorted([c for c in candidates
+                              if c["q"] >= TRADEABLE_Q
+                              and c["t_today"] >= TRADEABLE_T_TODAY],
+                             key=lambda c: -c["ev"])
 
     # ----- Per-asset dashboard -----
     print("\n================ PER-ASSET DASHBOARD ================")
     print(f"  {'symbol':<14} {'sector':<9} {'price':>10} {'P(up)':>7} {'bias':>11} "
-          f"{'oos_resp':>9} {'rel_mult':>9} {'top_ev':>8}")
+          f"{'raw_oos':>8} {'shrunk':>7} {'n':>4} {'rel_mult':>9} {'top_ev':>8}")
     for sym, v in per_asset_view.items():
         p_up = v["dir_p_up"]
         if p_up is None:
@@ -236,12 +260,18 @@ def cmd_morning(args):
             elif p_up <= 0.5 - DIR_ALIGN_MARGIN:  bias = "STRONG DOWN"
             elif p_up >= 0.5:                      bias = "weak up"
             else:                                   bias = "weak down"
-        rel = v["reliability"]
-        rel_mult = reliability_multiplier(rel, pooled_baseline)
-        rel_flag = "⚠ " if rel_mult < 0.85 else ""
+        rel_info = reliability_full.get(sym, {})
+        raw_rel = rel_info.get("raw_respect", v["reliability"])
+        shrunk_rel = rel_info.get("shrunk_respect", v["reliability"])
+        n_oos = rel_info.get("n", 0)
+        rel_mult = reliability_multiplier(shrunk_rel, pooled_baseline)
+        low_conf_flag = "?" if rel_info.get("is_low_conf", False) else " "
+        rel_warn = "⚠ " if rel_mult < 0.85 else ""
         print(f"  {sym:<14} {v['sector']:<9} ₹{v['current']:>8.2f} {p_up_str:>6} "
-              f"{bias:>11} {rel:>8.0%} {rel_flag}{rel_mult:>6.2f}× "
-              f"{v['top_ev']:>7.0%}")
+              f"{bias:>11} {raw_rel:>7.0%} {shrunk_rel:>6.0%}{low_conf_flag} "
+              f"{n_oos:>4} {rel_warn}{rel_mult:>6.2f}× {v['top_ev']:>7.0%}")
+    print(f"  legend: ? = low-confidence (n<80, shrunk toward basket avg "
+          f"{pooled_baseline:.0%})")
 
     if rotation and rotation.get("narrative"):
         print(f"\n[market flow]  {rotation['narrative']}")
@@ -422,6 +452,23 @@ def cmd_morning(args):
     print(f"\n[summary] {confirmed_orders} orders placed (of {len(tradeable)} tradeable setups). "
           f"Journal: {args.journal}")
 
+    # ----- Arm pools for the event-driven monitor -----
+    # Save tradeable setups as PoolStates that `live_run.py monitor` can pick up and watch
+    # all session. Empty file is fine — monitor just exits cleanly with no work.
+    armed_path = Path(args.armed_file)
+    engine = EventDrivenEngine(EventEngineConfig())
+    for c in tradeable:
+        st = make_pool_state(
+            pool=c["pool"], symbol=c["symbol"], sector=c["sector"],
+            q=c["q"], t_today=c["t_today"], ev=c["ev"], dir_tag=c["dir_tag"],
+            current_price=c["current"], atr_proxy=c["atr_proxy"],
+        )
+        engine.arm(st)
+    engine.save(armed_path)
+    print(f"[arm] {len(tradeable)} pools armed → {armed_path}")
+    if tradeable:
+        print(f"      run `live_run.py monitor --armed-file {armed_path}` to watch for triggers")
+
 
 def cmd_eod(args):
     """End-of-day reconcile: read broker positions, close out journal entries."""
@@ -443,6 +490,82 @@ def cmd_eod(args):
         "positions": positions, "orders": orders,
     })
     print(f"[eod] journal updated → {args.journal}")
+
+
+def cmd_monitor(args):
+    """Track 5b: load armed PoolStates and run the event-driven loop.
+
+    Workflow:
+      1. Load armed pools from `--armed-file` (written by `morning`).
+      2. Poll yfinance every `--poll-sec` seconds for fresh 5m bars per symbol.
+       (NOTE: yfinance has ~15 min delay on retail intraday data. For low-latency live
+        trading, swap to a Kite-Connect-backed fetcher — see event_engine.run_live_loop.)
+      3. For each new bar, advance every armed PoolState through the state machine.
+      4. When a TriggerEvent fires (rejection wick / sweep+reclaim), log to journal +
+         optionally place a market order via Kite.
+      5. Loop until `--duration-hours` elapses or all pools terminate.
+    """
+    armed_path = Path(args.armed_file)
+    if not armed_path.exists():
+        print(f"[monitor] no armed pools file at {armed_path}. Run `morning` first.")
+        return
+    engine = EventDrivenEngine.load(armed_path)
+    summary = engine.summary()
+    if summary["n_pools"] == 0:
+        print(f"[monitor] {armed_path} contains no armed pools — nothing to monitor.")
+        return
+    print(f"[monitor] loaded {summary['n_pools']} armed pools across "
+          f"{len(engine.active_symbols())} symbols")
+    for sym, sts in engine.states_by_symbol.items():
+        states_summary = [s.state for s in sts]
+        print(f"  [{sym:<14}] {len(sts)} pools, states={states_summary}")
+
+    journal = TradeJournal(args.journal)
+    broker = broker_from_env(dry_run=not args.live) if args.use_broker else None
+
+    end_at = pd.Timestamp.utcnow() + pd.Timedelta(hours=args.duration_hours)
+    print(f"[monitor] starting live loop until {end_at} "
+          f"(poll={args.poll_sec}s, max_iters={args.max_iterations or 'unbounded'})")
+
+    fetcher = yfinance_recent_5m(period_days=2)
+
+    def on_trigger(ev: TriggerEvent) -> None:
+        print(f"\n🔔 TRIGGER [{ev.symbol}] {ev.trigger_type} @ {ev.timestamp}")
+        print(f"   pool={ev.pool_id}  side={ev.side}  entry=₹{ev.entry_price:.2f}  "
+              f"stop=₹{ev.stop:.2f}  target=₹{ev.target:.2f}")
+        print(f"   reaction={ev.reaction_atr:.2f} ATR  bars_since_touch={ev.reaction_bars}")
+        # Log to journal
+        journal.append("alert", ev.symbol, {
+            "trigger_type": ev.trigger_type, "pool_id": ev.pool_id,
+            "side": ev.side, "entry": ev.entry_price, "stop": ev.stop,
+            "target": ev.target, "q": ev.q, "t_today": ev.t_today, "ev": ev.ev,
+            "reaction_atr": ev.reaction_atr, "reaction_bars": ev.reaction_bars,
+            "extras": ev.extras, "source": "event_engine",
+        })
+        # Place order (broker is dry-run unless --live + auto-confirm or interactive)
+        if broker is not None and args.auto_confirm:
+            ts = ev.symbol.replace(".NS", "").replace(".BO", "")
+            order_side = "BUY" if ev.side == "buy" else "SELL"
+            result = broker.place_bracket_order(
+                tradingsymbol=ts, side=order_side, quantity=args.default_quantity,
+                entry_price=ev.entry_price, stop=ev.stop, target=ev.target,
+                confirm=args.live,
+            )
+            print(f"   → broker: {result.status}  order_id={result.order_id}  "
+                  f"dry_run={result.dry_run}")
+            if not result.error:
+                journal.log_order_placed(symbol=ev.symbol, order_id=result.order_id,
+                                          side=order_side, quantity=args.default_quantity,
+                                          entry_price=ev.entry_price, stop=ev.stop,
+                                          target=ev.target, dry_run=result.dry_run)
+
+    run_live_loop(engine, fetcher, on_trigger, end_at=end_at,
+                   max_iterations=args.max_iterations)
+
+    # Save final state so it can be inspected / resumed
+    engine.save(armed_path)
+    print(f"\n[monitor] loop ended. Final state saved → {armed_path}")
+    print(f"[monitor] final summary: {engine.summary()}")
 
 
 def cmd_journal(args):
@@ -498,8 +621,31 @@ def main():
     m.add_argument("--auto-confirm", action="store_true",
                     help="Skip per-order prompt (DANGEROUS with --live).")
     m.add_argument("--journal", default="output/journal.jsonl")
+    m.add_argument("--armed-file", default="output/armed_pools.json",
+                    help="Where to save armed PoolStates for the monitor subcommand")
     m.add_argument("--out", default="output")
     m.set_defaults(func=cmd_morning)
+
+    # `monitor`: event-driven live loop (Track 5b)
+    n = sub.add_parser("monitor",
+                        help="watch armed pools for touch + reaction triggers (Track 5b)")
+    n.add_argument("--armed-file", default="output/armed_pools.json")
+    n.add_argument("--journal", default="output/journal.jsonl")
+    n.add_argument("--poll-sec", type=int, default=30,
+                    help="seconds between yfinance polls (default 30)")
+    n.add_argument("--duration-hours", type=float, default=6.5,
+                    help="how long to run the loop (default 6.5h ≈ one NSE session)")
+    n.add_argument("--max-iterations", type=int, default=None,
+                    help="cap on poll iterations (useful for testing)")
+    n.add_argument("--use-broker", action="store_true",
+                    help="enable Kite broker integration (needs KITE_API_KEY/TOKEN)")
+    n.add_argument("--live", action="store_true",
+                    help="LIVE order placement on trigger (default dry-run)")
+    n.add_argument("--auto-confirm", action="store_true",
+                    help="auto-place orders on trigger (no prompt)")
+    n.add_argument("--default-quantity", type=int, default=1,
+                    help="quantity for triggered orders (when --use-broker --live)")
+    n.set_defaults(func=cmd_monitor)
 
     # `eod`: end-of-day reconcile
     e = sub.add_parser("eod", help="end-of-day reconcile with broker")

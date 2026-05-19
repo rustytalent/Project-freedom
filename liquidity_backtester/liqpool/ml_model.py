@@ -180,14 +180,14 @@ class PoolRespectModel:
         applies bucket-level shrinkage on top of global calibration."""
         base = self.predict_raw(X)
         if pools is None or not self.bucket_calib:
-            return np.clip(base, 0.0, 1.0)
+            return np.clip(base, 0.02, 0.98)
         adj = base.copy()
         for i, p in enumerate(pools):
             key = (_tf_bucket(len(set(p.tfs))), _headline_factor(p))
             bc = self.bucket_calib.get(key)
             if bc is not None:
                 adj[i] = (1.0 - bc.pull_weight) * base[i] + bc.pull_weight * bc.empirical_rate
-        return np.clip(adj, 0.0, 1.0)
+        return np.clip(adj, 0.02, 0.98)
 
     def feature_importance(self, top_k: int = 15) -> List[Tuple[str, int]]:
         if not hasattr(self, "_gbm"):
