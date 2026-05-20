@@ -19,7 +19,7 @@ This module orchestrates:
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Union
 import copy
 import numpy as np
 import pandas as pd
@@ -31,7 +31,8 @@ from .tester import test_pools, summarise, PoolResult
 from .optimizer import optimize
 from .walkforward import walk_forward, WalkForwardReport
 from .featurize import MultiAssetFeaturizer
-from .ml_model import PoolRespectModel, trainable_mask, labels as ml_labels
+from .ml_model import (PoolRespectModel, SectorMoERespectModel,
+                       trainable_mask, labels as ml_labels)
 from .stratified import StratifiedRespectModel
 from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, ProximityModel,
                      evaluate_timing, TimingReport)
@@ -68,7 +69,7 @@ class MultiAssetReport:
     mean_overfit_gap: float = 0.0
     # Unified models (trained on combined data)
     unified_featurizer: Optional[MultiAssetFeaturizer] = None
-    unified_ml: Optional[PoolRespectModel] = None
+    unified_ml: Optional[Union[PoolRespectModel, SectorMoERespectModel]] = None
     unified_direction: Optional[DirectionModel] = None
     unified_proximity: Dict[int, ProximityModel] = field(default_factory=dict)
     unified_stratified: Optional[StratifiedRespectModel] = None
@@ -200,7 +201,7 @@ def run_multi_asset(symbols: List[str], cfg: Config,
     # Unified Featurizer + ML model on combined pool sets
     # ----------------------------------------------------------------------
     if progress:
-        progress("[unified]", "training cross-asset ML quality model")
+        progress("[unified]", "training cross-asset sector MoE quality model")
     multi_feat = MultiAssetFeaturizer(asset_dfs)
     report.unified_featurizer = multi_feat
 
@@ -211,20 +212,17 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         X_train = multi_feat.transform_batch(train_pool_keep)
         y_train = ml_labels(train_result_keep)
         try:
-            ml = PoolRespectModel().fit(X_train, y_train, val_frac=0.25, seed=cfg.opt_seed + 100)
+            X_oos_all = multi_feat.transform_batch(all_oos_pools) if all_oos_pools else None
+            ml = SectorMoERespectModel().fit(
+                X_train, y_train, train_pool_keep,
+                X_oos=X_oos_all, oos_pools=all_oos_pools, oos_results=all_oos_results,
+                val_frac=0.25, seed=cfg.opt_seed + 100,
+                min_sector_train_n=60, min_sector_class_n=8, min_sector_oos_n=20,
+                expert_weight=0.70,
+            )
             report.unified_ml = ml
-
-            # Bucket calibration on combined OOS (decisive only)
-            X_oos_all = multi_feat.transform_batch(all_oos_pools)
-            p_raw = ml.predict_raw(X_oos_all)
-            oos_dec_mask = trainable_mask(all_oos_results)
-            if oos_dec_mask.sum() >= 30:
-                y_oos_dec = ml_labels([r for r, m in zip(all_oos_results, oos_dec_mask) if m])
-                pools_dec = [p for p, m in zip(all_oos_pools, oos_dec_mask) if m]
-                p_raw_dec = p_raw[oos_dec_mask]
-                ml.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=10)
         except Exception as e:
-            print(f"[multi_asset] unified ML training skipped: {e}")
+            print(f"[multi_asset] unified sector MoE training skipped: {e}")
 
     # ----------------------------------------------------------------------
     # Unified Stratified model on combined OOS
@@ -385,10 +383,27 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
     # -- Unified ML model fit + calibration --
     if report.unified_ml is not None:
         m = report.unified_ml
-        print(f"\n[unified ML quality model]   train n={m.train_n} val n={m.val_n}", file=file)
+        model_name = ("sector MoE quality model"
+                      if isinstance(m, SectorMoERespectModel)
+                      else "unified ML quality model")
+        print(f"\n[{model_name}]   train n={m.train_n} val n={m.val_n}", file=file)
         print(f"  Val Brier / log-loss:   {m.val_brier:.4f} / {m.val_logloss:.4f}", file=file)
         print(f"  Val AUC-ROC:            {m.val_auc:.3f}", file=file)
         print(f"  Base rate:              {m.base_rate:.1%}", file=file)
+        if isinstance(m, SectorMoERespectModel):
+            print(f"  Blend:                  {m.expert_weight:.0%} sector expert / "
+                  f"{m.global_weight:.0%} global fallback", file=file)
+            if m.sector_stats:
+                print(f"\n[sector experts]", file=file)
+                print(f"  {'sector':<10} {'status':<8} {'train':>6} {'pos':>5} {'neg':>5} "
+                      f"{'oos_dec':>7} {'auc':>6} {'reason':<18}", file=file)
+                for sector, st in m.expert_summary():
+                    auc = st.get("val_auc")
+                    auc_s = f"{auc:.3f}" if isinstance(auc, float) else "-"
+                    print(f"  {sector:<10} {st.get('status', '-'):<8} "
+                          f"{st.get('train_n', 0):>6} {st.get('pos_n', 0):>5} "
+                          f"{st.get('neg_n', 0):>5} {st.get('oos_decisive_n', 0):>7} "
+                          f"{auc_s:>6} {st.get('reason', ''):<18}", file=file)
         print(f"\n[unified ML feature importance — top 15]", file=file)
         for name, gain in m.feature_importance(15):
             print(f"  {name:<34} {gain:>10.1f}", file=file)

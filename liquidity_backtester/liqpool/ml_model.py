@@ -225,3 +225,184 @@ class PoolRespectModel:
                 "top_features": feat_contribs[:top_k],
             })
         return out
+
+
+@dataclass
+class SectorMoERespectModel:
+    """Global PoolRespectModel plus sector experts with hard routing + soft blend.
+
+    This is intentionally conservative: the global model remains the fallback/stabilizer, while
+    sector experts are only trained when a sector has enough decisive examples and both classes.
+    predict() keeps the same shape as PoolRespectModel.predict(), so downstream ranking, timing,
+    and live execution can consume it without a separate code path.
+    """
+    global_model: Optional[PoolRespectModel] = None
+    sector_models: Dict[str, PoolRespectModel] = field(default_factory=dict)
+    sector_stats: Dict[str, Dict] = field(default_factory=dict)
+    expert_weight: float = 0.70
+    global_weight: float = 0.30
+    min_sector_train_n: int = 60
+    min_sector_class_n: int = 8
+    min_sector_oos_n: int = 20
+    feature_names: List[str] = field(default_factory=list)
+    train_n: int = 0
+    val_n: int = 0
+    val_brier: float = 0.0
+    val_logloss: float = 0.0
+    val_auc: float = 0.0
+    base_rate: float = 0.0
+
+    @property
+    def bucket_calib(self) -> Dict[Tuple[str, str], BucketCalib]:
+        return self.global_model.bucket_calib if self.global_model is not None else {}
+
+    def _copy_global_metrics(self) -> None:
+        if self.global_model is None:
+            return
+        self.feature_names = list(self.global_model.feature_names)
+        self.train_n = self.global_model.train_n
+        self.val_n = self.global_model.val_n
+        self.val_brier = self.global_model.val_brier
+        self.val_logloss = self.global_model.val_logloss
+        self.val_auc = self.global_model.val_auc
+        self.base_rate = self.global_model.base_rate
+
+    @staticmethod
+    def _sector_for_pool(pool: Pool) -> str:
+        from .sectors import sector_of
+        return sector_of(pool.asset)
+
+    def _fit_bucket_if_possible(self, model: PoolRespectModel, X_oos: Optional[pd.DataFrame],
+                                oos_pools: Optional[List[Pool]],
+                                oos_results: Optional[List[PoolResult]],
+                                min_bucket_n: int = 10) -> int:
+        if X_oos is None or not oos_pools or not oos_results:
+            return 0
+        decisive_mask = trainable_mask(oos_results)
+        if decisive_mask.sum() < self.min_sector_oos_n:
+            return int(decisive_mask.sum())
+        y_oos_dec = labels([r for r, keep in zip(oos_results, decisive_mask) if keep])
+        pools_dec = [p for p, keep in zip(oos_pools, decisive_mask) if keep]
+        p_raw = model.predict_raw(X_oos)
+        p_raw_dec = p_raw[decisive_mask]
+        model.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=min_bucket_n)
+        return int(decisive_mask.sum())
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray, train_pools: List[Pool],
+            X_oos: Optional[pd.DataFrame] = None,
+            oos_pools: Optional[List[Pool]] = None,
+            oos_results: Optional[List[PoolResult]] = None,
+            val_frac: float = 0.25, seed: int = 17,
+            min_sector_train_n: Optional[int] = None,
+            min_sector_class_n: Optional[int] = None,
+            min_sector_oos_n: Optional[int] = None,
+            expert_weight: Optional[float] = None) -> "SectorMoERespectModel":
+        if len(X) != len(y) or len(X) != len(train_pools):
+            raise ValueError("X, y, and train_pools must have matching lengths")
+        if expert_weight is not None:
+            self.expert_weight = float(expert_weight)
+            self.global_weight = 1.0 - self.expert_weight
+        if min_sector_train_n is not None:
+            self.min_sector_train_n = int(min_sector_train_n)
+        if min_sector_class_n is not None:
+            self.min_sector_class_n = int(min_sector_class_n)
+        if min_sector_oos_n is not None:
+            self.min_sector_oos_n = int(min_sector_oos_n)
+
+        self.global_model = PoolRespectModel().fit(X, y, val_frac=val_frac, seed=seed)
+        self._fit_bucket_if_possible(self.global_model, X_oos, oos_pools, oos_results,
+                                     min_bucket_n=10)
+        self._copy_global_metrics()
+
+        sectors = sorted({self._sector_for_pool(p) for p in train_pools})
+        self.sector_models.clear()
+        self.sector_stats.clear()
+
+        for sector in sectors:
+            idx = [i for i, p in enumerate(train_pools) if self._sector_for_pool(p) == sector]
+            y_sector = y[idx]
+            pos_n = int((y_sector == 1).sum())
+            neg_n = int((y_sector == 0).sum())
+            stat = {
+                "train_n": int(len(idx)),
+                "pos_n": pos_n,
+                "neg_n": neg_n,
+                "status": "skipped",
+                "reason": "",
+                "oos_decisive_n": 0,
+                "val_auc": None,
+            }
+
+            if len(idx) < self.min_sector_train_n:
+                stat["reason"] = f"train_n<{self.min_sector_train_n}"
+                self.sector_stats[sector] = stat
+                continue
+            if pos_n < self.min_sector_class_n or neg_n < self.min_sector_class_n:
+                stat["reason"] = f"class_n<{self.min_sector_class_n}"
+                self.sector_stats[sector] = stat
+                continue
+
+            try:
+                expert = PoolRespectModel().fit(X.iloc[idx], y_sector,
+                                                val_frac=val_frac, seed=seed + len(idx))
+
+                sector_oos_n = 0
+                if X_oos is not None and oos_pools and oos_results:
+                    oos_idx = [i for i, p in enumerate(oos_pools)
+                               if self._sector_for_pool(p) == sector]
+                    if oos_idx:
+                        sector_oos_n = self._fit_bucket_if_possible(
+                            expert, X_oos.iloc[oos_idx],
+                            [oos_pools[i] for i in oos_idx],
+                            [oos_results[i] for i in oos_idx],
+                            min_bucket_n=8,
+                        )
+
+                self.sector_models[sector] = expert
+                stat.update({
+                    "status": "trained",
+                    "reason": "",
+                    "oos_decisive_n": int(sector_oos_n),
+                    "val_auc": float(expert.val_auc),
+                    "base_rate": float(expert.base_rate),
+                    "blend": f"{self.expert_weight:.2f}/{self.global_weight:.2f}",
+                })
+            except Exception as exc:
+                stat["reason"] = str(exc)
+            self.sector_stats[sector] = stat
+
+        return self
+
+    def predict_raw(self, X: pd.DataFrame) -> np.ndarray:
+        if self.global_model is None:
+            raise ValueError("SectorMoERespectModel is not fitted")
+        return self.global_model.predict_raw(X)
+
+    def predict(self, X: pd.DataFrame, pools: Optional[List[Pool]] = None) -> np.ndarray:
+        if self.global_model is None:
+            raise ValueError("SectorMoERespectModel is not fitted")
+        global_pred = self.global_model.predict(X, pools=pools)
+        if pools is None or not self.sector_models:
+            return global_pred
+
+        final = global_pred.copy()
+        for sector, expert in self.sector_models.items():
+            idx = [i for i, p in enumerate(pools) if self._sector_for_pool(p) == sector]
+            if not idx:
+                continue
+            expert_pred = expert.predict(X.iloc[idx], pools=[pools[i] for i in idx])
+            final[idx] = self.expert_weight * expert_pred + self.global_weight * global_pred[idx]
+        return np.clip(final, 0.02, 0.98)
+
+    def feature_importance(self, top_k: int = 15) -> List[Tuple[str, int]]:
+        if self.global_model is None:
+            return []
+        return self.global_model.feature_importance(top_k)
+
+    def explain_prediction(self, X: pd.DataFrame, top_k: int = 5) -> List[Dict]:
+        if self.global_model is None:
+            return []
+        return self.global_model.explain_prediction(X, top_k=top_k)
+
+    def expert_summary(self) -> List[Tuple[str, Dict]]:
+        return sorted(self.sector_stats.items(), key=lambda kv: kv[0])
