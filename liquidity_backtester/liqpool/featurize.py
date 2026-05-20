@@ -17,6 +17,11 @@ Feature groups:
   CONTEXT AT available_at (causal):
     adx_14                   trend strength on base TF
     vol_ratio                short vs long ATR ratio
+    ret_<n>                  recent log return over n base bars
+    mom_12_atr               12-bar close momentum normalised by ATR
+    zscore_close_50          close location vs rolling 50-bar mean/std
+    range_6_atr              recent 6-bar high-low range normalised by ATR
+    trend_into_pool_<n>      side-aware momentum toward the pool zone
     session_<label>          one-hot NSE session
   POOL TYPE:
     side_high                1 if pool is on the high side (supply), 0 if low (demand)
@@ -55,6 +60,11 @@ class Featurizer:
         self.atr_series = atr(df_base, atr_period).bfill()
         self.median_atr = float(self.atr_series.median())
         self.regime_df = compute_regime_series(df_base)
+        self.close = df_base["close"].astype(float)
+        self.high = df_base["high"].astype(float)
+        self.low = df_base["low"].astype(float)
+        self.roll_mean_50 = self.close.rolling(50, min_periods=10).mean().bfill()
+        self.roll_std_50 = self.close.rolling(50, min_periods=10).std().bfill()
         # Base-period in seconds, computed from the actual index. Used for age normalisation.
         # Defaults to 300s (5m) if we can't infer (e.g., single-bar df).
         diffs = pd.Series(df_base.index).diff().dropna()
@@ -70,7 +80,11 @@ class Featurizer:
         cols: List[str] = ["n_contributors", "n_distinct_tfs",
                             "width_atr", "score", "median_contributor_strength",
                             "age_at_availability_bars",
-                            "adx_14", "vol_ratio", "side_high"]
+                            "adx_14", "vol_ratio",
+                            "ret_1", "ret_6", "ret_24", "ret_78",
+                            "mom_12_atr", "zscore_close_50", "range_6_atr",
+                            "trend_into_pool_6", "trend_into_pool_24",
+                            "side_high"]
         cols += [f"factor_count_{f}" for f in FACTOR_FAMILIES]
         cols += [f"tf_count_{t}" for t in TF_KEYS]
         cols += [f"session_{s}" for s in SESSION_LABELS]
@@ -112,6 +126,31 @@ class Featurizer:
         # Regime at available_at
         regime = lookup_regime(self.regime_df, pool.available_at)
         session = regime["session"]
+        pos = self.df_base.index.searchsorted(pool.available_at, side="right") - 1
+        pos = int(min(max(pos, 0), len(self.df_base) - 1))
+        atr_now = max(float(self.atr_series.iloc[pos]), 1e-9)
+
+        def log_ret(k: int) -> float:
+            i0 = max(0, pos - k)
+            c0 = float(self.close.iloc[i0])
+            c1 = float(self.close.iloc[pos])
+            if c0 <= 0 or c1 <= 0 or pos == i0:
+                return 0.0
+            return float(np.log(c1 / c0))
+
+        ret_1 = log_ret(1)
+        ret_6 = log_ret(6)
+        ret_24 = log_ret(24)
+        ret_78 = log_ret(78)
+        i0_mom = max(0, pos - 11)
+        mom_12_atr = float((self.close.iloc[pos] - self.close.iloc[i0_mom]) / atr_now)
+        mean50 = float(self.roll_mean_50.iloc[pos])
+        std50 = float(self.roll_std_50.iloc[pos])
+        z_close = float((self.close.iloc[pos] - mean50) / std50) if std50 > 0 else 0.0
+        i0_rng = max(0, pos - 5)
+        range_6_atr = float((self.high.iloc[i0_rng:pos + 1].max()
+                             - self.low.iloc[i0_rng:pos + 1].min()) / atr_now)
+        side_sign = 1.0 if pool.side == "high" else -1.0
 
         # Build dict
         feats: Dict[str, float] = {
@@ -123,6 +162,15 @@ class Featurizer:
             "age_at_availability_bars": float(age_bars),
             "adx_14": float(regime["adx_14"]) if not np.isnan(regime["adx_14"]) else 0.0,
             "vol_ratio": float(regime["vol_ratio"]) if not np.isnan(regime["vol_ratio"]) else 1.0,
+            "ret_1": ret_1,
+            "ret_6": ret_6,
+            "ret_24": ret_24,
+            "ret_78": ret_78,
+            "mom_12_atr": mom_12_atr,
+            "zscore_close_50": z_close,
+            "range_6_atr": range_6_atr,
+            "trend_into_pool_6": side_sign * ret_6,
+            "trend_into_pool_24": side_sign * ret_24,
             "side_high": 1.0 if pool.side == "high" else 0.0,
         }
         for f in FACTOR_FAMILIES:

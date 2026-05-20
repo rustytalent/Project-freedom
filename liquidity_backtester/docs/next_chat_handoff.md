@@ -126,6 +126,19 @@ Full real-data baseline note, completed 2026-05-21:
 - Small code fix after the run:
   - `examples/multi_asset_run.py` verdict text now references `GATE_Q`/the strict live gate instead of the old 55% watch threshold, so the summary no longer contradicts the printed `Q>=70%` gate.
 
+Post-touch feature step, completed after the baseline commit:
+
+- Added causal momentum/context features to `liqpool/featurize.py` for the quality model:
+  - `ret_1`, `ret_6`, `ret_24`, `ret_78`
+  - `mom_12_atr`, `zscore_close_50`, `range_6_atr`
+  - `trend_into_pool_6`, `trend_into_pool_24`
+- Intent: help Q separate pools likely to respect after touch from pools likely to break, without changing labels or relaxing live gates.
+- Verification completed:
+  - `python3 -m compileall liqpool examples`
+  - venv synthetic featurizer smoke
+  - venv synthetic `PoolRespectModel.fit` smoke with the expanded 52-column feature matrix
+- Tiny yfinance smoke with HDFCBANK/ICICIBANK was retried, including escalated network access, but yfinance returned no usable data for both symbols. Treat that as data-feed availability, not a model failure.
+
 ## Current Phase 3 Status
 
 The previous handoff said Phase 3A-E remained. Most of that is now implemented:
@@ -142,6 +155,7 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 ## Next Goals
 
 1. Treat `conservative_finml` as the current preferred baseline unless a future run reverses the quality audit.
+   - First rerun `conservative_finml` after the new causal momentum features and compare against `output_conservative_baseline`.
    - Re-run default and conservative baselines when the data window changes materially or when `TATAMOTORS.NS` data becomes available.
    - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
    - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.
