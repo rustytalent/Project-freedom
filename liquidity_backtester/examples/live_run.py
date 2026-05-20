@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import pandas as pd
 
 from liqpool import Config
 from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
