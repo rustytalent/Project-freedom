@@ -15,7 +15,7 @@ import numpy as np
 
 from liqpool import Config, plot_chart
 from liqpool.featurize import MultiAssetFeaturizer
-from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
+from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary, distance_bucket
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
                              sector_correlation_matrix, detect_rotation, per_sector_oos,
@@ -43,6 +43,16 @@ def main():
     ap.add_argument("--horizon", type=int, default=150)
     ap.add_argument("--min-score", type=float, default=2.0, dest="min_score")
     ap.add_argument("--min-train-days", type=int, default=10, dest="min_train_days")
+    ap.add_argument("--regularization-preset", default="default",
+                    choices=("default", "conservative_finml"))
+    ap.add_argument("--embargo-bars", type=int, default=78)
+    ap.add_argument("--gate-q", type=float, default=0.70)
+    ap.add_argument("--gate-t-today", type=float, default=0.50, dest="gate_t_today")
+    ap.add_argument("--gate-min-distance-atr", type=float, default=0.5,
+                    dest="gate_min_distance_atr")
+    ap.add_argument("--gate-max-distance-atr", type=float, default=12.0,
+                    dest="gate_max_distance_atr")
+    ap.add_argument("--gate-min-bucket-n", type=int, default=30, dest="gate_min_bucket_n")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
@@ -60,6 +70,8 @@ def main():
         opt_explore_frac=0.35,
         opt_seed=11,
         min_pool_score=args.min_score,
+        embargo_bars=args.embargo_bars,
+        regularization_preset=args.regularization_preset,
     )
 
     print(f"=== MULTI-ASSET RUN ({len(symbols)} assets) ===")
@@ -95,10 +107,19 @@ def main():
     DIR_ALIGN_MARGIN = 0.10
     TRADEABLE_T_TODAY = 0.05
     TRADEABLE_Q = 0.55
+    GATE_Q = args.gate_q
+    GATE_T_TODAY = args.gate_t_today
+    PRACTICAL_MIN_ATR = args.gate_min_distance_atr
+    PRACTICAL_MAX_ATR = args.gate_max_distance_atr
+    MIN_BUCKET_N = args.gate_min_bucket_n
 
     asset_dfs_for_sectors = {sym: ad.base_df for sym, ad in report.assets.items()}
     sec_metrics = compute_sector_metrics(asset_dfs_for_sectors)
     rotation = detect_rotation(sec_metrics)
+    blended_bucket_n = {}
+    if report.unified_oos_audit is not None:
+        for row in report.unified_oos_audit.distance_bucket_metrics.get("blended", []):
+            blended_bucket_n[row["bucket"]] = int(row["n"])
 
     candidates = []        # cross-asset list
     per_asset_summary = {} # symbol -> {current, atr, direction, top_q, top_t_today}
@@ -153,7 +174,13 @@ def main():
                 dist = (p.mid - current) if side_str == "above" else (current - p.mid)
                 dist_atr = dist / max(atr_proxy, 1e-9)
                 X = report.unified_featurizer.transform_batch([p])
-                q = float(report.unified_ml.predict(X, pools=[p])[0])
+                q_components = {}
+                if hasattr(report.unified_ml, "predict_components"):
+                    comp = report.unified_ml.predict_components(X, [p]).iloc[0].to_dict()
+                    q = float(comp["blended_q"])
+                    q_components = comp
+                else:
+                    q = float(report.unified_ml.predict(X, pools=[p])[0])
                 t_by_h = {}
                 for h in PROX_HORIZONS:
                     pm = report.unified_proximity[h]
@@ -168,6 +195,7 @@ def main():
                     min_override_q=max(TRADEABLE_Q + 0.08, 0.65),
                 )
                 ev = q * t_today * bonus * sec_decision["multiplier"]
+                dist_bucket = distance_bucket(float(dist_atr))
                 cand = {
                     "symbol": symbol, "pool": p, "result": r, "side": side_str,
                     "dist_atr": dist_atr, "q": q, "t_by_h": t_by_h,
@@ -180,6 +208,12 @@ def main():
                     "sector_regime": sec_decision["regime"],
                     "sector_block_reason": sec_decision["block_reason"],
                     "sector_allow_trade": sec_decision["allow_trade"],
+                    "distance_bucket": dist_bucket,
+                    "historical_bucket_n": blended_bucket_n.get(dist_bucket, 0),
+                    "global_q": q_components.get("global_q"),
+                    "sector_q": q_components.get("sector_q"),
+                    "sector_weight": q_components.get("gate_weight", 0.0),
+                    "moe_fallback_reason": q_components.get("fallback_reason", ""),
                 }
                 candidates.append(cand)
                 asset_candidates.append(cand)
@@ -197,11 +231,62 @@ def main():
 
     candidates.sort(key=lambda c: -c["ev"])
 
-    tradeable = [c for c in candidates
-                  if c["q"] >= TRADEABLE_Q
-                  and c["t_by_h"].get(primary_h, 0.0) >= TRADEABLE_T_TODAY
-                  and c.get("sector_allow_trade", True)]
-    watchlist = [c for c in candidates if c not in tradeable]
+    def live_gate_reasons(c):
+        reasons = []
+        if c["q"] < GATE_Q:
+            reasons.append(f"Q {c['q']:.0%} < {GATE_Q:.0%}")
+        t_today = c["t_by_h"].get(primary_h, 0.0)
+        if t_today < GATE_T_TODAY:
+            reasons.append(f"T_today {t_today:.0%} < {GATE_T_TODAY:.0%}")
+        if c["dir_tag"] != "DIR_ALIGN":
+            reasons.append(f"direction {c['dir_tag']} not DIR_ALIGN")
+        if not c.get("sector_allow_trade", True) or c.get("sector_mult", 1.0) <= 0:
+            reasons.append(c.get("sector_block_reason") or "sector flow negative")
+        if not (PRACTICAL_MIN_ATR <= c["dist_atr"] <= PRACTICAL_MAX_ATR):
+            reasons.append(f"distance {c['dist_atr']:.1f}ATR outside "
+                           f"{PRACTICAL_MIN_ATR:.1f}-{PRACTICAL_MAX_ATR:.1f}")
+        if c.get("historical_bucket_n", 0) < MIN_BUCKET_N:
+            reasons.append(f"bucket n={c.get('historical_bucket_n', 0)} < {MIN_BUCKET_N}")
+        return reasons
+
+    gate_decisions = []
+    tradeable = []
+    watch_only = []
+    rejected = []
+    for c in candidates:
+        reasons = live_gate_reasons(c)
+        if not reasons:
+            decision_name = "TRADEABLE"
+        elif c["q"] >= TRADEABLE_Q or c["t_by_h"].get(primary_h, 0.0) >= 0.20:
+            decision_name = "WATCH_ONLY"
+        else:
+            decision_name = "REJECTED_WITH_REASON"
+        decision = {
+            "symbol": c["symbol"],
+            "sector": c["sector"],
+            "side": c["side"],
+            "pool_low": c["pool"].price_low,
+            "pool_high": c["pool"].price_high,
+            "q": c["q"],
+            "t_today": c["t_by_h"].get(primary_h, 0.0),
+            "dir_tag": c["dir_tag"],
+            "distance_atr": c["dist_atr"],
+            "distance_bucket": c["distance_bucket"],
+            "historical_bucket_n": c.get("historical_bucket_n", 0),
+            "sector_weight": c.get("sector_weight", 0.0),
+            "ev": c["ev"],
+            "decision": decision_name,
+            "reasons": reasons,
+        }
+        gate_decisions.append(decision)
+        c["gate_reasons"] = reasons
+        if decision_name == "TRADEABLE":
+            tradeable.append(c)
+        elif decision_name == "WATCH_ONLY":
+            watch_only.append(c)
+        else:
+            rejected.append(c)
+    watchlist = watch_only + rejected
 
     # Day verdict — explicitly track the "best observed T" pool too so the user can see
     # a high-T pool that failed the Q threshold (the Q/T anti-correlation case).
@@ -233,7 +318,7 @@ def main():
         verdict_why = "no actionable pool across the basket"
 
     print(f"  Assets in basket:           {', '.join(report.assets.keys())}")
-    print(f"  Best tradeable EV today:    {best_ev:.1%}  "
+    print(f"  Best gated EV today:        {best_ev:.1%}  "
           f"({'qualified' if tradeable else 'none qualified'})")
     if max_t_today_cand is not None:
         sym_t = max_t_today_cand["symbol"]
@@ -245,6 +330,9 @@ def main():
     print(f"  Max T_2d (any pool):        {max_t_2d:.1%}")
     print(f"  VERDICT:                    {verdict}")
     print(f"  Why:                        {verdict_why}")
+    print(f"  Live gate:                  Q≥{GATE_Q:.0%}, T_today≥{GATE_T_TODAY:.0%}, "
+          f"DIR_ALIGN, {PRACTICAL_MIN_ATR:.1f}-{PRACTICAL_MAX_ATR:.1f}ATR, "
+          f"bucket n≥{MIN_BUCKET_N}")
     print("----------------------------------------------------------")
 
     # Per-asset compact dashboard
@@ -294,8 +382,7 @@ def main():
         print(">>> NO TRADEABLE SETUP IN BASKET TODAY <<<")
     print("==========================================================")
 
-    print(f"\n--- TRADEABLE TODAY  (Q ≥ {TRADEABLE_Q:.0%}, "
-          f"T_today ≥ {TRADEABLE_T_TODAY:.0%}, sector gate passed) ---")
+    print(f"\n--- TRADEABLE  (strict conditional-edge gate passed) ---")
     if not tradeable:
         print("  (none — all pools across basket too far or low-quality)")
     else:
@@ -309,7 +396,29 @@ def main():
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, "
                   f"{c.get('sector_alignment', 'NEUTRAL')}]   "
                   f"Q={c['q']:.1%}  {t_strs}  sector={c.get('sector_mult', 1.0):.2f}× "
-                  f"EV={c['ev']:.1%}")
+                  f"sector_w={c.get('sector_weight', 0.0):.0%}  EV={c['ev']:.1%}")
+
+    print(f"\n--- WATCH_ONLY  (interesting, but failed at least one strict gate) ---")
+    if not watch_only:
+        print("  (none)")
+    else:
+        for c in watch_only[:10]:
+            p = c["pool"]
+            side_lbl = "BELOW" if c["side"] == "below" else "ABOVE"
+            print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f} "
+                  f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}] "
+                  f"Q={c['q']:.1%} T_today={c['t_by_h'].get(primary_h, 0.0):.1%} "
+                  f"watch: {'; '.join(c['gate_reasons'])}")
+
+    print(f"\n--- REJECTED_WITH_REASON  (top 10 by EV) ---")
+    if not rejected:
+        print("  (none)")
+    else:
+        for c in rejected[:10]:
+            p = c["pool"]
+            print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f} "
+                  f"Q={c['q']:.1%} T_today={c['t_by_h'].get(primary_h, 0.0):.1%} "
+                  f"EV={c['ev']:.1%} rejected: {'; '.join(c['gate_reasons'])}")
 
     # IMMINENT TOUCH list: pools likely to be touched today regardless of quality. Surfaces
     # the high-T-but-low-Q pools that the Q-sorted watch list hides. These are warnings rather
@@ -415,9 +524,57 @@ def main():
     sector_intel = serialise_sector_intel(sec_metrics, sec_oos, rotation, corr_df)
     sector_intel_path = out / "sector_data.json"
     sector_intel_path.write_text(json.dumps(sector_intel, indent=2, default=str))
+    audit_csv_path = None
+    audit_calibration_path = None
+    if report.unified_oos_audit is not None and not report.unified_oos_audit.table.empty:
+        audit_csv_path = out / "phase3_oos_prediction_audit.csv"
+        report.unified_oos_audit.table.to_csv(audit_csv_path, index=False)
+        if not report.unified_oos_audit.sector_calibration.empty:
+            audit_calibration_path = out / "phase3_sector_calibration.csv"
+            report.unified_oos_audit.sector_calibration.to_csv(audit_calibration_path,
+                                                               index=False)
+
+    audit_metrics = {}
+    distance_bucket_metrics = {}
+    if report.unified_oos_audit is not None:
+        for name, mt in report.unified_oos_audit.metrics.items():
+            audit_metrics[name] = {
+                "n": mt.n,
+                "brier": mt.brier,
+                "logloss": mt.logloss,
+                "auc": mt.auc,
+                "top_decile_hit_rate": mt.top_decile_hit_rate,
+                "base_rate": mt.base_rate,
+                "mean_prediction": mt.mean_prediction,
+            }
+        distance_bucket_metrics = report.unified_oos_audit.distance_bucket_metrics
+
+    sector_shrinkage_report = {}
+    if report.unified_ml is not None and hasattr(report.unified_ml, "sector_stats"):
+        sector_shrinkage_report = report.unified_ml.sector_stats
 
     summary = {
         "symbols": symbols,
+        "validation_method": getattr(report.unified_ml, "validation_method", None)
+                             if report.unified_ml else cfg.validation_method,
+        "regularization_preset": cfg.regularization_preset,
+        "embargo_bars": cfg.embargo_bars,
+        "model_hyperparameters": getattr(report.unified_ml, "hyperparameters", {})
+                                  if report.unified_ml else {},
+        "validation_fold_stats": [
+            {
+                "fold": st.fold,
+                "validation_start": st.validation_start,
+                "validation_end": st.validation_end,
+                "original_train_size": st.original_train_size,
+                "purged_train_size": st.purged_train_size,
+                "purged_rows_removed": st.purged_rows_removed,
+                "embargoed_rows_removed": st.embargoed_rows_removed,
+                "validation_size": st.validation_size,
+            }
+            for st in (getattr(report.unified_ml, "validation_fold_stats", [])
+                       if report.unified_ml else [])
+        ],
         "total_oos_tested": report.total_oos_tested,
         "pooled_oos_respect": report.pooled_oos_respect,
         "pooled_oos_strict": report.pooled_oos_strict,
@@ -429,11 +586,27 @@ def main():
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
                                    if report.unified_timing_report else None),
+        "phase3_oos_audit": audit_metrics,
+        "distance_bucket_metrics": {
+            "quality": distance_bucket_metrics,
+            "proximity": {
+                str(s.horizon): s.distance_bucket_metrics
+                for s in (report.unified_timing_report.proximity_per_horizon
+                          if report.unified_timing_report else [])
+            },
+        },
+        "sector_shrinkage_report": sector_shrinkage_report,
+        "post_touch_reaction_metrics": report.post_touch_reaction_metrics,
+        "gate_decisions": gate_decisions,
     }
     out_json = out / "multi_asset_summary.json"
     out_json.write_text(json.dumps(summary, indent=2, default=str))
     print(f"\nartifacts: {out_json}")
     print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
+    if audit_csv_path is not None:
+        print(f"           {audit_csv_path}  ← Phase 3A global/sector/blended OOS rows")
+    if audit_calibration_path is not None:
+        print(f"           {audit_calibration_path}  ← Phase 3A per-sector calibration")
 
     # Per-asset chart
     for symbol, ad in report.assets.items():

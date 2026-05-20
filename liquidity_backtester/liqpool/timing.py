@@ -28,6 +28,33 @@ from .regime import compute_regime_series, nse_session, SESSION_LABELS
 from .indicators import atr
 
 
+def distance_bucket(distance_atr: float) -> str:
+    if distance_atr < 1.0:
+        return "0-1 ATR"
+    if distance_atr < 3.0:
+        return "1-3 ATR"
+    if distance_atr < 5.0:
+        return "3-5 ATR"
+    if distance_atr < 10.0:
+        return "5-10 ATR"
+    return "10+ ATR"
+
+
+def _bucket_binary_metrics(y: np.ndarray, p: np.ndarray) -> Dict:
+    from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+    pred = np.clip(np.asarray(p, dtype=float), 1e-6, 1.0 - 1e-6)
+    actual = np.asarray(y, dtype=int)
+    auc = float(roc_auc_score(actual, pred)) if len(set(actual)) > 1 else None
+    return {
+        "n": int(len(actual)),
+        "base_rate": float(actual.mean()) if len(actual) else 0.0,
+        "auc": auc,
+        "brier": float(brier_score_loss(actual, pred)) if len(actual) else 0.0,
+        "logloss": float(log_loss(actual, pred)) if len(actual) else 0.0,
+        "calibration_error": float(pred.mean() - actual.mean()) if len(actual) else 0.0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # State features
 # ---------------------------------------------------------------------------
@@ -517,6 +544,8 @@ class HorizonProxStats:
     brier: float
     decile_lift: float
     base_rate: float
+    logloss: float = 0.0
+    distance_bucket_metrics: List[Dict] = field(default_factory=list)
 
 
 @dataclass
@@ -575,7 +604,7 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
     primary_touched_array = None
     for h in sorted(proximity_models.keys()):
         pm = proximity_models[h]
-        rows, labels, pis, touched_lst = [], [], [], []
+        rows, labels, pis, touched_lst, distances = [], [], [], [], []
         for s in snapshots:
             if s.n_future_bars < h:
                 continue
@@ -589,6 +618,7 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
                 labels.append(touched)
                 pis.append(pi)
                 touched_lst.append(touched)
+                distances.append(float(dist))
         if not rows:
             continue
         X = pd.DataFrame(rows, columns=pm.feature_names).fillna(0.0)
@@ -600,6 +630,16 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
         else:
             auc = 0.0
         br = float(brier_score_loss(y, p))
+        ll = float(log_loss(y, np.clip(p, 1e-6, 1 - 1e-6)))
+        bucket_rows = []
+        dist_arr = np.asarray(distances, dtype=float)
+        for bucket in ("0-1 ATR", "1-3 ATR", "3-5 ATR", "5-10 ATR", "10+ ATR"):
+            mask = np.array([distance_bucket(d) == bucket for d in dist_arr], dtype=bool)
+            if not mask.any():
+                continue
+            row = _bucket_binary_metrics(y[mask], p[mask])
+            row["bucket"] = bucket
+            bucket_rows.append(row)
         # Decile lift
         decile_lift = 0.0
         if len(p) >= 20:
@@ -612,6 +652,7 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
         rpt.proximity_per_horizon.append(HorizonProxStats(
             horizon=h, n=int(len(y)), auc=auc, brier=br,
             decile_lift=decile_lift, base_rate=float(y.mean()),
+            logloss=ll, distance_bucket_metrics=bucket_rows,
         ))
         if primary_horizon is None:
             primary_horizon = h
@@ -671,6 +712,14 @@ def print_timing_report(rpt: TimingReport, file=None) -> None:
             lift_str = "inf" if s.decile_lift == float("inf") else f"{s.decile_lift:.1f}x"
             print(f"  {s.horizon:<8} {hours:<7.1f}h {s.n:>7} {s.auc:>6.3f} {s.brier:>7.4f} "
                   f"{s.base_rate:>9.1%} {lift_str:>12}", file=file)
+            if s.distance_bucket_metrics:
+                print(f"    {'bucket':<9} {'n':>6} {'base':>8} {'AUC':>6} {'Brier':>8} "
+                      f"{'logloss':>8} {'cal_err':>8}", file=file)
+                for row in s.distance_bucket_metrics:
+                    auc_s = f"{row['auc']:.3f}" if row["auc"] is not None else "n/a"
+                    print(f"    {row['bucket']:<9} {row['n']:>6} {row['base_rate']:>7.1%} "
+                          f"{auc_s:>6} {row['brier']:>8.4f} {row['logloss']:>8.4f} "
+                          f"{row['calibration_error']:>+7.1%}", file=file)
 
     print(f"\n[joint score sanity check]  Q × T_h{rpt.primary_prox_horizon} on touched pools",
           file=file)

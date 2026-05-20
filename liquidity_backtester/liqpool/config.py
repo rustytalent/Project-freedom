@@ -108,5 +108,12 @@ class Config:
     opt_explore_frac: float = 0.4       # fraction of iterations used for random exploration
     opt_seed: int = 7
 
+    # Financial-ML validation/model controls. Pool labels can overlap because a pool remains
+    # live across many future bars, so quality-model validation defaults to purged chronological
+    # folds plus an embargo after each validation slice.
+    validation_method: str = "purged_embargoed_walk_forward"
+    embargo_bars: int = 78
+    regularization_preset: str = "default"
+
     detect: DetectionParams = field(default_factory=DetectionParams)
     weights: FactorWeights = field(default_factory=FactorWeights)

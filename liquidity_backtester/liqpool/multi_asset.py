@@ -32,11 +32,14 @@ from .optimizer import optimize
 from .walkforward import walk_forward, WalkForwardReport
 from .featurize import MultiAssetFeaturizer
 from .ml_model import (PoolRespectModel, SectorMoERespectModel,
-                       trainable_mask, labels as ml_labels)
+                       trainable_mask, labels as ml_labels, label_end_time)
 from .stratified import StratifiedRespectModel
 from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, ProximityModel,
                      evaluate_timing, TimingReport)
 from .stats import wilson_score_interval, bootstrap_proportion_ci
+from .indicators import atr
+from .stratified import _headline_factor
+from .sectors import sector_of
 
 
 @dataclass
@@ -74,6 +77,280 @@ class MultiAssetReport:
     unified_proximity: Dict[int, ProximityModel] = field(default_factory=dict)
     unified_stratified: Optional[StratifiedRespectModel] = None
     unified_timing_report: Optional[TimingReport] = None
+    unified_oos_audit: Optional["OOSPredictionAudit"] = None
+    post_touch_reaction_metrics: Dict = field(default_factory=dict)
+
+
+@dataclass
+class QualityModelAuditMetrics:
+    """OOS prediction metrics for one quality-model output."""
+    model: str
+    n: int
+    brier: float
+    logloss: float
+    auc: Optional[float]
+    top_decile_hit_rate: float
+    base_rate: float
+    mean_prediction: float
+
+
+@dataclass
+class OOSPredictionAudit:
+    """Phase 3A audit table plus aggregate and per-sector calibration summaries."""
+    table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    metrics: Dict[str, QualityModelAuditMetrics] = field(default_factory=dict)
+    sector_calibration: pd.DataFrame = field(default_factory=pd.DataFrame)
+    distance_bucket_metrics: Dict[str, List[Dict]] = field(default_factory=dict)
+
+
+def distance_bucket(distance_atr: float) -> str:
+    if distance_atr < 1.0:
+        return "0-1 ATR"
+    if distance_atr < 3.0:
+        return "1-3 ATR"
+    if distance_atr < 5.0:
+        return "3-5 ATR"
+    if distance_atr < 10.0:
+        return "5-10 ATR"
+    return "10+ ATR"
+
+
+def q_bucket(q: float) -> str:
+    if q < 0.40:
+        return "<40%"
+    if q < 0.55:
+        return "40-55%"
+    if q < 0.70:
+        return "55-70%"
+    return "70%+"
+
+
+def _post_touch_group_metrics(items: List[Tuple[Pool, PoolResult, Optional[float]]]) -> Dict:
+    touched = [(p, r, q) for p, r, q in items if r.touched_at is not None]
+    n = len(touched)
+    if n == 0:
+        return {
+            "n": 0,
+            "respected_strong_rate": 0.0,
+            "swept_and_reclaimed_rate": 0.0,
+            "broken_strong_rate": 0.0,
+            "strict_respect_rate": 0.0,
+            "avg_mae_after_touch": 0.0,
+            "avg_mfe_after_touch": 0.0,
+            "r_multiple_available": False,
+        }
+    strong = sum(1 for _, r, _ in touched if r.outcome == "respected_strong")
+    swept = sum(1 for _, r, _ in touched if r.outcome == "swept_and_reclaimed")
+    broken = sum(1 for _, r, _ in touched if r.outcome == "broken_strong")
+    strict_den = strong + swept + broken
+    return {
+        "n": int(n),
+        "respected_strong_rate": strong / n,
+        "swept_and_reclaimed_rate": swept / n,
+        "broken_strong_rate": broken / n,
+        "strict_respect_rate": (strong + swept) / strict_den if strict_den else 0.0,
+        "avg_mae_after_touch": float(np.mean([r.max_excursion_through for _, r, _ in touched])),
+        "avg_mfe_after_touch": float(np.mean([r.reaction_atr for _, r, _ in touched])),
+        "r_multiple_available": False,
+    }
+
+
+def build_post_touch_reaction_metrics(pools: List[Pool], results: List[PoolResult],
+                                      q_values: Optional[Sequence[float]] = None) -> Dict:
+    q_list: List[Optional[float]] = ([float(v) for v in q_values]
+                                    if q_values is not None else [None] * len(pools))
+    paired = list(zip(pools, results, q_list))
+    out = {"overall": _post_touch_group_metrics(paired), "by": {}}
+
+    groups: Dict[str, Dict[str, List[Tuple[Pool, PoolResult, Optional[float]]]]] = {
+        "factor_type": {},
+        "tf_count": {},
+        "sector": {},
+        "direction_alignment": {},
+        "q_bucket": {},
+    }
+    for p, r, q in paired:
+        groups["factor_type"].setdefault(_headline_factor(p), []).append((p, r, q))
+        groups["tf_count"].setdefault(str(len(set(p.tfs))), []).append((p, r, q))
+        groups["sector"].setdefault(sector_of(p.asset), []).append((p, r, q))
+        # Historical OOS pools do not currently store the contemporaneous direction-model signal.
+        # Keep the dimension explicit so live runs can fill it later without changing artifacts.
+        groups["direction_alignment"].setdefault("DIR_NA", []).append((p, r, q))
+        groups["q_bucket"].setdefault(q_bucket(q) if q is not None else "Q_NA", []).append(
+            (p, r, q)
+        )
+
+    for group_name, group_items in groups.items():
+        out["by"][group_name] = {
+            name: _post_touch_group_metrics(items)
+            for name, items in sorted(group_items.items(), key=lambda kv: kv[0])
+        }
+    return out
+
+
+def _prediction_metrics(model_name: str, y_true: np.ndarray,
+                        y_pred: np.ndarray) -> QualityModelAuditMetrics:
+    from sklearn.metrics import roc_auc_score
+
+    n = int(len(y_true))
+    if n == 0:
+        return QualityModelAuditMetrics(model_name, 0, float("nan"), float("nan"), None,
+                                        float("nan"), float("nan"), float("nan"))
+
+    pred = np.clip(np.asarray(y_pred, dtype=float), 1e-6, 1.0 - 1e-6)
+    actual = np.asarray(y_true, dtype=float)
+    brier = float(np.mean((pred - actual) ** 2))
+    logloss = float(-np.mean(actual * np.log(pred) + (1.0 - actual) * np.log(1.0 - pred)))
+    auc = float(roc_auc_score(actual, pred)) if len(np.unique(actual)) == 2 else None
+    top_n = max(1, int(np.ceil(n * 0.10)))
+    top_idx = np.argsort(-pred)[:top_n]
+    return QualityModelAuditMetrics(
+        model=model_name,
+        n=n,
+        brier=brier,
+        logloss=logloss,
+        auc=auc,
+        top_decile_hit_rate=float(actual[top_idx].mean()),
+        base_rate=float(actual.mean()),
+        mean_prediction=float(pred.mean()),
+    )
+
+
+def build_oos_prediction_audit(model: Union[PoolRespectModel, SectorMoERespectModel],
+                               featurizer: MultiAssetFeaturizer,
+                               oos_pools: List[Pool],
+                               oos_results: List[PoolResult],
+                               asset_dfs: Optional[Dict[str, pd.DataFrame]] = None
+                               ) -> OOSPredictionAudit:
+    """Build the Phase 3A OOS table before any learned gate changes.
+
+    The table keeps every OOS pool for traceability, but metrics use only decisive outcomes
+    (`trainable_mask`) because weak/ambiguous touches are intentionally excluded from Q training.
+    """
+    if not oos_pools or not oos_results:
+        return OOSPredictionAudit()
+    X_oos = featurizer.transform_batch(oos_pools)
+    if isinstance(model, SectorMoERespectModel):
+        table = model.predict_components(X_oos, oos_pools)
+    else:
+        pred = model.predict(X_oos, pools=oos_pools)
+        table = pd.DataFrame({
+            "asset": [p.asset for p in oos_pools],
+            "sector": ["OTHER"] * len(oos_pools),
+            "global_q": pred,
+            "sector_q": np.nan,
+            "gate_weight": 0.0,
+            "blended_q": pred,
+            "fallback_reason": "",
+        })
+
+    trainable = trainable_mask(oos_results)
+    actual = np.full(len(oos_results), np.nan, dtype=float)
+    if trainable.any():
+        actual[trainable] = ml_labels([r for r, keep in zip(oos_results, trainable) if keep])
+
+    table.insert(0, "pool_index", np.arange(len(oos_pools)))
+    table["actual"] = actual
+    table["outcome"] = [r.outcome for r in oos_results]
+    table["is_decisive"] = trainable
+    table["pool_score"] = [float(p.score) for p in oos_pools]
+    table["pool_mid"] = [float(p.mid) for p in oos_pools]
+    table["pool_width"] = [float(p.width) for p in oos_pools]
+    table["n_tfs"] = [int(len(set(p.tfs))) for p in oos_pools]
+    distances = []
+    if asset_dfs:
+        atr_cache: Dict[str, pd.Series] = {}
+        for p in oos_pools:
+            df = asset_dfs.get(p.asset)
+            if df is None or df.empty:
+                distances.append(np.nan)
+                continue
+            if p.asset not in atr_cache:
+                atr_cache[p.asset] = atr(df, 14).bfill()
+            pos = int(df.index.searchsorted(p.available_at, side="left"))
+            pos = min(max(pos, 0), len(df) - 1)
+            close = float(df["close"].iloc[pos])
+            atr_val = max(float(atr_cache[p.asset].iloc[pos]), 1e-9)
+            if p.price_low > close:
+                dist = (p.mid - close) / atr_val
+            elif p.price_high < close:
+                dist = (close - p.mid) / atr_val
+            else:
+                dist = 0.0
+            distances.append(float(max(0.0, dist)))
+    else:
+        distances = [np.nan] * len(oos_pools)
+    table["distance_atr"] = distances
+    table["distance_bucket"] = [
+        distance_bucket(float(d)) if pd.notna(d) else "unknown" for d in distances
+    ]
+
+    metrics: Dict[str, QualityModelAuditMetrics] = {}
+    metric_cols = {
+        "global": "global_q",
+        "sector_expert": "sector_q",
+        "blended": "blended_q",
+    }
+    for name, col in metric_cols.items():
+        valid = table["actual"].notna() & table[col].notna()
+        metrics[name] = _prediction_metrics(
+            name,
+            table.loc[valid, "actual"].to_numpy(dtype=float),
+            table.loc[valid, col].to_numpy(dtype=float),
+        )
+
+    cal_rows = []
+    decisive = table[table["actual"].notna()]
+    for sector, sec_df in decisive.groupby("sector"):
+        for name, col in metric_cols.items():
+            valid = sec_df[col].notna()
+            if not valid.any():
+                continue
+            pred = sec_df.loc[valid, col].astype(float)
+            act = sec_df.loc[valid, "actual"].astype(float)
+            cal_rows.append({
+                "model": name,
+                "sector": sector,
+                "n": int(len(act)),
+                "actual_rate": float(act.mean()),
+                "mean_prediction": float(pred.mean()),
+                "calibration_error": float(pred.mean() - act.mean()),
+            })
+    sector_calib = pd.DataFrame(cal_rows).sort_values(
+        ["model", "sector"], ignore_index=True,
+    ) if cal_rows else pd.DataFrame()
+
+    distance_metrics: Dict[str, List[Dict]] = {}
+    decisive = table[table["actual"].notna() & table["distance_atr"].notna()]
+    for name, col in metric_cols.items():
+        rows = []
+        for bucket, bdf in decisive.groupby("distance_bucket"):
+            valid = bdf[col].notna()
+            if not valid.any():
+                continue
+            mt = _prediction_metrics(
+                name,
+                bdf.loc[valid, "actual"].to_numpy(dtype=float),
+                bdf.loc[valid, col].to_numpy(dtype=float),
+            )
+            rows.append({
+                "bucket": bucket,
+                "n": mt.n,
+                "base_rate": mt.base_rate,
+                "auc": mt.auc,
+                "brier": mt.brier,
+                "logloss": mt.logloss,
+                "calibration_error": mt.mean_prediction - mt.base_rate,
+            })
+        distance_metrics[name] = sorted(rows, key=lambda r: [
+            "0-1 ATR", "1-3 ATR", "3-5 ATR", "5-10 ATR", "10+ ATR", "unknown"
+        ].index(r["bucket"]) if r["bucket"] in [
+            "0-1 ATR", "1-3 ATR", "3-5 ATR", "5-10 ATR", "10+ ATR", "unknown"
+        ] else 99)
+
+    return OOSPredictionAudit(table=table, metrics=metrics,
+                              sector_calibration=sector_calib,
+                              distance_bucket_metrics=distance_metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -213,14 +490,37 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         y_train = ml_labels(train_result_keep)
         try:
             X_oos_all = multi_feat.transform_batch(all_oos_pools) if all_oos_pools else None
+            base_periods = []
+            for df in asset_dfs.values():
+                diffs = pd.Series(df.index).diff().dropna()
+                if len(diffs):
+                    sec = float(diffs.median().total_seconds())
+                    if sec > 0:
+                        base_periods.append(sec)
+            base_period_seconds = float(np.median(base_periods)) if base_periods else 300.0
             ml = SectorMoERespectModel().fit(
                 X_train, y_train, train_pool_keep,
                 X_oos=X_oos_all, oos_pools=all_oos_pools, oos_results=all_oos_results,
                 val_frac=0.25, seed=cfg.opt_seed + 100,
                 min_sector_train_n=60, min_sector_class_n=8, min_sector_oos_n=20,
                 expert_weight=0.70,
+                sample_start_times=[p.available_at for p in train_pool_keep],
+                sample_end_times=[label_end_time(p, r)
+                                  for p, r in zip(train_pool_keep, train_result_keep)],
+                embargo_bars=cfg.embargo_bars,
+                base_period_seconds=base_period_seconds,
+                validation_method=cfg.validation_method,
+                regularization_preset=cfg.regularization_preset,
             )
             report.unified_ml = ml
+            report.unified_oos_audit = build_oos_prediction_audit(
+                ml, multi_feat, all_oos_pools, all_oos_results, asset_dfs=asset_dfs,
+            )
+            if report.unified_oos_audit is not None and not report.unified_oos_audit.table.empty:
+                report.post_touch_reaction_metrics = build_post_touch_reaction_metrics(
+                    all_oos_pools, all_oos_results,
+                    q_values=report.unified_oos_audit.table["blended_q"].to_numpy(dtype=float),
+                )
         except Exception as e:
             print(f"[multi_asset] unified sector MoE training skipped: {e}")
 
@@ -387,23 +687,43 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
                       if isinstance(m, SectorMoERespectModel)
                       else "unified ML quality model")
         print(f"\n[{model_name}]   train n={m.train_n} val n={m.val_n}", file=file)
+        print(f"  Validation method:       {getattr(m, 'validation_method', 'unknown')}", file=file)
+        print(f"  Regularization preset:   {getattr(m, 'regularization_preset', 'default')}", file=file)
+        print(f"  Train Brier / log-loss: {getattr(m, 'train_brier', 0.0):.4f} / "
+              f"{getattr(m, 'train_logloss', 0.0):.4f}", file=file)
         print(f"  Val Brier / log-loss:   {m.val_brier:.4f} / {m.val_logloss:.4f}", file=file)
+        print(f"  Fit gap (Brier):         "
+              f"{getattr(m, 'val_brier', 0.0) - getattr(m, 'train_brier', 0.0):+.4f}",
+              file=file)
         print(f"  Val AUC-ROC:            {m.val_auc:.3f}", file=file)
         print(f"  Base rate:              {m.base_rate:.1%}", file=file)
+        if getattr(m, "validation_fold_stats", None):
+            print(f"\n[purged/embargoed quality validation folds]", file=file)
+            print(f"  {'fold':>4} {'orig_tr':>8} {'purged_tr':>9} {'purged':>7} "
+                  f"{'embargo':>8} {'val':>6}", file=file)
+            for st in m.validation_fold_stats:
+                print(f"  {st.fold + 1:>4} {st.original_train_size:>8} "
+                      f"{st.purged_train_size:>9} {st.purged_rows_removed:>7} "
+                      f"{st.embargoed_rows_removed:>8} {st.validation_size:>6}", file=file)
         if isinstance(m, SectorMoERespectModel):
-            print(f"  Blend:                  {m.expert_weight:.0%} sector expert / "
-                  f"{m.global_weight:.0%} global fallback", file=file)
+            print(f"  Sector expert cap:      {m.expert_weight:.0%} "
+                  f"(actual weights are dynamically shrunk)", file=file)
             if m.sector_stats:
-                print(f"\n[sector experts]", file=file)
-                print(f"  {'sector':<10} {'status':<8} {'train':>6} {'pos':>5} {'neg':>5} "
-                      f"{'oos_dec':>7} {'auc':>6} {'reason':<18}", file=file)
+                print(f"\n[sector expert dynamic shrinkage]", file=file)
+                print(f"  {'sector':<10} {'status':<8} {'train':>6} {'expert_ll':>9} "
+                      f"{'global_ll':>9} {'auc':>6} {'weight':>7} {'reason':<28}",
+                      file=file)
                 for sector, st in m.expert_summary():
                     auc = st.get("val_auc")
                     auc_s = f"{auc:.3f}" if isinstance(auc, float) else "-"
+                    ell = st.get("expert_logloss")
+                    gll = st.get("global_logloss")
+                    ell_s = f"{ell:.4f}" if isinstance(ell, float) else "-"
+                    gll_s = f"{gll:.4f}" if isinstance(gll, float) else "-"
                     print(f"  {sector:<10} {st.get('status', '-'):<8} "
-                          f"{st.get('train_n', 0):>6} {st.get('pos_n', 0):>5} "
-                          f"{st.get('neg_n', 0):>5} {st.get('oos_decisive_n', 0):>7} "
-                          f"{auc_s:>6} {st.get('reason', ''):<18}", file=file)
+                          f"{st.get('train_n', 0):>6} {ell_s:>9} {gll_s:>9} "
+                          f"{auc_s:>6} {st.get('sector_weight', 0.0):>6.1%} "
+                          f"{st.get('reason', ''):<28}", file=file)
         print(f"\n[unified ML feature importance — top 15]", file=file)
         for name, gain in m.feature_importance(15):
             print(f"  {name:<34} {gain:>10.1f}", file=file)
@@ -416,10 +736,78 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
                 print(f"  {tfb:<5} {fam:<8} {bc.n_oos:>6} {bc.empirical_rate:>8.1%} "
                       f"{bc.pull_weight:>5.2f}", file=file)
 
+    # -- Phase 3A: honest OOS prediction audit for global / sector / blended Q --
+    if report.unified_oos_audit is not None and report.unified_oos_audit.metrics:
+        audit = report.unified_oos_audit
+        print(f"\n[Phase 3A OOS prediction audit]", file=file)
+        print(f"  {'model':<14} {'n':>6} {'brier':>8} {'logloss':>8} {'auc':>6} "
+              f"{'top10_hit':>10} {'base':>7} {'mean_q':>7}", file=file)
+        for name in ("global", "sector_expert", "blended"):
+            mt = audit.metrics.get(name)
+            if mt is None:
+                continue
+            auc_s = f"{mt.auc:.3f}" if mt.auc is not None else "n/a"
+            print(f"  {name:<14} {mt.n:>6} {mt.brier:>8.4f} {mt.logloss:>8.4f} "
+                  f"{auc_s:>6} {mt.top_decile_hit_rate:>9.1%} "
+                  f"{mt.base_rate:>6.1%} {mt.mean_prediction:>6.1%}", file=file)
+        if not audit.sector_calibration.empty:
+            print(f"\n[Phase 3A per-sector calibration]  mean_q - actual", file=file)
+            print(f"  {'model':<14} {'sector':<10} {'n':>6} {'actual':>8} "
+                  f"{'mean_q':>8} {'err':>8}", file=file)
+            cal = audit.sector_calibration.copy()
+            cal["abs_err"] = cal["calibration_error"].abs()
+            for _, row in cal.sort_values(["model", "abs_err"], ascending=[True, False]).iterrows():
+                print(f"  {row['model']:<14} {row['sector']:<10} {int(row['n']):>6} "
+                      f"{row['actual_rate']:>7.1%} {row['mean_prediction']:>7.1%} "
+                      f"{row['calibration_error']:>+7.1%}", file=file)
+        if audit.distance_bucket_metrics:
+            print(f"\n[quality distance-binned OOS metrics]  blended Q", file=file)
+            print(f"  {'bucket':<9} {'n':>6} {'base':>8} {'AUC':>6} {'Brier':>8} "
+                  f"{'logloss':>8} {'cal_err':>8}", file=file)
+            for row in audit.distance_bucket_metrics.get("blended", []):
+                auc_s = f"{row['auc']:.3f}" if row["auc"] is not None else "n/a"
+                print(f"  {row['bucket']:<9} {row['n']:>6} {row['base_rate']:>7.1%} "
+                      f"{auc_s:>6} {row['brier']:>8.4f} {row['logloss']:>8.4f} "
+                      f"{row['calibration_error']:>+7.1%}", file=file)
+
     # -- Unified Stratified bucket model --
     if report.unified_stratified is not None:
         from .stratified import print_model as _print_strat
         _print_strat(report.unified_stratified, file=file)
+
+    if report.post_touch_reaction_metrics:
+        pt = report.post_touch_reaction_metrics
+        overall = pt.get("overall", {})
+        print(f"\n================ POST-TOUCH REACTION QUALITY ================",
+              file=file)
+        print(f"  touched n:              {overall.get('n', 0)}", file=file)
+        print(f"  respected_strong:       {overall.get('respected_strong_rate', 0.0):.1%}",
+              file=file)
+        print(f"  swept_and_reclaimed:    {overall.get('swept_and_reclaimed_rate', 0.0):.1%}",
+              file=file)
+        print(f"  broken_strong:          {overall.get('broken_strong_rate', 0.0):.1%}",
+              file=file)
+        print(f"  strict respect:         {overall.get('strict_respect_rate', 0.0):.1%}",
+              file=file)
+        print(f"  avg MAE after touch:    {overall.get('avg_mae_after_touch', 0.0):.2f} ATR",
+              file=file)
+        print(f"  avg MFE after touch:    {overall.get('avg_mfe_after_touch', 0.0):.2f} ATR",
+              file=file)
+        for group in ("factor_type", "tf_count", "sector", "direction_alignment", "q_bucket"):
+            rows = pt.get("by", {}).get(group, {})
+            if not rows:
+                continue
+            print(f"\n[post-touch by {group}]", file=file)
+            print(f"  {'bucket':<14} {'n':>6} {'strict':>8} {'strong':>8} "
+                  f"{'swept':>8} {'broken':>8} {'MFE':>7} {'MAE':>7}", file=file)
+            for name, row in sorted(rows.items(), key=lambda kv: -kv[1].get("n", 0)):
+                print(f"  {name:<14} {row.get('n', 0):>6} "
+                      f"{row.get('strict_respect_rate', 0.0):>7.1%} "
+                      f"{row.get('respected_strong_rate', 0.0):>7.1%} "
+                      f"{row.get('swept_and_reclaimed_rate', 0.0):>7.1%} "
+                      f"{row.get('broken_strong_rate', 0.0):>7.1%} "
+                      f"{row.get('avg_mfe_after_touch', 0.0):>6.2f} "
+                      f"{row.get('avg_mae_after_touch', 0.0):>6.2f}", file=file)
 
     # -- Unified direction + proximity models --
     if report.unified_timing_report is not None:
@@ -436,6 +824,14 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
             lift_str = "inf" if s.decile_lift == float("inf") else f"{s.decile_lift:.1f}x"
             print(f"  h={s.horizon:<4} AUC={s.auc:.3f}  brier={s.brier:.4f}  "
                   f"base_rate={s.base_rate:.1%}  decile_lift={lift_str}  n={s.n}", file=file)
+            if getattr(s, "distance_bucket_metrics", None):
+                print(f"    {'bucket':<9} {'n':>6} {'base':>8} {'AUC':>6} {'Brier':>8} "
+                      f"{'logloss':>8} {'cal_err':>8}", file=file)
+                for row in s.distance_bucket_metrics:
+                    auc_s = f"{row['auc']:.3f}" if row["auc"] is not None else "n/a"
+                    print(f"    {row['bucket']:<9} {row['n']:>6} {row['base_rate']:>7.1%} "
+                          f"{auc_s:>6} {row['brier']:>8.4f} {row['logloss']:>8.4f} "
+                          f"{row['calibration_error']:>+7.1%}", file=file)
 
         # Feature importances
         if report.unified_direction is not None:

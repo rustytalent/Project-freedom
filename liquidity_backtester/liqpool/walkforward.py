@@ -33,7 +33,7 @@ from .optimizer import optimize
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .stratified import StratifiedRespectModel
 from .featurize import Featurizer
-from .ml_model import PoolRespectModel, trainable_mask, labels as ml_labels
+from .ml_model import PoolRespectModel, trainable_mask, labels as ml_labels, label_end_time
 from .directional import evaluate as directional_evaluate, DirectionalReport
 from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, ProximityModel,
                      evaluate_timing, TimingReport)
@@ -270,7 +270,22 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
                     [r for r, keep in zip(report.train_results_for_ml, train_mask) if keep]
                 )
                 model = PoolRespectModel().fit(X_train, y_train,
-                                                val_frac=0.25, seed=cfg.opt_seed)
+                                                val_frac=0.25, seed=cfg.opt_seed,
+                                                sample_start_times=[
+                                                    p.available_at for p, keep
+                                                    in zip(report.train_pools_for_ml, train_mask)
+                                                    if keep
+                                                ],
+                                                sample_end_times=[
+                                                    label_end_time(p, r) for p, r, keep
+                                                    in zip(report.train_pools_for_ml,
+                                                           report.train_results_for_ml,
+                                                           train_mask)
+                                                    if keep
+                                                ],
+                                                embargo_bars=cfg.embargo_bars,
+                                                validation_method=cfg.validation_method,
+                                                regularization_preset=cfg.regularization_preset)
                 # Predict on OOS pool set (every OOS pool, decisive or not — for ranking/touch
                 # evaluation; only decisive ones are used for calibration metrics).
                 X_oos = feat.transform_batch(report.oos_pools)
@@ -425,9 +440,22 @@ def print_report(report: WalkForwardReport, file=None) -> None:
         print(f"\n[ML model fit]  (LightGBM + isotonic + bucket shrinkage)", file=file)
         print(f"  train pools:            {m.train_n}", file=file)
         print(f"  validation pools:       {m.val_n}", file=file)
+        print(f"  validation method:      {m.validation_method}", file=file)
+        print(f"  regularization preset:  {m.regularization_preset}", file=file)
         print(f"  base rate:              {m.base_rate:.1%}", file=file)
+        print(f"  train Brier / log-loss: {m.train_brier:.4f}  /  {m.train_logloss:.4f}",
+              file=file)
         print(f"  val Brier / log-loss:   {m.val_brier:.4f}  /  {m.val_logloss:.4f}", file=file)
+        print(f"  fit gap (Brier):        {m.val_brier - m.train_brier:+.4f}", file=file)
         print(f"  val AUC-ROC:            {m.val_auc:.3f}", file=file)
+        if m.validation_fold_stats:
+            print(f"\n[ML purged/embargoed fold stats]", file=file)
+            print(f"  {'fold':>4} {'orig_tr':>8} {'purged_tr':>9} {'purged':>7} "
+                  f"{'embargo':>8} {'val':>6}", file=file)
+            for st in m.validation_fold_stats:
+                print(f"  {st.fold + 1:>4} {st.original_train_size:>8} "
+                      f"{st.purged_train_size:>9} {st.purged_rows_removed:>7} "
+                      f"{st.embargoed_rows_removed:>8} {st.validation_size:>6}", file=file)
         if m.bucket_calib:
             print(f"\n[ML bucket-level OOS shrinkage]   "
                   f"(applied on top of global isotonic)", file=file)

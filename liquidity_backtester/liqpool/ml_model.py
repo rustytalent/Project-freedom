@@ -61,6 +61,107 @@ class BucketCalib:
 
 
 @dataclass
+class PurgedFoldStats:
+    """Audit trail for purged/embargoed quality-model validation folds."""
+    fold: int
+    validation_start: str
+    validation_end: str
+    original_train_size: int
+    purged_train_size: int
+    purged_rows_removed: int
+    embargoed_rows_removed: int
+    validation_size: int
+
+
+def label_end_time(pool: Pool, result: PoolResult) -> pd.Timestamp:
+    """Best available end of the pool's evaluation window for purging overlap checks."""
+    candidates = [pool.available_at, result.touched_at, result.broken_at]
+    return max(ts for ts in candidates if ts is not None)
+
+
+def _lgb_params(seed: int, regularization_preset: str) -> Dict:
+    if regularization_preset == "conservative_finml":
+        return dict(
+            objective="binary",
+            metric="binary_logloss",
+            learning_rate=0.035,
+            # Conservative financial-ML preset: shallow, bagged, column-subsampled, and heavily
+            # regularized to reduce small-sample memorisation in the quality/reaction model.
+            num_leaves=12,
+            max_depth=4,
+            min_data_in_leaf=35,
+            feature_fraction=0.60,
+            bagging_fraction=0.70,
+            bagging_freq=5,
+            lambda_l2=12.0,
+            lambda_l1=2.0,
+            min_gain_to_split=0.01,
+            verbose=-1,
+            seed=seed,
+        )
+    return dict(
+        objective="binary",
+        metric="binary_logloss",
+        learning_rate=0.05,
+        num_leaves=8,
+        max_depth=3,
+        min_data_in_leaf=15,
+        feature_fraction=0.80,
+        bagging_fraction=0.80,
+        bagging_freq=5,
+        lambda_l2=5.0,
+        lambda_l1=0.5,
+        verbose=-1,
+        seed=seed,
+    )
+
+
+def _purged_embargoed_splits(start_times: Sequence[pd.Timestamp],
+                             end_times: Sequence[pd.Timestamp],
+                             y: np.ndarray,
+                             embargo_bars: int,
+                             base_period_seconds: float,
+                             n_folds: int = 4) -> Tuple[List[Tuple[np.ndarray, np.ndarray]],
+                                                        List[PurgedFoldStats]]:
+    n = len(start_times)
+    if n < 30:
+        return [], []
+    starts = pd.to_datetime(list(start_times))
+    ends = pd.to_datetime(list(end_times))
+    order = np.argsort(starts.values)
+    chunks = [c for c in np.array_split(order, max(2, min(n_folds, n // 10))) if len(c) > 0]
+    embargo_td = pd.Timedelta(seconds=float(base_period_seconds) * max(0, embargo_bars))
+    splits: List[Tuple[np.ndarray, np.ndarray]] = []
+    stats: List[PurgedFoldStats] = []
+
+    for fold, val_idx in enumerate(chunks):
+        val_start = starts[val_idx].min()
+        val_end = starts[val_idx].max()
+        non_val = np.setdiff1d(np.arange(n), val_idx, assume_unique=False)
+        # Purge any sample whose own label/evaluation window intersects the validation window.
+        overlaps_validation = (starts[non_val] <= val_end) & (ends[non_val] >= val_start)
+        # Embargo samples that begin immediately after validation, where shared market state can
+        # make near-duplicate pools look independent.
+        embargoed = (starts[non_val] > val_end) & (starts[non_val] <= val_end + embargo_td)
+        train_idx = non_val[~(overlaps_validation | embargoed)]
+        st = PurgedFoldStats(
+            fold=fold,
+            validation_start=str(val_start),
+            validation_end=str(val_end),
+            original_train_size=int(len(non_val)),
+            purged_train_size=int(len(train_idx)),
+            purged_rows_removed=int(overlaps_validation.sum()),
+            embargoed_rows_removed=int(embargoed.sum()),
+            validation_size=int(len(val_idx)),
+        )
+        stats.append(st)
+        if len(train_idx) >= 20 and len(val_idx) >= 5:
+            if len(np.unique(y[train_idx])) == 2 and len(np.unique(y[val_idx])) == 2:
+                splits.append((train_idx, val_idx))
+    return splits, stats
+
+
+@dataclass
 class PoolRespectModel:
     """LightGBM + isotonic calibration + bucket shrinkage. predict() returns calibrated P(respect)."""
     feature_names: List[str] = field(default_factory=list)
@@ -70,12 +171,26 @@ class PoolRespectModel:
     val_brier: float = 0.0
     val_logloss: float = 0.0
     val_auc: float = 0.0
+    train_brier: float = 0.0
+    train_logloss: float = 0.0
+    train_auc: float = 0.0
     base_rate: float = 0.0
+    validation_method: str = "random_stratified"
+    regularization_preset: str = "default"
+    hyperparameters: Dict = field(default_factory=dict)
+    validation_fold_stats: List[PurgedFoldStats] = field(default_factory=list)
+    validation_indices: List[int] = field(default_factory=list)
     # The underlying objects are stashed as attributes after fit().
 
     def fit(self, X: pd.DataFrame, y: np.ndarray,
             buckets: Optional[List[Tuple[str, str]]] = None,
-            val_frac: float = 0.25, seed: int = 17) -> "PoolRespectModel":
+            val_frac: float = 0.25, seed: int = 17,
+            sample_start_times: Optional[Sequence[pd.Timestamp]] = None,
+            sample_end_times: Optional[Sequence[pd.Timestamp]] = None,
+            embargo_bars: int = 78,
+            base_period_seconds: float = 300.0,
+            validation_method: str = "random_stratified",
+            regularization_preset: str = "default") -> "PoolRespectModel":
         import lightgbm as lgb
         from sklearn.isotonic import IsotonicRegression
         from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
@@ -87,38 +202,42 @@ class PoolRespectModel:
 
         self.feature_names = list(X.columns)
         self.base_rate = float(y.mean())
-        # Stratified random split. We want both train and val to contain positives + negatives.
-        pos_idx = np.where(y == 1)[0]
-        neg_idx = np.where(y == 0)[0]
-        rng.shuffle(pos_idx)
-        rng.shuffle(neg_idx)
-        n_val_pos = max(1, int(round(len(pos_idx) * val_frac)))
-        n_val_neg = max(1, int(round(len(neg_idx) * val_frac)))
-        val_idx = np.concatenate([pos_idx[:n_val_pos], neg_idx[:n_val_neg]])
-        train_idx = np.concatenate([pos_idx[n_val_pos:], neg_idx[n_val_neg:]])
-        rng.shuffle(val_idx); rng.shuffle(train_idx)
+        self.regularization_preset = regularization_preset
+        self.validation_fold_stats = []
+
+        splits: List[Tuple[np.ndarray, np.ndarray]] = []
+        if (validation_method == "purged_embargoed_walk_forward"
+                and sample_start_times is not None and sample_end_times is not None):
+            splits, self.validation_fold_stats = _purged_embargoed_splits(
+                sample_start_times, sample_end_times, y,
+                embargo_bars=embargo_bars,
+                base_period_seconds=base_period_seconds,
+            )
+
+        if splits:
+            # Fit on the latest usable chronological validation split. Earlier fold stats remain
+            # logged so the run can show how much purging/embargoing affected sample availability.
+            train_idx, val_idx = splits[-1]
+            self.validation_method = "purged_embargoed_walk_forward"
+        else:
+            # Backward-compatible fallback: stratified random split for callers that have not yet
+            # supplied sample label windows.
+            self.validation_method = "random_stratified"
+            pos_idx = np.where(y == 1)[0]
+            neg_idx = np.where(y == 0)[0]
+            rng.shuffle(pos_idx)
+            rng.shuffle(neg_idx)
+            n_val_pos = max(1, int(round(len(pos_idx) * val_frac)))
+            n_val_neg = max(1, int(round(len(neg_idx) * val_frac)))
+            val_idx = np.concatenate([pos_idx[:n_val_pos], neg_idx[:n_val_neg]])
+            train_idx = np.concatenate([pos_idx[n_val_pos:], neg_idx[n_val_neg:]])
+            rng.shuffle(val_idx); rng.shuffle(train_idx)
 
         X_tr, y_tr = X.iloc[train_idx].values, y[train_idx]
         X_val, y_val = X.iloc[val_idx].values, y[val_idx]
 
-        params = dict(
-            objective="binary",
-            metric="binary_logloss",
-            learning_rate=0.05,
-            # Tighter than initial defaults — with only ~500 train pools, max_depth=4 with
-            # min_data_in_leaf=8 overfit (train AUC 0.83 vs OOS 0.56). Tighter trees and stronger
-            # L2 reduce the gap; accept a small drop in best-case AUC for better generalization.
-            num_leaves=8,
-            max_depth=3,
-            min_data_in_leaf=15,
-            feature_fraction=0.80,
-            bagging_fraction=0.80,
-            bagging_freq=5,
-            lambda_l2=5.0,
-            lambda_l1=0.5,
-            verbose=-1,
-            seed=seed,
-        )
+        params = _lgb_params(seed, regularization_preset)
+        self.hyperparameters = dict(params)
         dtrain = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
         dval = lgb.Dataset(X_val, label=y_val, reference=dtrain, feature_name=self.feature_names)
 
@@ -133,9 +252,15 @@ class PoolRespectModel:
         self._iso = IsotonicRegression(out_of_bounds="clip")
         self._iso.fit(val_raw, y_val)
         val_calib = self._iso.transform(val_raw)
+        train_raw = self._gbm.predict(X_tr, num_iteration=self._gbm.best_iteration)
+        train_calib = self._iso.transform(train_raw)
 
         self.train_n = int(len(train_idx))
         self.val_n = int(len(val_idx))
+        self.validation_indices = [int(i) for i in val_idx]
+        self.train_brier = float(brier_score_loss(y_tr, train_calib))
+        self.train_logloss = float(log_loss(y_tr, np.clip(train_calib, 1e-6, 1 - 1e-6)))
+        self.train_auc = float(roc_auc_score(y_tr, train_calib)) if len(set(y_tr)) > 1 else 0.0
         self.val_brier = float(brier_score_loss(y_val, val_calib))
         self.val_logloss = float(log_loss(y_val, np.clip(val_calib, 1e-6, 1 - 1e-6)))
         # AUC needs both classes present (which our stratified split guarantees by construction).
@@ -239,7 +364,8 @@ class SectorMoERespectModel:
     global_model: Optional[PoolRespectModel] = None
     sector_models: Dict[str, PoolRespectModel] = field(default_factory=dict)
     sector_stats: Dict[str, Dict] = field(default_factory=dict)
-    expert_weight: float = 0.70
+    sector_weights: Dict[str, float] = field(default_factory=dict)
+    expert_weight: float = 0.70          # cap only; per-sector weights are dynamic.
     global_weight: float = 0.30
     min_sector_train_n: int = 60
     min_sector_class_n: int = 8
@@ -250,7 +376,14 @@ class SectorMoERespectModel:
     val_brier: float = 0.0
     val_logloss: float = 0.0
     val_auc: float = 0.0
+    train_brier: float = 0.0
+    train_logloss: float = 0.0
+    train_auc: float = 0.0
     base_rate: float = 0.0
+    validation_method: str = "random_stratified"
+    regularization_preset: str = "default"
+    hyperparameters: Dict = field(default_factory=dict)
+    validation_fold_stats: List[PurgedFoldStats] = field(default_factory=list)
 
     @property
     def bucket_calib(self) -> Dict[Tuple[str, str], BucketCalib]:
@@ -265,7 +398,14 @@ class SectorMoERespectModel:
         self.val_brier = self.global_model.val_brier
         self.val_logloss = self.global_model.val_logloss
         self.val_auc = self.global_model.val_auc
+        self.train_brier = self.global_model.train_brier
+        self.train_logloss = self.global_model.train_logloss
+        self.train_auc = self.global_model.train_auc
         self.base_rate = self.global_model.base_rate
+        self.validation_method = self.global_model.validation_method
+        self.regularization_preset = self.global_model.regularization_preset
+        self.hyperparameters = dict(self.global_model.hyperparameters)
+        self.validation_fold_stats = list(self.global_model.validation_fold_stats)
 
     @staticmethod
     def _sector_for_pool(pool: Pool) -> str:
@@ -296,7 +436,13 @@ class SectorMoERespectModel:
             min_sector_train_n: Optional[int] = None,
             min_sector_class_n: Optional[int] = None,
             min_sector_oos_n: Optional[int] = None,
-            expert_weight: Optional[float] = None) -> "SectorMoERespectModel":
+            expert_weight: Optional[float] = None,
+            sample_start_times: Optional[Sequence[pd.Timestamp]] = None,
+            sample_end_times: Optional[Sequence[pd.Timestamp]] = None,
+            embargo_bars: int = 78,
+            base_period_seconds: float = 300.0,
+            validation_method: str = "purged_embargoed_walk_forward",
+            regularization_preset: str = "default") -> "SectorMoERespectModel":
         if len(X) != len(y) or len(X) != len(train_pools):
             raise ValueError("X, y, and train_pools must have matching lengths")
         if expert_weight is not None:
@@ -309,7 +455,15 @@ class SectorMoERespectModel:
         if min_sector_oos_n is not None:
             self.min_sector_oos_n = int(min_sector_oos_n)
 
-        self.global_model = PoolRespectModel().fit(X, y, val_frac=val_frac, seed=seed)
+        self.global_model = PoolRespectModel().fit(
+            X, y, val_frac=val_frac, seed=seed,
+            sample_start_times=sample_start_times,
+            sample_end_times=sample_end_times,
+            embargo_bars=embargo_bars,
+            base_period_seconds=base_period_seconds,
+            validation_method=validation_method,
+            regularization_preset=regularization_preset,
+        )
         self._fit_bucket_if_possible(self.global_model, X_oos, oos_pools, oos_results,
                                      min_bucket_n=10)
         self._copy_global_metrics()
@@ -317,6 +471,7 @@ class SectorMoERespectModel:
         sectors = sorted({self._sector_for_pool(p) for p in train_pools})
         self.sector_models.clear()
         self.sector_stats.clear()
+        self.sector_weights.clear()
 
         for sector in sectors:
             idx = [i for i, p in enumerate(train_pools) if self._sector_for_pool(p) == sector]
@@ -331,6 +486,9 @@ class SectorMoERespectModel:
                 "reason": "",
                 "oos_decisive_n": 0,
                 "val_auc": None,
+                "expert_logloss": None,
+                "global_logloss": None,
+                "sector_weight": 0.0,
             }
 
             if len(idx) < self.min_sector_train_n:
@@ -343,8 +501,20 @@ class SectorMoERespectModel:
                 continue
 
             try:
-                expert = PoolRespectModel().fit(X.iloc[idx], y_sector,
-                                                val_frac=val_frac, seed=seed + len(idx))
+                sector_starts = ([sample_start_times[i] for i in idx]
+                                 if sample_start_times is not None else None)
+                sector_ends = ([sample_end_times[i] for i in idx]
+                               if sample_end_times is not None else None)
+                expert = PoolRespectModel().fit(
+                    X.iloc[idx], y_sector,
+                    val_frac=val_frac, seed=seed + len(idx),
+                    sample_start_times=sector_starts,
+                    sample_end_times=sector_ends,
+                    embargo_bars=embargo_bars,
+                    base_period_seconds=base_period_seconds,
+                    validation_method=validation_method,
+                    regularization_preset=regularization_preset,
+                )
 
                 sector_oos_n = 0
                 if X_oos is not None and oos_pools and oos_results:
@@ -358,14 +528,53 @@ class SectorMoERespectModel:
                             min_bucket_n=8,
                         )
 
+                global_loss = None
+                expert_loss = float(expert.val_logloss)
+                sector_weight = 0.0
+                shrink_reason = ""
+                if expert.validation_indices:
+                    from sklearn.metrics import log_loss
+                    val_local = np.array(expert.validation_indices, dtype=int)
+                    val_global = [idx[int(i)] for i in val_local]
+                    y_val_sector = y[val_global]
+                    global_pred = self.global_model.predict(X.iloc[val_global],
+                                                            pools=[train_pools[i] for i in val_global])
+                    global_loss = float(log_loss(y_val_sector,
+                                                 np.clip(global_pred, 1e-6, 1 - 1e-6)))
+                    improvement = global_loss - expert_loss
+                    if improvement <= 0.005:
+                        shrink_reason = "expert did not beat global enough"
+                    elif expert.val_auc < 0.53:
+                        shrink_reason = "expert AUC too weak"
+                    else:
+                        # Dynamic MoE shrinkage: trust a sector expert only in proportion to
+                        # sample size, validation-loss improvement over global, and expert AUC.
+                        sample_factor = min(1.0, max(0.0, (len(idx) - self.min_sector_train_n)
+                                                     / max(1.0, 200.0 - self.min_sector_train_n)))
+                        loss_factor = min(1.0, max(0.0, improvement / 0.05))
+                        auc_factor = min(1.0, max(0.0, (expert.val_auc - 0.50) / 0.15))
+                        sector_weight = min(self.expert_weight,
+                                            self.expert_weight * sample_factor
+                                            * loss_factor * auc_factor)
+                        if sector_weight < 0.05:
+                            sector_weight = 0.0
+                            shrink_reason = "weight shrunk below usable floor"
+                        else:
+                            shrink_reason = "dynamic shrinkage accepted"
+                else:
+                    shrink_reason = "no expert validation fold"
+
                 self.sector_models[sector] = expert
+                self.sector_weights[sector] = float(sector_weight)
                 stat.update({
                     "status": "trained",
-                    "reason": "",
+                    "reason": shrink_reason,
                     "oos_decisive_n": int(sector_oos_n),
                     "val_auc": float(expert.val_auc),
                     "base_rate": float(expert.base_rate),
-                    "blend": f"{self.expert_weight:.2f}/{self.global_weight:.2f}",
+                    "expert_logloss": expert_loss,
+                    "global_logloss": global_loss,
+                    "sector_weight": float(sector_weight),
                 })
             except Exception as exc:
                 stat["reason"] = str(exc)
@@ -391,8 +600,59 @@ class SectorMoERespectModel:
             if not idx:
                 continue
             expert_pred = expert.predict(X.iloc[idx], pools=[pools[i] for i in idx])
-            final[idx] = self.expert_weight * expert_pred + self.global_weight * global_pred[idx]
+            w = float(self.sector_weights.get(sector, 0.0))
+            final[idx] = w * expert_pred + (1.0 - w) * global_pred[idx]
         return np.clip(final, 0.02, 0.98)
+
+    def predict_components(self, X: pd.DataFrame, pools: List[Pool]) -> pd.DataFrame:
+        """Return global, sector-expert, and blended Q for audit/explanation.
+
+        `sector_q` is NaN when no trained expert exists for that pool's sector. In that case the
+        blended prediction is the global fallback and `gate_weight` is 0.0. This keeps live code
+        and audit tables explicit about when the MoE is really routing to a sector expert.
+        """
+        if self.global_model is None:
+            raise ValueError("SectorMoERespectModel is not fitted")
+        if len(X) != len(pools):
+            raise ValueError("X and pools must have matching lengths")
+
+        global_pred = self.global_model.predict(X, pools=pools)
+        sector_pred = np.full(len(pools), np.nan, dtype=float)
+        gate_weight = np.zeros(len(pools), dtype=float)
+        fallback_reason = []
+        for p in pools:
+            sector = self._sector_for_pool(p)
+            stat = self.sector_stats.get(sector, {})
+            fallback_reason.append(stat.get("reason") or "no trained sector expert")
+
+        for sector, expert in self.sector_models.items():
+            idx = [i for i, p in enumerate(pools) if self._sector_for_pool(p) == sector]
+            if not idx:
+                continue
+            pred = expert.predict(X.iloc[idx], pools=[pools[i] for i in idx])
+            w = float(self.sector_weights.get(sector, 0.0))
+            sector_pred[idx] = pred
+            gate_weight[idx] = w
+            for i in idx:
+                fallback_reason[i] = "" if w > 0 else self.sector_stats.get(sector, {}).get(
+                    "reason", "sector expert fully shrunk to global")
+
+        blended = np.where(
+            np.isnan(sector_pred),
+            global_pred,
+            gate_weight * sector_pred + (1.0 - gate_weight) * global_pred,
+        )
+        sectors = [self._sector_for_pool(p) for p in pools]
+        assets = [p.asset for p in pools]
+        return pd.DataFrame({
+            "asset": assets,
+            "sector": sectors,
+            "global_q": np.clip(global_pred, 0.02, 0.98),
+            "sector_q": sector_pred,
+            "gate_weight": gate_weight,
+            "blended_q": np.clip(blended, 0.02, 0.98),
+            "fallback_reason": fallback_reason,
+        })
 
     def feature_importance(self, top_k: int = 15) -> List[Tuple[str, int]]:
         if self.global_model is None:
