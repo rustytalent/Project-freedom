@@ -10,6 +10,7 @@ to SECTOR_MAP as you trade them — `sector_of(unknown_symbol)` defaults to 'OTH
 from __future__ import annotations
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
+import math
 import numpy as np
 import pandas as pd
 
@@ -349,25 +350,132 @@ def reliability_multiplier(asset_reliability: float, basket_baseline: float,
     return max(cap_low, min(cap_high, raw))
 
 
-def sector_momentum_alignment(sector_metrics: Dict[str, Dict], sector: str,
-                                trade_side: str) -> float:
-    """Multiplier that boosts trades aligned with sector momentum and penalises ones against it.
+def sector_regime_signal(sector_metrics: Dict[str, Dict], sector: str) -> Dict:
+    """Convert sector return metrics into a directional regime signal.
 
-    `trade_side`: "buy" for setups below current price (long bias), "sell" for above (short bias).
-    Sector ret_5d > 0 + buy trade → momentum-aligned. Returns 1.15.
-    Sector ret_5d < 0 + sell trade → momentum-aligned. Returns 1.15.
-    Aligned against sector momentum → 0.85.
-    Within ±0.5% → neutral 1.0 (avoid noise).
+    Uses 5d as the fast money-flow read, 20d as the swing trend, and 60d as the background
+    drift. The score is clipped through tanh so one extreme return does not dominate.
+
+    Returns a dict:
+      {direction, score, conviction, ret_5d, ret_20d, ret_60d, reason}
     """
     m = sector_metrics.get(sector)
     if not m:
-        return 1.0
+        return {
+            "sector": sector,
+            "direction": "neutral",
+            "score": 0.0,
+            "conviction": 0.0,
+            "ret_5d": 0.0,
+            "ret_20d": 0.0,
+            "ret_60d": 0.0,
+            "reason": "missing sector metrics",
+        }
+
     ret_5d = float(m.get("ret_5d", 0.0))
-    if abs(ret_5d) < 0.005:
-        return 1.0
-    sector_bullish = ret_5d > 0
+    ret_20d = float(m.get("ret_20d", 0.0))
+    ret_60d = float(m.get("ret_60d", 0.0))
+
+    score = (
+        0.55 * math.tanh(ret_5d / 0.025)
+        + 0.30 * math.tanh(ret_20d / 0.060)
+        + 0.15 * math.tanh(ret_60d / 0.120)
+    )
+
+    signs = [np.sign(v) for v in (ret_5d, ret_20d, ret_60d) if abs(v) >= 0.003]
+    same_sign = sum(1 for s in signs if s == np.sign(score)) if signs else 0
+    consistency_boost = 0.80 + 0.10 * same_sign
+    conviction = min(1.0, abs(score) * consistency_boost)
+
+    if conviction < 0.18:
+        direction = "neutral"
+    else:
+        direction = "bullish" if score > 0 else "bearish"
+
+    reason = (f"5d={ret_5d:+.1%}, 20d={ret_20d:+.1%}, 60d={ret_60d:+.1%}, "
+              f"score={score:+.2f}, conviction={conviction:.2f}")
+    return {
+        "sector": sector,
+        "direction": direction,
+        "score": float(score),
+        "conviction": float(conviction),
+        "ret_5d": ret_5d,
+        "ret_20d": ret_20d,
+        "ret_60d": ret_60d,
+        "reason": reason,
+    }
+
+
+def sector_regime_alignment(sector_metrics: Dict[str, Dict], sector: str,
+                            trade_side: str) -> Dict:
+    """Return sector-regime alignment details for a candidate trade.
+
+    `trade_side`: "buy" for long-biased demand setups, "sell" for short-biased supply setups.
+    Multiplier is intentionally capped; this layer should rank/filter candidates, not overpower
+    Q, T_today, and reliability.
+    """
+    regime = sector_regime_signal(sector_metrics, sector)
+    direction = regime["direction"]
+    conviction = float(regime["conviction"])
     trade_bullish = (trade_side == "buy")
-    return 1.15 if sector_bullish == trade_bullish else 0.85
+
+    if direction == "neutral":
+        return {
+            "sector": sector,
+            "trade_side": trade_side,
+            "alignment": "NEUTRAL",
+            "multiplier": 1.0,
+            "strong_against": False,
+            "regime": regime,
+        }
+
+    aligned = ((direction == "bullish" and trade_bullish)
+               or (direction == "bearish" and not trade_bullish))
+    if aligned:
+        multiplier = 1.05 + 0.15 * conviction
+        alignment = "ALIGNED"
+    else:
+        multiplier = 0.95 - 0.25 * conviction
+        alignment = "AGAINST"
+
+    return {
+        "sector": sector,
+        "trade_side": trade_side,
+        "alignment": alignment,
+        "multiplier": float(max(0.65, min(1.20, multiplier))),
+        "strong_against": bool((not aligned) and conviction >= 0.55),
+        "regime": regime,
+    }
+
+
+def sector_execution_filter(sector_metrics: Dict[str, Dict], sector: str,
+                            trade_side: str, q: float,
+                            min_override_q: float = 0.65) -> Dict:
+    """Gate weak candidates that fight a strong sector regime.
+
+    High-Q setups can still pass against the sector tape. Low/medium-Q setups get downgraded to
+    watchlist instead of being treated as tradeable.
+    """
+    decision = sector_regime_alignment(sector_metrics, sector, trade_side)
+    block_reason = None
+    if decision["strong_against"] and q < min_override_q:
+        direction = decision["regime"]["direction"].upper()
+        block_reason = (f"fights strong {sector} {direction} regime "
+                        f"(Q {q:.0%} < override {min_override_q:.0%})")
+    decision["allow_trade"] = block_reason is None
+    decision["block_reason"] = block_reason
+    return decision
+
+
+def sector_momentum_alignment(sector_metrics: Dict[str, Dict], sector: str,
+                                trade_side: str) -> float:
+    """Backward-compatible multiplier for sector regime alignment.
+
+    `trade_side`: "buy" for setups below current price (long bias), "sell" for above (short bias).
+    Newer callers should prefer sector_execution_filter(), which also returns regime details and
+    optional block reasons.
+    """
+    return sector_regime_alignment(sector_metrics, sector, trade_side)["multiplier"]
 
 
 def serialise_sector_intel(sector_metrics: Dict[str, Dict],
@@ -384,6 +492,7 @@ def serialise_sector_intel(sector_metrics: Dict[str, Dict],
         "sectors": {
             sec: {
                 **sector_metrics.get(sec, {}),
+                "regime": sector_regime_signal(sector_metrics, sec),
                 "pooled_oos_respect": sector_oos.get(sec, {}).get("respect"),
                 "pooled_oos_strict": sector_oos.get(sec, {}).get("strict_respect"),
                 "n_pools": sector_oos.get(sec, {}).get("n"),

@@ -37,7 +37,7 @@ from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.timing import StateFeaturizer
 from liqpool.sectors import (sector_of, per_asset_reliability, per_asset_reliability_shrunk,
                               reliability_multiplier,
-                              sector_momentum_alignment, compute_sector_metrics,
+                              sector_execution_filter, compute_sector_metrics,
                               detect_rotation)
 from liqpool.event_engine import (EventDrivenEngine, EventEngineConfig, PoolState,
                                     make_pool_state, yfinance_recent_5m, run_live_loop,
@@ -210,11 +210,15 @@ def cmd_morning(args):
                     cap_low=0.5, cap_high=1.5,
                 )
 
-                # NEW: sector momentum alignment — a sell setup in a sector with positive 5d
-                # return fights the tape (0.85); a buy setup in a positive sector aligns (1.15).
+                # Sector regime alignment: boosts trades with the sector tape, downgrades weak
+                # setups that fight a strong sector regime.
                 sec = sector_of(symbol)
                 trade_side_word = "buy" if side_str == "below" else "sell"
-                sec_mult = sector_momentum_alignment(sector_metrics, sec, trade_side_word)
+                sec_decision = sector_execution_filter(
+                    sector_metrics, sec, trade_side_word, q,
+                    min_override_q=max(TRADEABLE_Q + 0.08, 0.65),
+                )
+                sec_mult = sec_decision["multiplier"]
 
                 ev = q * t_today * bonus_dir * rel_mult * sec_mult
                 candidates.append({
@@ -226,6 +230,10 @@ def cmd_morning(args):
                     "reliability": asset_reliability.get(symbol, pooled_baseline),
                     "reliability_mult": rel_mult,
                     "sector_mult": sec_mult,
+                    "sector_alignment": sec_decision["alignment"],
+                    "sector_regime": sec_decision["regime"],
+                    "sector_block_reason": sec_decision["block_reason"],
+                    "sector_allow_trade": sec_decision["allow_trade"],
                     "dir_mult": bonus_dir,
                     "ev_raw_qtimes_t": q * t_today,
                     "current_state": current_state,
@@ -244,7 +252,8 @@ def cmd_morning(args):
     else:
         tradeable = sorted([c for c in candidates
                               if c["q"] >= TRADEABLE_Q
-                              and c["t_today"] >= TRADEABLE_T_TODAY],
+                              and c["t_today"] >= TRADEABLE_T_TODAY
+                              and c.get("sector_allow_trade", True)],
                              key=lambda c: -c["ev"])
 
     # ----- Per-asset dashboard -----
@@ -388,12 +397,16 @@ def cmd_morning(args):
         # Sector context summary
         sec_m = sector_metrics.get(c["sector"], {})
         if sec_m:
-            r5 = sec_m.get("ret_5d", 0.0)
-            r60 = sec_m.get("ret_60d", 0.0)
+            regime = c.get("sector_regime", {})
+            r5 = regime.get("ret_5d", sec_m.get("ret_5d", 0.0))
+            r20 = regime.get("ret_20d", sec_m.get("ret_20d", 0.0))
+            r60 = regime.get("ret_60d", sec_m.get("ret_60d", 0.0))
             sec_status = ("LEAD" if c["sector"] in (rotation or {}).get("rotation_in", [])
                            else "LAG" if c["sector"] in (rotation or {}).get("rotation_out", [])
                            else "FLAT")
-            print(f"     Sector context: {c['sector']} 5d={r5:+.1%} 60d={r60:+.1%} → "
+            print(f"     Sector context: {c['sector']} {regime.get('direction', 'neutral').upper()} "
+                  f"({c.get('sector_alignment', 'NEUTRAL')}) "
+                  f"5d={r5:+.1%} 20d={r20:+.1%} 60d={r60:+.1%} → "
                   f"{sec_status}; sector_mult={c['sector_mult']:.2f}")
 
         alert_entry = journal.log_alert(

@@ -16,6 +16,10 @@ import numpy as np
 from liqpool import Config, plot_chart
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
+from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
+                             sector_execution_filter,
+                             sector_correlation_matrix, detect_rotation, per_sector_oos,
+                             serialise_sector_intel)
 from liqpool.timing import StateFeaturizer
 
 
@@ -92,6 +96,10 @@ def main():
     TRADEABLE_T_TODAY = 0.05
     TRADEABLE_Q = 0.55
 
+    asset_dfs_for_sectors = {sym: ad.base_df for sym, ad in report.assets.items()}
+    sec_metrics = compute_sector_metrics(asset_dfs_for_sectors)
+    rotation = detect_rotation(sec_metrics)
+
     candidates = []        # cross-asset list
     per_asset_summary = {} # symbol -> {current, atr, direction, top_q, top_t_today}
 
@@ -153,13 +161,25 @@ def main():
                 tag = direction_tag(side_str)
                 bonus = 1.15 if tag == "DIR_ALIGN" else (0.85 if tag == "DIR_FIGHT" else 1.0)
                 t_today = t_by_h.get(primary_h, 0.0)
-                ev = q * t_today * bonus
+                sec = sector_of(symbol)
+                trade_side_word = "buy" if side_str == "below" else "sell"
+                sec_decision = sector_execution_filter(
+                    sec_metrics, sec, trade_side_word, q,
+                    min_override_q=max(TRADEABLE_Q + 0.08, 0.65),
+                )
+                ev = q * t_today * bonus * sec_decision["multiplier"]
                 cand = {
                     "symbol": symbol, "pool": p, "result": r, "side": side_str,
                     "dist_atr": dist_atr, "q": q, "t_by_h": t_by_h,
                     "dir_tag": tag, "ev": ev,
                     "current": current, "atr_proxy": atr_proxy,
                     "dir_p_up": dir_p_up,
+                    "sector": sec,
+                    "sector_mult": sec_decision["multiplier"],
+                    "sector_alignment": sec_decision["alignment"],
+                    "sector_regime": sec_decision["regime"],
+                    "sector_block_reason": sec_decision["block_reason"],
+                    "sector_allow_trade": sec_decision["allow_trade"],
                 }
                 candidates.append(cand)
                 asset_candidates.append(cand)
@@ -178,7 +198,9 @@ def main():
     candidates.sort(key=lambda c: -c["ev"])
 
     tradeable = [c for c in candidates
-                  if c["q"] >= TRADEABLE_Q and c["t_by_h"].get(primary_h, 0.0) >= TRADEABLE_T_TODAY]
+                  if c["q"] >= TRADEABLE_Q
+                  and c["t_by_h"].get(primary_h, 0.0) >= TRADEABLE_T_TODAY
+                  and c.get("sector_allow_trade", True)]
     watchlist = [c for c in candidates if c not in tradeable]
 
     # Day verdict — explicitly track the "best observed T" pool too so the user can see
@@ -218,7 +240,8 @@ def main():
         q_t = max_t_today_cand["q"]
         print(f"  Best observed T_today:      {max_t_today:.1%}  "
               f"on [{sym_t}] @ ₹{max_t_today_cand['pool'].mid:.2f}  "
-              f"(Q={q_t:.0%}, dir={max_t_today_cand['dir_tag']})")
+              f"(Q={q_t:.0%}, dir={max_t_today_cand['dir_tag']}, "
+              f"sector={max_t_today_cand.get('sector_alignment', 'NEUTRAL')})")
     print(f"  Max T_2d (any pool):        {max_t_2d:.1%}")
     print(f"  VERDICT:                    {verdict}")
     print(f"  Why:                        {verdict_why}")
@@ -271,7 +294,8 @@ def main():
         print(">>> NO TRADEABLE SETUP IN BASKET TODAY <<<")
     print("==========================================================")
 
-    print(f"\n--- TRADEABLE TODAY  (Q ≥ {TRADEABLE_Q:.0%} AND T_today ≥ {TRADEABLE_T_TODAY:.0%}) ---")
+    print(f"\n--- TRADEABLE TODAY  (Q ≥ {TRADEABLE_Q:.0%}, "
+          f"T_today ≥ {TRADEABLE_T_TODAY:.0%}, sector gate passed) ---")
     if not tradeable:
         print("  (none — all pools across basket too far or low-quality)")
     else:
@@ -282,8 +306,10 @@ def main():
             )
             side_lbl = "BELOW" if c["side"] == "below" else "ABOVE"
             print(f"  #{rank} [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f}  "
-                  f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}]   "
-                  f"Q={c['q']:.1%}  {t_strs}  EV={c['ev']:.1%}")
+                  f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, "
+                  f"{c.get('sector_alignment', 'NEUTRAL')}]   "
+                  f"Q={c['q']:.1%}  {t_strs}  sector={c.get('sector_mult', 1.0):.2f}× "
+                  f"EV={c['ev']:.1%}")
 
     # IMMINENT TOUCH list: pools likely to be touched today regardless of quality. Surfaces
     # the high-T-but-low-Q pools that the Q-sorted watch list hides. These are warnings rather
@@ -316,28 +342,29 @@ def main():
               f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}]   "
               f"Q={c['q']:.1%}  {t_strs}")
 
-    # ---- Sector intelligence (Track 4.5 — basket-aware, money-flow rotation) ----
-    from liqpool.sectors import (
-        sector_of, group_by_sector, compute_sector_metrics,
-        sector_correlation_matrix, detect_rotation, per_sector_oos,
-        serialise_sector_intel,
-    )
+    blocked_by_sector = [c for c in candidates if c.get("sector_block_reason")]
+    if blocked_by_sector:
+        print(f"\n--- SECTOR-GATED WATCHLIST  (top 8 blocked by strong sector regime) ---")
+        for c in sorted(blocked_by_sector, key=lambda x: -x["ev"])[:8]:
+            p = c["pool"]
+            print(f"  [{c['symbol']:<14}] {c['sector']:<9} ₹{p.price_low:.2f}-{p.price_high:.2f}  "
+                  f"Q={c['q']:.1%} T_today={c['t_by_h'].get(primary_h, 0.0):.1%}  "
+                  f"{c['sector_block_reason']}")
 
+    # ---- Sector intelligence (Track 4.5 — basket-aware, money-flow rotation) ----
     print("\n================ SECTOR INTELLIGENCE ================")
 
-    asset_dfs_for_sectors = {sym: ad.base_df for sym, ad in report.assets.items()}
-    sec_metrics = compute_sector_metrics(asset_dfs_for_sectors)
     sec_oos = per_sector_oos(report.assets and
                               [p for ad in report.assets.values() for p in ad.walkforward.oos_pools],
                               [r for ad in report.assets.values() for r in ad.walkforward.oos_results])
-    rotation = detect_rotation(sec_metrics)
     corr_df = sector_correlation_matrix(asset_dfs_for_sectors)
 
     # Per-sector pooled OOS + recent momentum
     if sec_metrics or sec_oos:
         print("\n[per-sector basket]")
         print(f"  {'sector':<10} {'symbols':<28} {'oos_resp':>9} {'strict':>8} "
-              f"{'ret_5d':>8} {'ret_20d':>9} {'ret_60d':>9} {'vol_20d':>9}")
+              f"{'regime':>8} {'conv':>5} {'ret_5d':>8} {'ret_20d':>9} "
+              f"{'ret_60d':>9} {'vol_20d':>9}")
         all_secs = sorted(set(sec_metrics.keys()) | set(sec_oos.keys()))
         for sec in all_secs:
             m = sec_metrics.get(sec, {})
@@ -353,7 +380,11 @@ def main():
             ret20 = m.get("ret_20d", 0.0)
             ret60 = m.get("ret_60d", 0.0)
             vol = m.get("vol_20d_annualised", 0.0)
+            regime = sector_regime_signal(sec_metrics, sec)
+            regime_dir = regime.get("direction", "neutral") if regime else "neutral"
+            conviction = regime.get("conviction", 0.0) if regime else 0.0
             print(f"  {sec:<10} {syms:<28} {resp_s} {strict_s} "
+                  f"{regime_dir[:8]:>8} {conviction:>4.2f} "
                   f"{ret5:>+7.1%} {ret20:>+8.1%} {ret60:>+8.1%} {vol:>8.1%}")
 
     # Rotation signal narrative
