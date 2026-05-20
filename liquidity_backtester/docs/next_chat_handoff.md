@@ -96,6 +96,36 @@ PYTHONPATH=. .venv/bin/python -u examples/multi_asset_run.py \
 - The code correctly refused to train on synthetic fallback data.
 - Do not treat this as a model failure; rerun when market data fetch works.
 
+Full real-data baseline note, completed 2026-05-21:
+
+- Full default and `conservative_finml` baselines ran successfully against live yfinance data.
+- Output folders:
+  - `liquidity_backtester/output_default_baseline/`
+  - `liquidity_backtester/output_conservative_baseline/`
+- `TATAMOTORS.NS` returned no yfinance data in both runs and was safely skipped; both baselines used the same 9-asset basket.
+- Shared OOS outcome results:
+  - Total OOS tested: 785
+  - Pooled OOS broad: 43.2%, Wilson CI 40.3%-46.1%
+  - Pooled OOS strict: 40.8%
+  - Mean per-asset overfit gap: +15.7%
+  - Post-touch touched n: 786, strict respect 40.8%, broken_strong 56.7%
+- Default quality model:
+  - Validation Brier/log-loss/AUC: 0.2476 / 0.6883 / 0.512
+  - Phase 3A blended Brier/log-loss/AUC: 0.2387 / 0.6703 / 0.569
+  - Sector weights: AUTO 0.0%, BANKING 6.5%, FMCG 19.3%, IT 0.0%
+- Conservative quality model:
+  - Validation Brier/log-loss/AUC: 0.2455 / 0.6839 / 0.535
+  - Phase 3A blended Brier/log-loss/AUC: 0.2385 / 0.6698 / 0.575
+  - Sector weights: AUTO 0.0%, BANKING 10.5%, FMCG 9.3%, IT 0.0%
+- Current read: `conservative_finml` is the better baseline on quality validation and Phase 3A blended audit, but the lift is modest. Pooled OOS, post-touch reaction quality, direction AUC, and proximity behavior are unchanged because the same OOS events were evaluated.
+- Live gate result:
+  - No `TRADEABLE` setups in either run.
+  - Default: 6 `WATCH_ONLY`, 79 `REJECTED_WITH_REASON`.
+  - Conservative: 5 `WATCH_ONLY`, 80 `REJECTED_WITH_REASON`.
+  - Main reason is low Q versus strict `Q >= 70%`; the best Q values are only around 52%. Do not relax the gate just because there are no trades. If changing it, first inspect whether new features can lift post-touch quality rather than simply lowering Q.
+- Small code fix after the run:
+  - `examples/multi_asset_run.py` verdict text now references `GATE_Q`/the strict live gate instead of the old 55% watch threshold, so the summary no longer contradicts the printed `Q>=70%` gate.
+
 ## Current Phase 3 Status
 
 The previous handoff said Phase 3A-E remained. Most of that is now implemented:
@@ -111,14 +141,15 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 
 ## Next Goals
 
-1. Run full real-data baselines when yfinance/data access works.
-   - Run default preset and `conservative_finml`.
+1. Treat `conservative_finml` as the current preferred baseline unless a future run reverses the quality audit.
+   - Re-run default and conservative baselines when the data window changes materially or when `TATAMOTORS.NS` data becomes available.
    - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
    - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.
 
 2. Tune the new live gate only after seeing real OOS bucket counts.
    - Defaults are intentionally strict: Q >= 70%, T_today >= 50%, `DIR_ALIGN`, distance 0.5-12 ATR, bucket n >= 30.
-   - If it rejects everything, inspect `gate_decisions` and `distance_bucket_metrics` before relaxing thresholds.
+   - The 2026-05-21 baselines reject everything mainly because Q is far below 70%, not because every bucket is under-supported.
+   - If it rejects everything again, inspect `gate_decisions` and `distance_bucket_metrics` before relaxing thresholds.
    - Trade count can drop; that is acceptable if post-touch quality improves.
 
 3. Inspect sector shrinkage behavior.

@@ -308,7 +308,7 @@ def main():
         verdict = "WATCH"
         verdict_why = (f"a touch is likely (T_today={max_t_today:.0%} on "
                        f"{max_t_today_cand['symbol']}) but Q={max_t_today_cand['q']:.0%} "
-                       f"is below the {TRADEABLE_Q:.0%} tradeable threshold")
+                       f"is below the {GATE_Q:.0%} strict live gate")
     elif max_t_today >= 0.02 or max_t_2d >= 0.20:
         verdict = "WATCH"
         verdict_why = (f"no setup today; max T_today={max_t_today:.0%}, "
