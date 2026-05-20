@@ -5,12 +5,14 @@
 - Repo path on Mac: `/Users/abc/Projects/Project-freedom`
 - Work folder for running Python: `/Users/abc/Projects/Project-freedom/liquidity_backtester`
 - GitHub repo: `https://github.com/rustytalent/Project-freedom`
-- Active branch: `claude/liquidity-pool-backtester-1uskb`
-- Push is working from terminal now.
+- Actual GitHub default branch: `claude/liquidity-pool-backtester-1uskb`
+- Current local branch: `claude/liquidity-pool-backtester-1uskb`
+- Do not assume `main` is the default branch. The GitHub repo default is `claude/liquidity-pool-backtester-1uskb`, and that is the branch to update for handoffs/code changes.
+- Push is working from terminal.
 
 ## Important Local Status
 
-The branch is synced with GitHub after Phase 2.
+The default branch is synced with GitHub after the Phase 3 stability/gating commit.
 
 Do not accidentally commit these local/untracked runtime files unless explicitly requested:
 
@@ -24,14 +26,25 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 - `008129d Add sector-aware MoE quality model`
   - Added `SectorMoERespectModel`
   - Global LightGBM model + sector experts
-  - Hard sector routing + 70/30 sector/global blend
-  - Multi-asset training now uses sector MoE
+  - Initial hard sector routing + 70/30 sector/global blend
+  - Multi-asset training uses sector MoE
 
 - `02040e1 Add sector regime execution filter`
   - Added richer sector regime scoring from 5d/20d/60d sector returns
   - Added `ALIGNED`, `AGAINST`, `NEUTRAL` sector execution logic
   - Weak setups against a strong sector regime are blocked unless Q is high enough
   - Wired into `examples/live_run.py` and `examples/multi_asset_run.py`
+
+- `7b79238 Add purged validation and dynamic quality gates`
+  - Added purged/embargoed quality-model validation with logged fold stats
+  - Added configurable `regularization_preset`, including `conservative_finml`
+  - Added train-vs-validation quality model metrics so fit gap is visible
+  - Replaced fixed 70/30 sector blend with dynamic sector shrinkage weights
+  - Added Phase 3A OOS prediction audit artifacts for global/sector/blended Q
+  - Added quality and proximity distance-binned metrics
+  - Added post-touch reaction quality diagnostics
+  - Added strict live gate with `TRADEABLE`, `WATCH_ONLY`, and `REJECTED_WITH_REASON`
+  - Updated JSON artifacts with validation, distance, shrinkage, post-touch, and gate data
 
 ## Commands To Run
 
@@ -40,6 +53,13 @@ From repo root:
 ```bash
 cd /Users/abc/Projects/Project-freedom/liquidity_backtester
 PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py
+```
+
+Useful comparison run:
+
+```bash
+cd /Users/abc/Projects/Project-freedom/liquidity_backtester
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py --regularization-preset conservative_finml --out output_conservative
 ```
 
 If committing/pushing:
@@ -52,86 +72,76 @@ git commit -m "<message>"
 git push origin claude/liquidity-pool-backtester-1uskb
 ```
 
-## Phase 3 / True MoE Remaining Work
+## Verification Already Done
 
-Phase 1 and Phase 2 are structural but still mostly rule-based:
+- `python3 -m compileall liqpool examples`
+- `git diff --check`
+- Synthetic smoke test for purged/embargoed `PoolRespectModel.fit`
+- Synthetic smoke test for dynamic `SectorMoERespectModel` shrinkage
+- Synthetic smoke test for OOS audit distance buckets and post-touch metrics
 
-- Phase 1: sector expert blend is fixed at 70% sector / 30% global when expert exists.
-- Phase 2: sector regime gate is heuristic using 5d/20d/60d returns.
+Real-data smoke note:
 
-Phase 3 should make the gate learned and measurable.
+- A tiny yfinance integration run was attempted with:
 
-### Phase 3A: OOS Prediction Audit
-
-Goal: measure whether Phase 1/2 actually improved results.
-
-Tasks:
-
-- Add an OOS comparison table:
-  - global Q
-  - sector expert Q
-  - blended Q
-  - actual outcome
-  - sector
-  - asset
-- Report metrics by model:
-  - Brier score
-  - log-loss
-  - AUC
-  - top-decile hit rate
-  - per-sector calibration
-- This should be done before changing the gate again.
-
-### Phase 3B: Learned Gate Dataset
-
-Goal: create training rows for a gate model.
-
-Each row should include:
-
-- global prediction
-- sector prediction
-- absolute disagreement between global and sector expert
-- sector regime score / conviction
-- asset reliability
-- sector OOS respect rate
-- pool features already used by Q model
-- label: which prediction was closer / whether blended prediction improved calibration
-
-### Phase 3C: Learned Dynamic Gate
-
-Goal: replace fixed 70/30 with dynamic weights.
-
-Output:
-
-```text
-final_q = gate_weight * sector_q + (1 - gate_weight) * global_q
+```bash
+PYTHONPATH=. .venv/bin/python -u examples/multi_asset_run.py \
+  --symbols HDFCBANK.NS,ICICIBANK.NS \
+  --period 30d --folds 2 --iters 2 --final-iters 2 \
+  --out output_smoke --regularization-preset conservative_finml \
+  --gate-t-today 0.10
 ```
 
-Gate model can start simple:
+- It failed because yfinance/Yahoo returned no usable data in that environment.
+- The code correctly refused to train on synthetic fallback data.
+- Do not treat this as a model failure; rerun when market data fetch works.
 
-- logistic regression or shallow LightGBM regressor/classifier
-- target should optimize calibration / Brier improvement, not only hit rate
-- clip gate weights, for example `0.20 <= gate_weight <= 0.85`, to avoid unstable all-in routing
+## Current Phase 3 Status
 
-### Phase 3D: Live Explanation Upgrade
+The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 
-Goal: make live output explain why the model trusted sector/global.
+- OOS prediction audit: implemented
+- Dynamic sector shrinkage replacing fixed 70/30 behavior: implemented
+- Live output includes global/sector/blended component fields where available: implemented through `predict_components`
+- Safety checks/global fallback: implemented through zero-weight sector shrinkage and fallback reasons
+- Conservative quality model regularization preset: implemented
+- Distance-binned quality/proximity diagnostics: implemented
+- Post-touch reaction diagnostics: implemented
+- Strict conditional-edge live gate: implemented
 
-Add to trade cards:
+## Next Goals
 
-- global Q
-- sector expert Q
-- gate weight
-- final blended Q
-- sector regime alignment
-- reason for fallback if no expert trained
+1. Run full real-data baselines when yfinance/data access works.
+   - Run default preset and `conservative_finml`.
+   - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
+   - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.
 
-### Phase 3E: Safety Checks
+2. Tune the new live gate only after seeing real OOS bucket counts.
+   - Defaults are intentionally strict: Q >= 70%, T_today >= 50%, `DIR_ALIGN`, distance 0.5-12 ATR, bucket n >= 30.
+   - If it rejects everything, inspect `gate_decisions` and `distance_bucket_metrics` before relaxing thresholds.
+   - Trade count can drop; that is acceptable if post-touch quality improves.
 
-Before trusting Phase 3:
+3. Inspect sector shrinkage behavior.
+   - Check `sector_shrinkage_report` in `multi_asset_summary.json`.
+   - Good behavior: small/noisy sector experts get near-zero weights.
+   - Only trust sector experts that beat global fallback on validation loss with reasonable AUC.
 
-- Keep global fallback always available.
-- If sector expert train sample is too small, skip expert.
-- If gate model cannot train cleanly, fall back to Phase 1 fixed blend.
-- Compare against Phase 1/2 baseline before declaring improvement.
+4. Use post-touch reaction quality as the main alpha diagnostic.
+   - Focus on `post_touch_reaction_metrics`.
+   - Look for factor/TF/sector/Q buckets with high strict respect and low broken_strong rate.
+   - This should drive future feature or gate changes more than aggregate touch probability.
 
+5. If metrics still show high overfit, the next high-impact options are:
+   - Raise `min_sector_train_n` / `min_sector_class_n`
+   - Increase `min_data_in_leaf` for `conservative_finml`
+   - Reduce feature_fraction/bagging_fraction further
+   - Require stronger OOS bucket support before arming trades
+   - Add better post-touch labels/features, not more reachability features
+
+## Explicit Non-Goals For Now
+
+- Do not implement fractional differencing yet.
+- Do not broadly neutralize features yet.
+- Do not remove `distance_atr` from the proximity model.
+- Do not treat high proximity AUC as automatic leakage.
+- Do not commit runtime/secrets files unless explicitly requested.
