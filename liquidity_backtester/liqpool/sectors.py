@@ -26,8 +26,15 @@ SECTOR_MAP: Dict[str, str] = {
     "FEDERALBNK.NS": "BANKING",
     "BANKBARODA.NS": "BANKING",
     "PNB.NS":        "BANKING",
-    "BAJFINANCE.NS": "BANKING",
-    "BAJAJFINSV.NS": "BANKING",
+    "AUBANK.NS":     "BANKING",
+    "IDFCFIRSTB.NS": "BANKING",
+
+    # ─── NBFC / financial services ───────────────────────────────────
+    "BAJFINANCE.NS": "NBFC",
+    "BAJAJFINSV.NS": "NBFC",
+    "CHOLAFIN.NS":   "NBFC",
+    "SHRIRAMFIN.NS": "NBFC",
+    "SBICARD.NS":    "NBFC",
     "SBILIFE.NS":    "BANKING",
     "HDFCLIFE.NS":   "BANKING",
 
@@ -38,12 +45,16 @@ SECTOR_MAP: Dict[str, str] = {
     "WIPRO.NS":    "IT",
     "TECHM.NS":    "IT",
     "LTIM.NS":     "IT",
+    "PERSISTENT.NS": "IT",
+    "COFORGE.NS":    "IT",
+    "MPHASIS.NS":    "IT",
 
     # ─── Energy & oil ─────────────────────────────────────────────────
     "RELIANCE.NS": "ENERGY",
     "ONGC.NS":     "ENERGY",
     "BPCL.NS":     "ENERGY",
     "IOC.NS":      "ENERGY",
+    "HINDPETRO.NS": "ENERGY",
     "GAIL.NS":     "ENERGY",
     "POWERGRID.NS": "ENERGY",
     "NTPC.NS":     "ENERGY",
@@ -56,6 +67,8 @@ SECTOR_MAP: Dict[str, str] = {
     "BAJAJ-AUTO.NS":  "AUTO",
     "EICHERMOT.NS":   "AUTO",
     "HEROMOTOCO.NS":  "AUTO",
+    "TVSMOTOR.NS":    "AUTO",
+    "ASHOKLEY.NS":    "AUTO",
 
     # ─── FMCG / consumer ──────────────────────────────────────────────
     "HINDUNILVR.NS":  "FMCG",
@@ -65,6 +78,7 @@ SECTOR_MAP: Dict[str, str] = {
     "DABUR.NS":       "FMCG",
     "GODREJCP.NS":    "FMCG",
     "MARICO.NS":      "FMCG",
+    "COLPAL.NS":      "FMCG",
     "TATACONSUM.NS":  "FMCG",
 
     # ─── Pharma & healthcare ──────────────────────────────────────────
@@ -73,6 +87,8 @@ SECTOR_MAP: Dict[str, str] = {
     "DIVISLAB.NS":   "PHARMA",
     "DRREDDY.NS":    "PHARMA",
     "APOLLOHOSP.NS": "PHARMA",
+    "LUPIN.NS":      "PHARMA",
+    "TORNTPHARM.NS": "PHARMA",
 
     # ─── Metals ───────────────────────────────────────────────────────
     "TATASTEEL.NS": "METALS",
@@ -100,7 +116,16 @@ SECTOR_MAP: Dict[str, str] = {
 
 
 def sector_of(symbol: str) -> str:
-    return SECTOR_MAP.get(symbol, "OTHER")
+    raw = str(symbol).upper()
+    if raw in SECTOR_MAP:
+        return SECTOR_MAP[raw]
+    no_suffix = raw.replace(".NS", "").replace(".BO", "")
+    if no_suffix in SECTOR_MAP:
+        return SECTOR_MAP[no_suffix]
+    with_ns = f"{no_suffix}.NS"
+    if with_ns in SECTOR_MAP:
+        return SECTOR_MAP[with_ns]
+    return "OTHER"
 
 
 def group_by_sector(symbols: List[str]) -> Dict[str, List[str]]:

@@ -1,0 +1,72 @@
+universe: india_large
+exchange: NSE
+symbols:
+  - {symbol: HDFCBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ICICIBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: SBIN, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: AXISBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: KOTAKBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: INDUSINDBK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BANKBARODA, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: PNB, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: FEDERALBNK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: AUBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: IDFCFIRSTB, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: TCS, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: INFY, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: HCLTECH, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: WIPRO, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TECHM, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: LTIM, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: PERSISTENT, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: COFORGE, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: MPHASIS, sector: IT, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: HINDUNILVR, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ITC, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: NESTLEIND, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BRITANNIA, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DABUR, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: GODREJCP, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: MARICO, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: COLPAL, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TATACONSUM, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: MARUTI, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TATAMOTORS, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: M&M, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BAJAJ-AUTO, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: HEROMOTOCO, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: EICHERMOT, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TVSMOTOR, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ASHOKLEY, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: RELIANCE, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ONGC, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BPCL, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: IOC, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: HINDPETRO, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: GAIL, sector: ENERGY, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: BAJFINANCE, sector: NBFC, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BAJAJFINSV, sector: NBFC, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: CHOLAFIN, sector: NBFC, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: SHRIRAMFIN, sector: NBFC, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: SBICARD, sector: NBFC, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: SUNPHARMA, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DRREDDY, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: CIPLA, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DIVISLAB, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: LUPIN, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TORNTPHARM, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: TATASTEEL, sector: METALS, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: JSWSTEEL, sector: METALS, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: HINDALCO, sector: METALS, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: VEDL, sector: METALS, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: NIFTY 50, sector: INDEX, exchange: NSE, tradable: false, context_only: true}
+  - {symbol: BANKNIFTY, sector: INDEX, exchange: NSE, tradable: false, context_only: true}
+  - {symbol: FINNIFTY, sector: INDEX, exchange: NSE, tradable: false, context_only: true}

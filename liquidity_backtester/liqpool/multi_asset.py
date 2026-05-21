@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Config
-from .data import fetch, multi_timeframe
+from .data import DataProvider, fetch, multi_timeframe
 from .pools import build_pools, project_to_base, Pool
 from .tester import test_pools, summarise, PoolResult
 from .optimizer import optimize
@@ -362,6 +362,7 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                     iters_per_fold: int = 60,
                     final_iters: int = 100,
                     min_train_days: int = 10,
+                    data_provider: Optional[DataProvider] = None,
                     progress: Optional[Callable[[str, str], None]] = None,
                     ) -> MultiAssetReport:
     """Run walk-forward per asset (NO per-asset model training), then train unified models on
@@ -389,19 +390,30 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         if progress:
             progress(symbol, "fetch")
         try:
-            base = fetch(symbol, cfg.base_interval, cfg.period)
+            if data_provider is not None:
+                tf = data_provider.load_timeframes(
+                    symbol, cfg.base_interval, cfg.higher_tfs,
+                    period=cfg.period, start=cfg.start, end=cfg.end,
+                )
+                base = tf["base"]
+            else:
+                base = fetch(symbol, cfg.base_interval, cfg.period,
+                             start=cfg.start, end=cfg.end,
+                             allow_synthetic=False)
         except Exception as e:
-            print(f"  [{symbol}] SKIPPED — fetch failed: {e}")
+            source = "parquet" if data_provider is not None else "fetch"
+            print(f"  [{symbol}] SKIPPED — {source} failed: {e}")
             report.skipped_symbols.append(symbol)
-            report.skip_reasons[symbol] = f"fetch failed: {e}"
+            report.skip_reasons[symbol] = f"{source} failed: {e}"
             continue
-        if len(base) > 0 and base.index[0] == _SYNTHETIC_SENTINEL:
+        if data_provider is None and len(base) > 0 and base.index[0] == _SYNTHETIC_SENTINEL:
             print(f"  [{symbol}] SKIPPED — yfinance returned no data; "
                   f"refusing to train on synthetic fallback (would pollute basket)")
             report.skipped_symbols.append(symbol)
             report.skip_reasons[symbol] = "yfinance returned no data; would have used synthetic"
             continue
-        tf = multi_timeframe(base, cfg.higher_tfs)
+        if data_provider is None:
+            tf = multi_timeframe(base, cfg.higher_tfs)
         asset_dfs[symbol] = base
 
         if progress:
@@ -447,8 +459,10 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         )
 
     if not report.assets:
-        msg = ("no assets ran successfully — all symbols either failed to fetch or fell back "
-                "to synthetic data. Check yfinance connectivity and symbol spelling.")
+        msg = ("no assets ran successfully. Check parquet files/data-source settings and "
+               "symbol spelling." if data_provider is not None else
+               "no assets ran successfully — all symbols either failed to fetch or fell back "
+               "to synthetic data. Check yfinance connectivity and symbol spelling.")
         if report.skipped_symbols:
             msg += f"\nSkipped: " + ", ".join(
                 f"{s} ({report.skip_reasons.get(s, 'unknown')})"

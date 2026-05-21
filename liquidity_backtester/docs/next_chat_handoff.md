@@ -139,6 +139,37 @@ Post-touch feature step, completed after the baseline commit:
   - venv synthetic `PoolRespectModel.fit` smoke with the expanded 52-column feature matrix
 - Tiny yfinance smoke with HDFCBANK/ICICIBANK was retried, including escalated network access, but yfinance returned no usable data for both symbols. Treat that as data-feed availability, not a model failure.
 
+Parquet warehouse migration step, started 2026-05-22:
+
+- Added `config/universe_india_large.yaml` with the expanded NSE universe and context-only index symbols.
+- Added `ParquetProvider` and `YFinanceProvider` abstractions in `liqpool/data.py`.
+  - `--data-source parquet --data-dir <resampled_dir>` reads local `all_5m/all_15m/all_60m/all_180m/all_1D/all_1W` parquet files.
+  - Parquet mode never calls yfinance and never creates synthetic fallback data.
+  - Missing symbols are skipped cleanly with reasons.
+- Added `examples/resample_kite_parquet.py` to resample raw 1-minute Kite/Zerodha parquet into the expected all-symbol timeframe files.
+- Wired `examples/multi_asset_run.py`:
+  - `--data-source parquet`
+  - `--data-dir`
+  - `--mode train`
+  - `--mode predict`
+  - `--model-dir`
+- Train mode now saves a pickled `multi_asset_report.pkl` plus metadata under `--model-dir`.
+- Predict mode loads the saved model bundle, reads latest parquet candles, rebuilds current pools with saved per-symbol configs, and does zero walk-forward/model training.
+- Added structured live outputs:
+  - `live_plan.json`
+  - `live_gate_decisions.csv`
+  - `tradeable_setups.csv`
+  - `watchlist.csv`
+  - `rejected_setups.csv`
+  - `validation_report.csv`
+  - `feature_importance.csv`
+- Expanded sector mapping and made `sector_of()` normalize both Kite symbols like `TCS` and yfinance symbols like `TCS.NS`.
+- Verification completed:
+  - `python3 -m compileall liqpool examples`
+  - `git diff --check`
+  - synthetic local parquet provider smoke from `/private/tmp/lb_parquet_smoke`
+  - predict-mode missing-model check fails clearly before training
+
 ## Current Phase 3 Status
 
 The previous handoff said Phase 3A-E remained. Most of that is now implemented:
@@ -156,6 +187,7 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 
 1. Treat `conservative_finml` as the current preferred baseline unless a future run reverses the quality audit.
    - First rerun `conservative_finml` after the new causal momentum features and compare against `output_conservative_baseline`.
+   - Then rerun from the real local parquet warehouse using `--data-source parquet`.
    - Re-run default and conservative baselines when the data window changes materially or when `TATAMOTORS.NS` data becomes available.
    - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
    - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.

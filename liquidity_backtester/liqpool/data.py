@@ -2,10 +2,14 @@
 
 Primary source: yfinance. Caches to local parquet to avoid hammering the API and to keep
 backtests reproducible. Falls back to a synthetic OHLCV generator if yfinance is unavailable
-or returns nothing (useful for offline development / CI)."""
+or returns nothing (useful for offline development / CI).
+
+Research/production source: local Zerodha/Kite parquet via :class:`ParquetProvider`.
+Parquet mode never calls yfinance and never creates synthetic fallback data.
+"""
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable, Optional
 import hashlib
 import pandas as pd
 import numpy as np
@@ -34,6 +38,40 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         df.index = df.index.tz_convert("UTC").tz_localize(None)
     df.index.name = "ts"
     return df.sort_index()
+
+
+def _normalise_symbol_key(symbol: str) -> str:
+    return symbol.upper().replace(".NS", "").replace(".BO", "")
+
+
+def _normalise_parquet_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Normalize local parquet bars to the internal OHLCV format indexed by UTC-naive ts."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out = out.rename(columns={c: str(c).lower() for c in out.columns})
+    if "date" in out.columns and "ts" not in out.columns:
+        out = out.rename(columns={"date": "ts"})
+    if "datetime" in out.columns and "ts" not in out.columns:
+        out = out.rename(columns={"datetime": "ts"})
+    if "timestamp" in out.columns and "ts" not in out.columns:
+        out = out.rename(columns={"timestamp": "ts"})
+    if "ts" in out.columns:
+        out["ts"] = pd.to_datetime(out["ts"])
+        out = out.set_index("ts")
+    else:
+        out.index = pd.to_datetime(out.index)
+    if out.index.tz is not None:
+        out.index = out.index.tz_convert("UTC").tz_localize(None)
+    missing = [c for c in ("open", "high", "low", "close", "volume") if c not in out.columns]
+    if missing:
+        raise ValueError(f"{symbol}: missing parquet OHLCV columns: {missing}")
+    out = out[["open", "high", "low", "close", "volume"]].copy()
+    for c in out.columns:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out = out.dropna(how="any").sort_index()
+    out.index.name = "ts"
+    return _validate_ohlcv(out, symbol)
 
 
 def _synthetic(symbol: str, interval: str, n_bars: int = 4000, seed: int = 42) -> pd.DataFrame:
@@ -112,6 +150,125 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
 
     df.to_parquet(fp)
     return df
+
+
+class DataProvider:
+    """Abstract source of normalized OHLCV bars."""
+
+    def load_base(self, symbol: str, interval: str, period: Optional[str] = None,
+                  start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
+        raise NotImplementedError
+
+    def load_timeframes(self, symbol: str, base_tf: str,
+                        higher_tfs: Iterable[str],
+                        period: Optional[str] = None,
+                        start: Optional[str] = None,
+                        end: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+        base = self.load_base(symbol, base_tf, period=period, start=start, end=end)
+        return multi_timeframe(base, list(higher_tfs))
+
+
+class YFinanceProvider(DataProvider):
+    """Current yfinance provider. Synthetic fallback is opt-in and disabled by parquet mode."""
+
+    def __init__(self, use_cache: bool = True, allow_synthetic: bool = False):
+        self.use_cache = use_cache
+        self.allow_synthetic = allow_synthetic
+
+    def load_base(self, symbol: str, interval: str, period: Optional[str] = None,
+                  start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
+        return fetch(symbol, interval=interval, period=period, start=start, end=end,
+                     use_cache=self.use_cache, allow_synthetic=self.allow_synthetic)
+
+
+class ParquetProvider(DataProvider):
+    """Read local all-symbol parquet bars produced from Zerodha/Kite 1m history.
+
+    Expected files under ``data_dir``:
+      all_5m.parquet, all_15m.parquet, all_60m.parquet, all_180m.parquet,
+      all_1D.parquet, all_1W.parquet
+
+    Files may contain either a ``date``/``ts`` column or a datetime index. If a ``symbol`` column
+    exists, only the requested symbol is selected. Symbols are matched both exactly and without
+    exchange suffixes, so ``TCS`` and ``TCS.NS`` resolve to the same stored rows.
+    """
+
+    def __init__(self, data_dir: str | Path):
+        self.data_dir = Path(data_dir).expanduser()
+
+    @staticmethod
+    def _file_key(tf: str) -> str:
+        key = tf.replace("min", "m")
+        return {
+            "base": "5m",
+            "5m": "5m",
+            "15m": "15m",
+            "60m": "60m",
+            "1h": "60m",
+            "180m": "180m",
+            "3h": "180m",
+            "1d": "1D",
+            "1D": "1D",
+            "1w": "1W",
+            "1W": "1W",
+        }.get(key, key)
+
+    def _path_for_tf(self, tf: str) -> Path:
+        key = self._file_key(tf)
+        candidates = [
+            self.data_dir / f"all_{key}.parquet",
+            self.data_dir / f"{key}.parquet",
+            self.data_dir / key / "all.parquet",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        raise FileNotFoundError(f"missing parquet for timeframe {tf}; tried: "
+                                + ", ".join(str(p) for p in candidates))
+
+    def _read_symbol_tf(self, symbol: str, tf: str) -> pd.DataFrame:
+        path = self._path_for_tf(tf)
+        raw = pd.read_parquet(path)
+        raw = raw.rename(columns={c: str(c).lower() for c in raw.columns})
+        if "symbol" in raw.columns:
+            wanted = _normalise_symbol_key(symbol)
+            keys = raw["symbol"].astype(str).map(_normalise_symbol_key)
+            raw = raw.loc[keys == wanted].copy()
+        if raw.empty:
+            raise FileNotFoundError(f"{symbol}: no rows in {path.name}")
+        return _normalise_parquet_ohlcv(raw, symbol)
+
+    def load_base(self, symbol: str, interval: str, period: Optional[str] = None,
+                  start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
+        df = self._read_symbol_tf(symbol, interval)
+        if start:
+            df = df[df.index >= pd.Timestamp(start)]
+        if end:
+            df = df[df.index <= pd.Timestamp(end)]
+        if df.empty:
+            raise FileNotFoundError(f"{symbol}: no parquet bars after date filters")
+        return df
+
+    def load_timeframes(self, symbol: str, base_tf: str,
+                        higher_tfs: Iterable[str],
+                        period: Optional[str] = None,
+                        start: Optional[str] = None,
+                        end: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+        out: Dict[str, pd.DataFrame] = {
+            "base": self.load_base(symbol, base_tf, period=period, start=start, end=end)
+        }
+        for tf in higher_tfs:
+            try:
+                df = self._read_symbol_tf(symbol, tf)
+                if start:
+                    df = df[df.index >= pd.Timestamp(start)]
+                if end:
+                    df = df[df.index <= pd.Timestamp(end)]
+                out[tf] = df
+            except FileNotFoundError:
+                # If a higher TF is not materialized yet, derive it from base locally.
+                out[tf] = resample(out["base"], tf)
+        return out
 
 
 def _validate_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:

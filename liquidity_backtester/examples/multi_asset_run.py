@@ -9,18 +9,87 @@ Run:
 from __future__ import annotations
 import argparse
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from liqpool import Config, plot_chart
+from liqpool.data import ParquetProvider
 from liqpool.featurize import MultiAssetFeaturizer
-from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary, distance_bucket
+from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
+                                 distance_bucket)
+from liqpool.pools import build_pools, project_to_base
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
                              sector_correlation_matrix, detect_rotation, per_sector_oos,
                              serialise_sector_intel)
+from liqpool.tester import test_pools
 from liqpool.timing import StateFeaturizer
+
+
+def _bundle_path(model_dir: str) -> Path:
+    return Path(model_dir).expanduser() / "multi_asset_report.pkl"
+
+
+def _save_model_bundle(report, model_dir: str, args, cfg: Config) -> None:
+    model_path = _bundle_path(model_dir)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    with model_path.open("wb") as f:
+        pickle.dump(report, f)
+    metadata = {
+        "symbols": list(report.assets.keys()),
+        "regularization_preset": cfg.regularization_preset,
+        "validation_method": cfg.validation_method,
+        "embargo_bars": cfg.embargo_bars,
+        "data_source": args.data_source,
+        "data_dir": args.data_dir,
+    }
+    (model_path.parent / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str))
+    print(f"[model] saved bundle: {model_path}")
+
+
+def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Config):
+    model_path = _bundle_path(model_dir)
+    if not model_path.exists():
+        raise SystemExit(f"missing model bundle: {model_path}. Run --mode train first.")
+    with model_path.open("rb") as f:
+        report = pickle.load(f)
+    if report.unified_ml is None or not report.unified_proximity:
+        raise SystemExit(f"model bundle is incomplete: {model_path}")
+
+    asset_dfs = {}
+    refreshed_assets = {}
+    for symbol, ad in report.assets.items():
+        try:
+            tf = data_provider.load_timeframes(
+                symbol, cfg.base_interval, cfg.higher_tfs,
+                period=cfg.period, start=cfg.start, end=cfg.end,
+            )
+        except Exception as e:
+            print(f"  [{symbol}] SKIPPED in predict mode — parquet failed: {e}")
+            continue
+        best = ad.final_cfg
+        pools = project_to_base(build_pools(tf, best), tf["base"].index)
+        results = test_pools(tf["base"], pools, best)
+        for p in pools:
+            p.asset = symbol
+        asset_dfs[symbol] = tf["base"]
+        refreshed_assets[symbol] = AssetData(
+            symbol=symbol,
+            base_df=tf["base"],
+            tf_data=tf,
+            walkforward=ad.walkforward,
+            final_cfg=best,
+            final_pools=pools,
+            final_results=results,
+        )
+    if not refreshed_assets:
+        raise SystemExit("predict mode could not load any symbols from parquet")
+    report.assets = refreshed_assets
+    report.unified_featurizer = MultiAssetFeaturizer(asset_dfs)
+    return report
 
 
 def main():
@@ -45,6 +114,14 @@ def main():
     ap.add_argument("--min-train-days", type=int, default=10, dest="min_train_days")
     ap.add_argument("--regularization-preset", default="default",
                     choices=("default", "conservative_finml"))
+    ap.add_argument("--data-source", default="yfinance",
+                    choices=("yfinance", "parquet"),
+                    help="Market data source. parquet mode never calls yfinance.")
+    ap.add_argument("--data-dir", default="",
+                    help="Directory containing all_5m/all_15m/... parquet files")
+    ap.add_argument("--mode", default="train", choices=("train", "predict"),
+                    help="train fits/saves models; predict loads saved models and reads latest parquet")
+    ap.add_argument("--model-dir", default="output_models/latest")
     ap.add_argument("--embargo-bars", type=int, default=78)
     ap.add_argument("--gate-q", type=float, default=0.70)
     ap.add_argument("--gate-t-today", type=float, default=0.50, dest="gate_t_today")
@@ -55,6 +132,11 @@ def main():
     ap.add_argument("--gate-min-bucket-n", type=int, default=30, dest="gate_min_bucket_n")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
+
+    if args.data_source == "parquet" and not args.data_dir:
+        raise SystemExit("--data-source parquet requires --data-dir")
+    if args.mode == "predict" and args.data_source != "parquet":
+        raise SystemExit("--mode predict currently requires --data-source parquet")
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     if not symbols:
@@ -78,15 +160,23 @@ def main():
     print(f"  symbols:    {symbols}")
     print(f"  base/tfs:   {args.base} + {cfg.higher_tfs}")
     print(f"  folds:      {args.folds}  iters/fold: {args.iters}  final iters: {args.final_iters}")
+    print(f"  data source:{args.data_source}"
+          f"{' @ ' + args.data_dir if args.data_source == 'parquet' else ''}")
 
     def prog(symbol, step):
         print(f"  [{symbol}]  {step}")
 
-    report = run_multi_asset(symbols, cfg,
-                              n_folds=args.folds, train_frac=args.train_frac,
-                              iters_per_fold=args.iters, final_iters=args.final_iters,
-                              min_train_days=args.min_train_days,
-                              progress=prog)
+    data_provider = ParquetProvider(args.data_dir) if args.data_source == "parquet" else None
+    if args.mode == "predict":
+        report = _load_predict_report(args.model_dir, data_provider, cfg)
+    else:
+        report = run_multi_asset(symbols, cfg,
+                                  n_folds=args.folds, train_frac=args.train_frac,
+                                  iters_per_fold=args.iters, final_iters=args.final_iters,
+                                  min_train_days=args.min_train_days,
+                                  data_provider=data_provider,
+                                  progress=prog)
+        _save_model_bundle(report, args.model_dir, args, cfg)
 
     if report.skipped_symbols:
         print("\n⚠  WARNING — assets dropped from run:")
@@ -601,7 +691,49 @@ def main():
     }
     out_json = out / "multi_asset_summary.json"
     out_json.write_text(json.dumps(summary, indent=2, default=str))
+    live_plan = {
+        "verdict": verdict,
+        "why": verdict_why,
+        "best_ev": best_ev,
+        "gate": {
+            "min_q": GATE_Q,
+            "min_p_touch_today": GATE_T_TODAY,
+            "required_direction": "DIR_ALIGN",
+            "min_distance_atr": PRACTICAL_MIN_ATR,
+            "max_distance_atr": PRACTICAL_MAX_ATR,
+            "min_bucket_n": MIN_BUCKET_N,
+        },
+        "best_observed_touch": {
+            "symbol": max_t_today_cand["symbol"] if max_t_today_cand else None,
+            "p_touch_today": max_t_today,
+            "p_respect": max_t_today_cand["q"] if max_t_today_cand else None,
+            "decision": "WATCH_ONLY" if max_t_today_cand and not tradeable else None,
+        },
+    }
+    live_plan_path = out / "live_plan.json"
+    live_plan_path.write_text(json.dumps(live_plan, indent=2, default=str))
+    gate_df = pd.DataFrame(gate_decisions)
+    if not gate_df.empty:
+        gate_df.to_csv(out / "live_gate_decisions.csv", index=False)
+        gate_df[gate_df["decision"] == "TRADEABLE"].to_csv(
+            out / "tradeable_setups.csv", index=False,
+        )
+        gate_df[gate_df["decision"] == "WATCH_ONLY"].to_csv(
+            out / "watchlist.csv", index=False,
+        )
+        gate_df[gate_df["decision"] == "REJECTED_WITH_REASON"].to_csv(
+            out / "rejected_setups.csv", index=False,
+        )
+    validation_rows = summary["validation_fold_stats"]
+    if validation_rows:
+        pd.DataFrame(validation_rows).to_csv(out / "validation_report.csv", index=False)
+    if report.unified_ml is not None and hasattr(report.unified_ml, "feature_importance"):
+        pd.DataFrame(
+            report.unified_ml.feature_importance(top_k=200),
+            columns=["feature", "importance_gain"],
+        ).to_csv(out / "feature_importance.csv", index=False)
     print(f"\nartifacts: {out_json}")
+    print(f"           {live_plan_path}")
     print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
     if audit_csv_path is not None:
         print(f"           {audit_csv_path}  ← Phase 3A global/sector/blended OOS rows")
