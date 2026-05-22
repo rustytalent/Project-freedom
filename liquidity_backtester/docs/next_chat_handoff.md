@@ -23,6 +23,25 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 
 ## Recent Uploaded Commits
 
+- `fc35a0f Add parallel asset checkpoints`
+  - Added `--asset-workers`, `--checkpoint-dir`, and `--resume`.
+  - Per-symbol parquet training can run in parallel with deterministic final merge order.
+  - Completed symbols are saved as pickle checkpoints, so a killed run can resume without repeating all asset work.
+  - Worker processes cap BLAS/OpenMP thread counts to avoid oversubscribing the M4 laptop.
+
+- `c3b53a4 Support per-symbol parquet folders`
+  - `ParquetProvider` can read both all-symbol parquet files and folder-style per-symbol files such as `resampled/5m/TCS_5m.parquet`.
+  - This matches the user's Google Drive warehouse layout.
+
+- `39b7461 Add parquet universe training pipeline`
+  - Added the large India universe config, parquet provider, train/predict modes, model artifact save/load, and structured live outputs.
+
+- `280516d Add causal momentum quality features`
+  - Added causal return/momentum/range/trend-into-pool features for the quality model.
+
+- `3ac1333 Record real-data baseline results`
+  - Captured the real yfinance baseline readout before parquet migration.
+
 - `008129d Add sector-aware MoE quality model`
   - Added `SectorMoERespectModel`
   - Global LightGBM model + sector experts
@@ -48,7 +67,7 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 
 ## Commands To Run
 
-From repo root:
+Legacy yfinance smoke from repo root:
 
 ```bash
 cd /Users/abc/Projects/Project-freedom/liquidity_backtester
@@ -60,6 +79,28 @@ Useful comparison run:
 ```bash
 cd /Users/abc/Projects/Project-freedom/liquidity_backtester
 PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py --regularization-preset conservative_finml --out output_conservative
+```
+
+Primary parquet run command used by the user on Mac:
+
+```bash
+cd /Users/abc/Projects/Project-freedom/liquidity_backtester
+
+export DATA_ROOT="/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data"
+export RESAMPLED_DIR="$DATA_ROOT/resampled"
+export SYMBOLS='HDFCBANK,ICICIBANK,SBIN,AXISBANK,KOTAKBANK,INDUSINDBK,BANKBARODA,PNB,FEDERALBNK,AUBANK,IDFCFIRSTB,TCS,INFY,HCLTECH,WIPRO,TECHM,LTIM,PERSISTENT,COFORGE,MPHASIS,HINDUNILVR,ITC,NESTLEIND,BRITANNIA,DABUR,GODREJCP,MARICO,COLPAL,TATACONSUM,MARUTI,TATAMOTORS,M&M,BAJAJ-AUTO,HEROMOTOCO,EICHERMOT,TVSMOTOR,ASHOKLEY,RELIANCE,ONGC,BPCL,IOC,HINDPETRO,GAIL,BAJFINANCE,BAJAJFINSV,CHOLAFIN,SHRIRAMFIN,SBICARD,SUNPHARMA,DRREDDY,CIPLA,DIVISLAB,LUPIN,TORNTPHARM,TATASTEEL,JSWSTEEL,HINDALCO,VEDL'
+
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
+  --data-source parquet \
+  --data-dir "$RESAMPLED_DIR" \
+  --mode train \
+  --model-dir output_models/latest \
+  --symbols "$SYMBOLS" \
+  --asset-workers 3 \
+  --checkpoint-dir output_checkpoints/parquet_large \
+  --resume \
+  --regularization-preset conservative_finml \
+  --out output_parquet_train
 ```
 
 If committing/pushing:
@@ -180,6 +221,341 @@ Parallel parquet training step, completed 2026-05-22:
 - Verified with a real local parquet smoke:
   - `--symbols TCS,INFY --folds 2 --iters 1 --final-iters 1 --asset-workers 2`
   - Both per-symbol jobs completed in parallel, checkpointed, then unified training/reporting completed.
+
+Large parquet run status, observed 2026-05-23:
+
+- User's local data root:
+  - `/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data`
+- Data layout confirmed:
+  - `raw_1m/` has per-symbol `SYMBOL_1m.parquet` files.
+  - `resampled/` has subfolders `5m`, `15m`, `60m`, `180m`, `1D`, `1W`.
+- The 58-symbol parquet run reached the unified stage twice and was killed by macOS:
+  - Last printed stage: `[[unified]]  training cross-asset direction + proximity models`
+  - Terminal result: `zsh: killed`
+- This was assessed as RAM pressure, not missing-symbol failure:
+  - `LTIM` and `TATAMOTORS` were skipped cleanly before unified training due missing/mismatched 5m parquet paths.
+  - Missing symbols reduce the run size and would normally produce a Python traceback if unhandled.
+  - `zsh: killed` means the OS terminated the process externally, consistent with memory pressure.
+- Disk was not the problem:
+  - User reported about 134 GiB free.
+- Per-symbol checkpoint work should not be lost:
+  - The run used `--checkpoint-dir output_checkpoints/parquet_large --resume`.
+  - Rerunning with `--resume` should reuse completed asset checkpoints and go directly toward unified work.
+- The current bottleneck is the unified timing/proximity stage:
+  - Code builds `all_train_snaps` and `all_oos_snaps` as Python lists across all assets/folds.
+  - `ProximityModel.fit()` expands `snapshots x active_pools` into a large list of dict rows, then converts it to a pandas DataFrame.
+  - This is much larger than the pool-quality dataset.
+
+## Current Architecture Read
+
+The current code does **not** appear to merge all 5m/15m/60m/180m/1D/1W candles into one giant candle matrix.
+
+Current flow:
+
+```text
+per symbol:
+  load base 5m dataframe
+  load separate higher timeframe dataframes
+  detect levels on each timeframe
+  project/merge levels into liquidity pools on base timeframe
+  train/evaluate pool quality from pool-level rows
+```
+
+The memory-heavy flow is different:
+
+```text
+per asset, per fold:
+  generate snapshots over base 5m time
+  each snapshot stores market state plus all active pool touch labels
+  append snapshots into global Python lists
+
+then:
+  expand snapshots x active pools into proximity rows
+  build one large pandas DataFrame
+  train/evaluate direction and proximity models
+```
+
+Important interpretation:
+
+- Pool-quality training is one row per pool/event and is comparatively small.
+- Proximity training is many rows per pool because the same active pool can be observed from many timestamps before touch/break.
+- Reducing proximity snapshots does not reduce pool-quality training. It limits the redundant timing/reachability table.
+- Proximity predicts `P_touch`, not `P_respect` or profitability. It is alert intelligence, not trade permission.
+
+## Cloud Vs Local Decision
+
+Current recommendation:
+
+```text
+MacBook M4 / 16GB:
+  development
+  parquet validation
+  resampling
+  small smoke runs
+  prediction-only mode
+  sampled/memory-safe training
+
+Cloud CPU / high RAM:
+  full 58-symbol training
+  full proximity table benchmark
+  full post-touch event database
+  execution backtests
+  feature-pruning sweeps
+  later sequence-model experiments
+```
+
+For the current LightGBM/tabular/parquet pipeline, prioritize CPU RAM over GPU:
+
+- Minimum useful cloud target: 8 vCPU, 64GB RAM, 50GB SSD.
+- Better target: 16 vCPU, 128GB RAM, 100GB SSD.
+- Storage does not need to be 300GB right now. The user's current parquet files are small; 50-100GB is enough for current runs plus artifacts.
+- GPU is not needed yet. It only becomes relevant later for sequence/transformer-style models.
+
+Cheaper cloud options discussed:
+
+- Colab Pro/Pro+:
+  - Easiest because data is already in Google Drive.
+  - Good for experiments but runtime availability/disconnects can vary.
+- Hetzner 64GB/128GB CPU server:
+  - Better for stable serious long-running research if the user is comfortable uploading/mounting data and using Linux terminal.
+- RunPod:
+  - Useful if it offers enough system RAM, but GPU is not the main need at this stage.
+
+Even after architecture improvements, full benchmark runs should eventually move to cloud. The architecture work makes local development and future phases healthier; it does not remove the need for cloud when the user wants full unsampled universe runs.
+
+## Proposed Phase 1.5 Architecture Work
+
+The next high-impact engineering step is a feature-store/chunked-training architecture, not merely "use Polars".
+
+Core idea:
+
+```text
+raw 1m parquet
+  -> resampled partitioned bars
+  -> pool event table
+  -> quality feature table
+  -> proximity feature shards
+  -> post-touch reaction event table
+  -> execution trial table
+  -> model training / validation
+  -> prediction-only live plan
+```
+
+Recommended structural changes:
+
+1. Partition bars and derived features by symbol/timeframe/date or year.
+   - Example:
+     - `features/bars/timeframe=5m/symbol=TCS/year=2024/*.parquet`
+     - `features/pools/symbol=TCS/*.parquet`
+     - `features/proximity/horizon=78/symbol=TCS/*.parquet`
+     - `features/reaction_events/symbol=TCS/*.parquet`
+     - `features/execution_trials/mode=reclaim_confirmed/symbol=TCS/*.parquet`
+
+2. Stop keeping full-universe snapshot objects in RAM.
+   - Generate proximity rows per symbol/fold/horizon.
+   - Write shard parquet immediately.
+   - Train by scanning shards, filtering, and collecting only the selected training matrix.
+
+3. Use Polars/DuckDB where it helps.
+   - Polars lazy scans and partition pruning can reduce memory.
+   - DuckDB can query parquet shards without loading everything.
+   - Do not simply replace "giant pandas DataFrame" with "giant Polars DataFrame"; the real fix is shard-first/chunked design.
+
+4. Make proximity reduction explicit and intelligent.
+   - Keep all touch-positive rows.
+   - Keep all near-pool rows, e.g. 0-3 ATR.
+   - Downsample far-away repeated rows.
+   - Preserve sector/symbol balance.
+   - Use class weights or sample weights if negatives are downsampled.
+
+5. Save intermediate artifacts after each stage.
+   - If unified proximity dies, quality model artifacts and feature shards should still be preserved.
+   - Avoid repeating expensive per-asset detection/training work.
+
+Expected practical difference between full and smart-reduced proximity:
+
+- Full proximity run is the benchmark.
+- Smart reduced proximity should preserve most practical watchlist value because far-away repeated rows are highly redundant.
+- Approximate expectation discussed with the user:
+  - Full proximity reference quality: 100%.
+  - Smart reduced proximity: roughly 95-99% practical touch-timing quality if near/touched cases are preserved.
+  - Heavy random reduction can materially hurt calibration and rare-case timing; avoid that.
+
+## Remaining Roadmap / Phases
+
+The user explicitly noted that the current work is only Phase 1 and wants future phases forced into the roadmap. Use this order.
+
+### Phase 1 - Data And Research Engine Foundation
+
+Mostly implemented:
+
+- ParquetProvider and yfinance separation.
+- Large India universe config.
+- No synthetic fallback in parquet mode.
+- Train/predict mode split.
+- Model artifact saving/loading.
+- Structured live outputs.
+- Per-symbol parallelism and checkpoint resume.
+
+Remaining Phase 1 work:
+
+- Fix/inspect missing `LTIM` and `TATAMOTORS` parquet naming/path issue.
+- Add memory-safe unified timing controls or the feature-store design above.
+- Add a clearer failure path when unified timing is too large for RAM.
+- Optionally save partial artifacts after quality/sector training before proximity training.
+
+### Phase 2 - Validation, Calibration, And Gate Discipline
+
+Partially implemented:
+
+- Purged/embargoed validation exists for quality model.
+- Dynamic sector shrinkage exists.
+- OOS prediction audit exists.
+- Strict live gate exists.
+
+Remaining:
+
+- Make purged/embargoed validation mandatory everywhere relevant, not just quality.
+- Ensure no random time-series KFold remains in model-selection paths.
+- Save richer validation reports for each model family:
+  - train rows
+  - purged rows
+  - embargo rows
+  - validation rows
+  - train/val AUC, Brier, logloss
+  - fit gap
+  - calibration bins
+- Reject or warn on model configs with excessive train-validation gap.
+- Add empirical Bayes / Wilson interval bucket reliability tables everywhere live gates use bucket stats.
+
+### Phase 3 - Post-Touch Reaction Intelligence
+
+Not fully implemented. Current code has post-touch diagnostics, but not a standalone event database/model.
+
+Required:
+
+- Generate `post_touch_events.parquet`.
+- Label events:
+  - `HARD_REJECT`
+  - `SWEEP_RECLAIM`
+  - `ABSORPTION`
+  - `FAIL_CONTINUE`
+  - `LIQUIDITY_VACUUM`
+  - `NO_SIGNAL`
+- Add features from the first N candles after touch:
+  - reclaim candle presence
+  - displacement size
+  - volume spike
+  - close back inside/outside pool
+  - wick rejection ratio
+  - time-to-reclaim
+  - MAE/MFE after touch
+  - sector regime at touch
+  - direction state at touch
+- Train a reaction model separately.
+- Live plan should be able to require confirmation after touch instead of blind limit entry.
+
+### Phase 4 - Execution And PnL Engine
+
+Not implemented yet.
+
+Required:
+
+- Add execution modes:
+  - `blind_limit`
+  - `touch_confirmed`
+  - `reclaim_confirmed`
+- Prefer `reclaim_confirmed` by default for live decisions.
+- Simulate:
+  - slippage
+  - brokerage/fees placeholder
+  - stop by pool width + ATR
+  - target by historical MFE distribution
+  - partial TP
+  - time stop
+  - direction filter
+  - sector filter
+  - confirmation filter
+- Report profitability metrics:
+  - net expectancy per trade
+  - win rate
+  - avg win/loss
+  - profit factor
+  - max drawdown
+  - trades/month or trades/year
+  - exposure time
+  - per-symbol PnL
+  - per-sector PnL
+- Never call a setup profitable from respect rate alone.
+
+### Phase 5 - Live Decision System
+
+Partially implemented through predict mode and live reports.
+
+Remaining:
+
+- Make predict mode the daily workflow:
+  - loads saved models
+  - reads latest parquet
+  - performs zero training
+  - outputs concise plan
+- Keep outputs separated:
+  - `live_plan.json`
+  - `watchlist.csv`
+  - `tradeable_setups.csv`
+  - `rejected_setups.csv`
+- Console should remain concise:
+  - verdict
+  - tradeable setups
+  - watch-only liquidity magnets
+  - rejected with reason
+  - model health warning
+- Explicitly separate:
+  - `P_touch`
+  - `P_respect`
+  - `P_trade`
+- High `P_touch` plus weak `P_respect` must remain watch-only.
+
+### Phase 6 - Scaling, Feature Store, And Cloud Benchmarking
+
+This is now a major priority because the Mac was killed twice at unified proximity.
+
+Required:
+
+- Implement Phase 1.5 feature-store/chunking design.
+- Add optional memory-safe proximity training mode for Mac development.
+- Add cloud full-run instructions.
+- Compare:
+  - full unsampled proximity on cloud
+  - smart reduced proximity on Mac/cloud
+  - quality/reaction/execution metrics unchanged or improved
+- Add model/data versioning so cloud artifacts can be brought back to Mac for predict mode.
+
+### Phase 7 - Advanced Modeling
+
+Do not jump directly to 7B/30B/120B models.
+
+Current view:
+
+- Bigger parameter count is not the bottleneck.
+- The bottleneck is label quality, leakage-safe validation, reaction/execution modeling, and memory architecture.
+- For future deep learning, start with small market-specific sequence models:
+  - TCN
+  - temporal transformer
+  - TFT/PatchTST-style candle encoder
+  - cross-asset/sector context encoder
+- Practical first target is roughly 1M-50M parameters, not 7B.
+- GPU becomes useful only in this phase.
+
+## Key User Preferences / Context
+
+- User wants the system to become a disciplined quant research/live-decision engine, not a loose signal generator.
+- User does not want to weaken the quality model just to fit the Mac.
+- Explain clearly when a reduction affects only the proximity snapshot table and not pool-quality training.
+- User is comfortable running terminal commands but wants exact step-by-step commands.
+- User may paste long terminal output; answer directly and practically.
+- User is planning to move full training to cloud eventually, but wants local Mac development to continue.
+- User gave permission to commit this handoff update.
 
 ## Current Phase 3 Status
 
