@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Callable, Union
 import copy
+import os
+import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -357,12 +361,146 @@ def build_oos_prediction_audit(model: Union[PoolRespectModel, SectorMoERespectMo
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+_SYNTHETIC_SENTINEL = pd.Timestamp("2024-01-02 09:30:00")
+
+
+def _safe_symbol_name(symbol: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in symbol)
+
+
+def _asset_checkpoint_path(checkpoint_dir: Optional[str], symbol: str) -> Optional[Path]:
+    if not checkpoint_dir:
+        return None
+    return Path(checkpoint_dir).expanduser() / f"{_safe_symbol_name(symbol)}.pkl"
+
+
+def _save_asset_checkpoint(payload: Dict, checkpoint_dir: Optional[str]) -> None:
+    path = _asset_checkpoint_path(checkpoint_dir, payload["symbol"])
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(payload, f)
+    tmp.replace(path)
+
+
+def _load_asset_checkpoint(checkpoint_dir: Optional[str], symbol: str) -> Optional[Dict]:
+    path = _asset_checkpoint_path(checkpoint_dir, symbol)
+    if path is None or not path.exists():
+        return None
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
+def _run_one_asset_payload(symbol: str, cfg: Config,
+                           n_folds: int, train_frac: float,
+                           iters_per_fold: int, final_iters: int,
+                           min_train_days: int,
+                           data_provider: Optional[DataProvider],
+                           checkpoint_dir: Optional[str] = None) -> Dict:
+    """Run one asset end-to-end. Designed to be safe for ProcessPoolExecutor."""
+    # Avoid each worker asking LightGBM/BLAS for all cores. This keeps 3-4 asset workers
+    # usable on a 16GB laptop instead of oversubscribing the machine.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
+    try:
+        if data_provider is not None:
+            tf = data_provider.load_timeframes(
+                symbol, cfg.base_interval, cfg.higher_tfs,
+                period=cfg.period, start=cfg.start, end=cfg.end,
+            )
+            base = tf["base"]
+        else:
+            base = fetch(symbol, cfg.base_interval, cfg.period,
+                         start=cfg.start, end=cfg.end,
+                         allow_synthetic=False)
+            if len(base) > 0 and base.index[0] == _SYNTHETIC_SENTINEL:
+                return {
+                    "symbol": symbol,
+                    "skip_reason": "yfinance returned no data; would have used synthetic",
+                }
+            tf = multi_timeframe(base, cfg.higher_tfs)
+
+        per_asset_cfg = copy.deepcopy(cfg)
+        per_asset_cfg.opt_iterations = iters_per_fold
+        wf = walk_forward(tf, per_asset_cfg,
+                          n_folds=n_folds, train_frac=train_frac,
+                          iters_per_fold=iters_per_fold,
+                          min_train_days=min_train_days,
+                          train_models=False)
+
+        for p in wf.train_pools_for_ml:
+            p.asset = symbol
+        for p in wf.oos_pools:
+            p.asset = symbol
+
+        final_cfg = copy.deepcopy(cfg)
+        final_cfg.opt_iterations = final_iters
+        best, _ = optimize(tf, final_cfg)
+        pools = project_to_base(build_pools(tf, best), tf["base"].index)
+        results = test_pools(tf["base"], pools, best)
+        for p in pools:
+            p.asset = symbol
+
+        asset = AssetData(
+            symbol=symbol, base_df=base, tf_data=tf,
+            walkforward=wf, final_cfg=best,
+            final_pools=pools, final_results=results,
+        )
+        payload = {
+            "symbol": symbol,
+            "skip_reason": None,
+            "asset": asset,
+            "train_pools": wf.train_pools_for_ml,
+            "train_results": wf.train_results_for_ml,
+            "oos_pools": wf.oos_pools,
+            "oos_results": wf.oos_results,
+            "raw_oos_outcomes": wf.raw_oos_outcomes,
+            "oos_outcome_counts": wf.oos_outcome_counts,
+            "overfit_gap": wf.mean_overfit_gap,
+        }
+        _save_asset_checkpoint(payload, checkpoint_dir)
+        return payload
+    except Exception as e:
+        source = "parquet" if data_provider is not None else "fetch"
+        return {"symbol": symbol, "skip_reason": f"{source} failed: {e}"}
+
+
+def _merge_asset_payload(report: MultiAssetReport, payload: Dict,
+                         all_train_pools: List[Pool],
+                         all_train_results: List[PoolResult],
+                         all_oos_pools: List[Pool],
+                         all_oos_results: List[PoolResult],
+                         all_oos_outcomes: List[int],
+                         all_oos_outcome_counts: Dict[str, int],
+                         overfit_gaps: List[float],
+                         asset_dfs: Dict[str, pd.DataFrame]) -> None:
+    symbol = payload["symbol"]
+    asset = payload["asset"]
+    report.assets[symbol] = asset
+    asset_dfs[symbol] = asset.base_df
+    all_train_pools.extend(payload["train_pools"])
+    all_train_results.extend(payload["train_results"])
+    all_oos_pools.extend(payload["oos_pools"])
+    all_oos_results.extend(payload["oos_results"])
+    all_oos_outcomes.extend(payload["raw_oos_outcomes"])
+    for k, v in payload["oos_outcome_counts"].items():
+        all_oos_outcome_counts[k] = all_oos_outcome_counts.get(k, 0) + v
+    overfit_gaps.append(payload["overfit_gap"])
+
 def run_multi_asset(symbols: List[str], cfg: Config,
                     n_folds: int = 5, train_frac: float = 0.6,
                     iters_per_fold: int = 60,
                     final_iters: int = 100,
                     min_train_days: int = 10,
                     data_provider: Optional[DataProvider] = None,
+                    asset_workers: int = 1,
+                    checkpoint_dir: Optional[str] = None,
+                    resume: bool = False,
                     progress: Optional[Callable[[str, str], None]] = None,
                     ) -> MultiAssetReport:
     """Run walk-forward per asset (NO per-asset model training), then train unified models on
@@ -379,83 +517,66 @@ def run_multi_asset(symbols: List[str], cfg: Config,
     overfit_gaps: List[float] = []
     asset_dfs: Dict[str, pd.DataFrame] = {}
 
-    # Synthetic-data sentinel: the _synthetic() fallback in data.py always builds an index
-    # starting at 2024-01-02 09:30:00. If we see that timestamp at base.index[0], the asset
-    # didn't have real data and was filled in with random-walk. Skip those — mixing synthetic
-    # data into the unified training would pollute the model AND corrupt cross-asset sector
-    # metrics (date-range mismatches give wrong correlation matrices).
-    _SYNTHETIC_SENTINEL = pd.Timestamp("2024-01-02 09:30:00")
-
+    pending: List[str] = []
+    payload_by_symbol: Dict[str, Dict] = {}
     for symbol in symbols:
+        if resume:
+            payload = _load_asset_checkpoint(checkpoint_dir, symbol)
+            if payload is not None:
+                payload_by_symbol[symbol] = payload
+                if progress:
+                    progress(symbol, "loaded checkpoint")
+                continue
+        pending.append(symbol)
+
+    asset_workers = max(1, int(asset_workers or 1))
+    if pending and asset_workers > 1:
         if progress:
-            progress(symbol, "fetch")
-        try:
-            if data_provider is not None:
-                tf = data_provider.load_timeframes(
-                    symbol, cfg.base_interval, cfg.higher_tfs,
-                    period=cfg.period, start=cfg.start, end=cfg.end,
-                )
-                base = tf["base"]
-            else:
-                base = fetch(symbol, cfg.base_interval, cfg.period,
-                             start=cfg.start, end=cfg.end,
-                             allow_synthetic=False)
-        except Exception as e:
-            source = "parquet" if data_provider is not None else "fetch"
-            print(f"  [{symbol}] SKIPPED — {source} failed: {e}")
-            report.skipped_symbols.append(symbol)
-            report.skip_reasons[symbol] = f"{source} failed: {e}"
+            progress("[assets]", f"parallel run ({asset_workers} workers, {len(pending)} pending)")
+        with ProcessPoolExecutor(max_workers=asset_workers) as ex:
+            futs = {
+                ex.submit(_run_one_asset_payload, symbol, cfg, n_folds, train_frac,
+                          iters_per_fold, final_iters, min_train_days,
+                          data_provider, checkpoint_dir): symbol
+                for symbol in pending
+            }
+            for fut in as_completed(futs):
+                symbol = futs[fut]
+                payload = fut.result()
+                payload_by_symbol[symbol] = payload
+                reason = payload.get("skip_reason")
+                if progress:
+                    progress(symbol, f"skipped: {reason}" if reason else "completed")
+    else:
+        for symbol in pending:
+            if progress:
+                progress(symbol, f"walk-forward + final fit")
+            payload = _run_one_asset_payload(
+                symbol, cfg, n_folds, train_frac, iters_per_fold,
+                final_iters, min_train_days, data_provider, checkpoint_dir,
+            )
+            payload_by_symbol[symbol] = payload
+            reason = payload.get("skip_reason")
+            if progress:
+                progress(symbol, f"skipped: {reason}" if reason else "completed")
+
+    # Merge in the caller's symbol order for deterministic cross-asset training.
+    for symbol in symbols:
+        payload = payload_by_symbol.get(symbol)
+        if payload is None:
             continue
-        if data_provider is None and len(base) > 0 and base.index[0] == _SYNTHETIC_SENTINEL:
-            print(f"  [{symbol}] SKIPPED — yfinance returned no data; "
-                  f"refusing to train on synthetic fallback (would pollute basket)")
+        reason = payload.get("skip_reason")
+        if reason:
+            print(f"  [{symbol}] SKIPPED — {reason}")
             report.skipped_symbols.append(symbol)
-            report.skip_reasons[symbol] = "yfinance returned no data; would have used synthetic"
+            report.skip_reasons[symbol] = reason
             continue
-        if data_provider is None:
-            tf = multi_timeframe(base, cfg.higher_tfs)
-        asset_dfs[symbol] = base
-
-        if progress:
-            progress(symbol, f"walk-forward ({n_folds} folds × {iters_per_fold} iters)")
-        per_asset_cfg = copy.deepcopy(cfg)
-        per_asset_cfg.opt_iterations = iters_per_fold
-        wf = walk_forward(tf, per_asset_cfg,
-                           n_folds=n_folds, train_frac=train_frac,
-                           iters_per_fold=iters_per_fold,
-                           min_train_days=min_train_days,
-                           train_models=False)
-
-        # Tag every pool with its asset symbol BEFORE we combine across assets.
-        for p in wf.train_pools_for_ml:
-            p.asset = symbol
-        for p in wf.oos_pools:
-            p.asset = symbol
-
-        all_train_pools.extend(wf.train_pools_for_ml)
-        all_train_results.extend(wf.train_results_for_ml)
-        all_oos_pools.extend(wf.oos_pools)
-        all_oos_results.extend(wf.oos_results)
-        all_oos_outcomes.extend(wf.raw_oos_outcomes)
-        for k, v in wf.oos_outcome_counts.items():
-            all_oos_outcome_counts[k] = all_oos_outcome_counts.get(k, 0) + v
-        overfit_gaps.append(wf.mean_overfit_gap)
-
-        # Final-config fit on full history (this is what's used to surface "today's pools").
-        if progress:
-            progress(symbol, f"final fit ({final_iters} iters)")
-        final_cfg = copy.deepcopy(cfg)
-        final_cfg.opt_iterations = final_iters
-        best, _ = optimize(tf, final_cfg)
-        pools = project_to_base(build_pools(tf, best), tf["base"].index)
-        results = test_pools(tf["base"], pools, best)
-        for p in pools:
-            p.asset = symbol
-
-        report.assets[symbol] = AssetData(
-            symbol=symbol, base_df=base, tf_data=tf,
-            walkforward=wf, final_cfg=best,
-            final_pools=pools, final_results=results,
+        _merge_asset_payload(
+            report, payload,
+            all_train_pools, all_train_results,
+            all_oos_pools, all_oos_results,
+            all_oos_outcomes, all_oos_outcome_counts,
+            overfit_gaps, asset_dfs,
         )
 
     if not report.assets:

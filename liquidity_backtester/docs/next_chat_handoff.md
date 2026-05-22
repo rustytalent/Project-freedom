@@ -170,6 +170,17 @@ Parquet warehouse migration step, started 2026-05-22:
   - synthetic local parquet provider smoke from `/private/tmp/lb_parquet_smoke`
   - predict-mode missing-model check fails clearly before training
 
+Parallel parquet training step, completed 2026-05-22:
+
+- Added `--asset-workers`, `--checkpoint-dir`, and `--resume` to `examples/multi_asset_run.py`.
+- Per-symbol walk-forward/final-fit work can now run through `ProcessPoolExecutor`.
+- Each completed symbol writes a pickle checkpoint under `--checkpoint-dir`; `--resume` loads completed symbols and only runs pending ones.
+- Cross-asset merge remains deterministic in the caller's original symbol order before unified model training.
+- Worker processes set BLAS/OpenMP thread env vars to 1 to avoid oversubscribing an M4/16GB laptop.
+- Verified with a real local parquet smoke:
+  - `--symbols TCS,INFY --folds 2 --iters 1 --final-iters 1 --asset-workers 2`
+  - Both per-symbol jobs completed in parallel, checkpointed, then unified training/reporting completed.
+
 ## Current Phase 3 Status
 
 The previous handoff said Phase 3A-E remained. Most of that is now implemented:
@@ -188,6 +199,7 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 1. Treat `conservative_finml` as the current preferred baseline unless a future run reverses the quality audit.
    - First rerun `conservative_finml` after the new causal momentum features and compare against `output_conservative_baseline`.
    - Then rerun from the real local parquet warehouse using `--data-source parquet`.
+   - On the MacBook M4/16GB, start with `--asset-workers 3`; use `--resume` with a checkpoint directory for restartability.
    - Re-run default and conservative baselines when the data window changes materially or when `TATAMOTORS.NS` data becomes available.
    - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
    - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.

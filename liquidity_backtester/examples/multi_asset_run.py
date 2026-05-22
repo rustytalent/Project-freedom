@@ -122,6 +122,12 @@ def main():
     ap.add_argument("--mode", default="train", choices=("train", "predict"),
                     help="train fits/saves models; predict loads saved models and reads latest parquet")
     ap.add_argument("--model-dir", default="output_models/latest")
+    ap.add_argument("--asset-workers", type=int, default=1,
+                    help="Number of symbols to process in parallel during train mode")
+    ap.add_argument("--checkpoint-dir", default="output_checkpoints",
+                    help="Per-symbol checkpoint directory for train mode")
+    ap.add_argument("--resume", action="store_true",
+                    help="Reuse completed per-symbol checkpoints from --checkpoint-dir")
     ap.add_argument("--embargo-bars", type=int, default=78)
     ap.add_argument("--gate-q", type=float, default=0.70)
     ap.add_argument("--gate-t-today", type=float, default=0.50, dest="gate_t_today")
@@ -162,6 +168,9 @@ def main():
     print(f"  folds:      {args.folds}  iters/fold: {args.iters}  final iters: {args.final_iters}")
     print(f"  data source:{args.data_source}"
           f"{' @ ' + args.data_dir if args.data_source == 'parquet' else ''}")
+    if args.mode == "train":
+        print(f"  workers:    {args.asset_workers}  checkpoints: {args.checkpoint_dir}"
+              f"{' (resume)' if args.resume else ''}")
 
     def prog(symbol, step):
         print(f"  [{symbol}]  {step}")
@@ -175,6 +184,9 @@ def main():
                                   iters_per_fold=args.iters, final_iters=args.final_iters,
                                   min_train_days=args.min_train_days,
                                   data_provider=data_provider,
+                                  asset_workers=args.asset_workers,
+                                  checkpoint_dir=args.checkpoint_dir,
+                                  resume=args.resume,
                                   progress=prog)
         _save_model_bundle(report, args.model_dir, args, cfg)
 
