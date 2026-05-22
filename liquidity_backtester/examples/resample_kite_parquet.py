@@ -27,7 +27,12 @@ def _read_raw(path: Path) -> pd.DataFrame:
         df = pd.read_parquet(fp)
         df = df.rename(columns={c: str(c).lower() for c in df.columns})
         if "symbol" not in df.columns:
-            df["symbol"] = fp.stem.upper()
+            stem = fp.stem.upper()
+            for suffix in ("_1M", "_1MIN", "_MINUTE"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            df["symbol"] = stem
         frames.append(df)
     raw = pd.concat(frames, ignore_index=True)
     if "symbol" not in raw.columns:

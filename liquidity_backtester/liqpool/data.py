@@ -226,7 +226,28 @@ class ParquetProvider(DataProvider):
         raise FileNotFoundError(f"missing parquet for timeframe {tf}; tried: "
                                 + ", ".join(str(p) for p in candidates))
 
+    def _per_symbol_paths(self, symbol: str, tf: str) -> list[Path]:
+        key = self._file_key(tf)
+        sym = _normalise_symbol_key(symbol)
+        names = [
+            f"{sym}.parquet",
+            f"{sym}_{key}.parquet",
+            f"{sym}_{key.lower()}.parquet",
+            f"{sym}_{key.upper()}.parquet",
+            f"{sym}_1m.parquet" if key == "1m" else "",
+        ]
+        return [self.data_dir / key / name for name in names if name]
+
     def _read_symbol_tf(self, symbol: str, tf: str) -> pd.DataFrame:
+        per_symbol = [p for p in self._per_symbol_paths(symbol, tf) if p.exists()]
+        if per_symbol:
+            path = per_symbol[0]
+            raw = pd.read_parquet(path)
+            raw = raw.rename(columns={c: str(c).lower() for c in raw.columns})
+            if "symbol" not in raw.columns:
+                raw["symbol"] = _normalise_symbol_key(symbol)
+            return _normalise_parquet_ohlcv(raw, symbol)
+
         path = self._path_for_tf(tf)
         raw = pd.read_parquet(path)
         raw = raw.rename(columns={c: str(c).lower() for c in raw.columns})
