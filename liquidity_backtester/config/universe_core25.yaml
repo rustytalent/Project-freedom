@@ -1,0 +1,38 @@
+universe: core25
+exchange: NSE
+purpose: MacBook M4/16GB local development universe
+symbols:
+  - {symbol: HDFCBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ICICIBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: SBIN, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: AXISBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: KOTAKBANK, sector: BANKING, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: TCS, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: INFY, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: HCLTECH, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: WIPRO, sector: IT, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TECHM, sector: IT, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: HINDUNILVR, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: ITC, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: NESTLEIND, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BRITANNIA, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DABUR, sector: FMCG, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: MARUTI, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: M&M, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: BAJAJ-AUTO, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: EICHERMOT, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: TVSMOTOR, sector: AUTO, exchange: NSE, tradable: true, context_only: false}
+
+  - {symbol: SUNPHARMA, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DRREDDY, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: CIPLA, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: DIVISLAB, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+  - {symbol: LUPIN, sector: PHARMA, exchange: NSE, tradable: true, context_only: false}
+
+context:
+  - {symbol: NIFTY 50, sector: INDEX, exchange: NSE, tradable: false, context_only: true}
+  - {symbol: BANKNIFTY, sector: INDEX, exchange: NSE, tradable: false, context_only: true}
+  - {symbol: FINNIFTY, sector: INDEX, exchange: NSE, tradable: false, context_only: true}

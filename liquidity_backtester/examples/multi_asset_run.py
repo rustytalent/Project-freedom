@@ -18,6 +18,7 @@ import pandas as pd
 from liqpool import Config, plot_chart
 from liqpool.data import ParquetProvider
 from liqpool.featurize import MultiAssetFeaturizer
+from liqpool.feature_store import FeatureStore
 from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
                                  distance_bucket)
 from liqpool.pools import build_pools, project_to_base
@@ -27,6 +28,7 @@ from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_si
                              serialise_sector_intel)
 from liqpool.tester import test_pools
 from liqpool.timing import StateFeaturizer
+from liqpool.universe import symbols_for_universe
 
 
 def _bundle_path(model_dir: str) -> Path:
@@ -45,6 +47,8 @@ def _save_model_bundle(report, model_dir: str, args, cfg: Config) -> None:
         "embargo_bars": cfg.embargo_bars,
         "data_source": args.data_source,
         "data_dir": args.data_dir,
+        "universe": args.universe,
+        "feature_store_dir": args.feature_store_dir,
     }
     (model_path.parent / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str))
     print(f"[model] saved bundle: {model_path}")
@@ -95,11 +99,10 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols",
-                    default=("HDFCBANK.NS,ICICIBANK.NS,SBIN.NS,AXISBANK.NS,"
-                              "TCS.NS,INFY.NS,HCLTECH.NS,"
-                              "MARUTI.NS,TATAMOTORS.NS,"
-                              "HINDUNILVR.NS"),
+                    default=None,
                     help="comma-separated NSE symbols")
+    ap.add_argument("--universe", default="custom", choices=("custom", "core25"),
+                    help="Named universe. core25 is the Mac-safe local development basket.")
     ap.add_argument("--base", default="5m")
     ap.add_argument("--period", default="60d")
     ap.add_argument("--tfs", default="15min,60min,180min,1D,1W")
@@ -128,6 +131,9 @@ def main():
                     help="Per-symbol checkpoint directory for train mode")
     ap.add_argument("--resume", action="store_true",
                     help="Reuse completed per-symbol checkpoints from --checkpoint-dir")
+    ap.add_argument("--feature-store-dir", default="",
+                    help=("Partitioned parquet feature-store root. If omitted with "
+                          "--universe core25 train mode, defaults to output_feature_store/core25."))
     ap.add_argument("--embargo-bars", type=int, default=78)
     ap.add_argument("--gate-q", type=float, default=0.70)
     ap.add_argument("--gate-t-today", type=float, default=0.50, dest="gate_t_today")
@@ -144,7 +150,22 @@ def main():
     if args.mode == "predict" and args.data_source != "parquet":
         raise SystemExit("--mode predict currently requires --data-source parquet")
 
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if args.feature_store_dir == "" and args.mode == "train" and args.universe == "core25":
+        args.feature_store_dir = "output_feature_store/core25"
+
+    if args.universe != "custom":
+        universe_symbols = symbols_for_universe(args.universe)
+        if args.symbols:
+            print(f"[universe] --symbols overrides --universe {args.universe}")
+            symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        else:
+            symbols = universe_symbols
+    else:
+        default_symbols = ("HDFCBANK.NS,ICICIBANK.NS,SBIN.NS,AXISBANK.NS,"
+                           "TCS.NS,INFY.NS,HCLTECH.NS,"
+                           "MARUTI.NS,TATAMOTORS.NS,"
+                           "HINDUNILVR.NS")
+        symbols = [s.strip() for s in (args.symbols or default_symbols).split(",") if s.strip()]
     if not symbols:
         raise SystemExit("--symbols cannot be empty")
 
@@ -168,6 +189,8 @@ def main():
     print(f"  folds:      {args.folds}  iters/fold: {args.iters}  final iters: {args.final_iters}")
     print(f"  data source:{args.data_source}"
           f"{' @ ' + args.data_dir if args.data_source == 'parquet' else ''}")
+    print(f"  universe:   {args.universe}"
+          f"{'  feature-store: ' + args.feature_store_dir if args.feature_store_dir else ''}")
     if args.mode == "train":
         print(f"  workers:    {args.asset_workers}  checkpoints: {args.checkpoint_dir}"
               f"{' (resume)' if args.resume else ''}")
@@ -187,6 +210,7 @@ def main():
                                   asset_workers=args.asset_workers,
                                   checkpoint_dir=args.checkpoint_dir,
                                   resume=args.resume,
+                                  feature_store_dir=args.feature_store_dir or None,
                                   progress=prog)
         _save_model_bundle(report, args.model_dir, args, cfg)
 
@@ -699,10 +723,13 @@ def main():
         },
         "sector_shrinkage_report": sector_shrinkage_report,
         "post_touch_reaction_metrics": report.post_touch_reaction_metrics,
+        "feature_store": report.feature_store_stats,
         "gate_decisions": gate_decisions,
     }
     out_json = out / "multi_asset_summary.json"
     out_json.write_text(json.dumps(summary, indent=2, default=str))
+    research_json = out / "research_summary.json"
+    research_json.write_text(json.dumps(summary, indent=2, default=str))
     live_plan = {
         "verdict": verdict,
         "why": verdict_why,
@@ -744,7 +771,19 @@ def main():
             report.unified_ml.feature_importance(top_k=200),
             columns=["feature", "importance_gain"],
         ).to_csv(out / "feature_importance.csv", index=False)
+    if report.feature_store_stats:
+        try:
+            fs = FeatureStore(report.feature_store_stats["root"])
+            events = fs.scan("reaction_events/*/*.parquet")
+            if not events.empty:
+                events.to_parquet(out / "post_touch_events.parquet", index=False)
+                events.groupby(["sector", "reaction_label"]).size().reset_index(
+                    name="n"
+                ).to_csv(out / "post_touch_report.csv", index=False)
+        except Exception as e:
+            print(f"[feature_store] could not export post_touch_events.parquet: {e}")
     print(f"\nartifacts: {out_json}")
+    print(f"           {research_json}")
     print(f"           {live_plan_path}")
     print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
     if audit_csv_path is not None:

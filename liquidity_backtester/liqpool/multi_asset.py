@@ -39,7 +39,9 @@ from .ml_model import (PoolRespectModel, SectorMoERespectModel,
                        trainable_mask, labels as ml_labels, label_end_time)
 from .stratified import StratifiedRespectModel
 from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, ProximityModel,
-                     evaluate_timing, TimingReport)
+                     evaluate_timing, evaluate_timing_frames, TimingReport)
+from .feature_store import (FeatureStore, build_feature_store_for_report,
+                            PROXIMITY_HORIZONS, DEFAULT_DIRECTION_HORIZON)
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .indicators import atr
 from .stratified import _headline_factor
@@ -83,6 +85,7 @@ class MultiAssetReport:
     unified_timing_report: Optional[TimingReport] = None
     unified_oos_audit: Optional["OOSPredictionAudit"] = None
     post_touch_reaction_metrics: Dict = field(default_factory=dict)
+    feature_store_stats: Dict = field(default_factory=dict)
 
 
 @dataclass
@@ -501,6 +504,7 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                     asset_workers: int = 1,
                     checkpoint_dir: Optional[str] = None,
                     resume: bool = False,
+                    feature_store_dir: Optional[str] = None,
                     progress: Optional[Callable[[str, str], None]] = None,
                     ) -> MultiAssetReport:
     """Run walk-forward per asset (NO per-asset model training), then train unified models on
@@ -677,10 +681,58 @@ def run_multi_asset(symbols: List[str], cfg: Config,
         if progress:
             progress("[unified]", "training cross-asset direction + proximity models")
         try:
-            PROX_HORIZONS = [78, 156, 312]
-            DIR_HORIZON = 78
+            PROX_HORIZONS = list(PROXIMITY_HORIZONS)
+            DIR_HORIZON = DEFAULT_DIRECTION_HORIZON
             MAX_HORIZON = max(PROX_HORIZONS + [DIR_HORIZON])
             sample_every = max(20, cfg.test_horizon_bars // 6)
+
+            if feature_store_dir:
+                if progress:
+                    progress("[feature_store]", f"writing shards -> {feature_store_dir}")
+                fs_stats = build_feature_store_for_report(
+                    report, multi_feat, feature_store_dir,
+                    horizons=PROX_HORIZONS,
+                    direction_horizon=DIR_HORIZON,
+                    sample_every=sample_every,
+                    seed=cfg.opt_seed + 500,
+                )
+                report.feature_store_stats = fs_stats.to_dict()
+                store = FeatureStore(feature_store_dir)
+                direction_train = store.load_direction("train")
+                direction_oos = store.load_direction("oos")
+                if len(direction_train) >= 30:
+                    try:
+                        report.unified_direction = DirectionModel(horizon=DIR_HORIZON).fit_frame(
+                            direction_train, seed=cfg.opt_seed + 200,
+                        )
+                    except ValueError as ve:
+                        print(f"[multi_asset] feature-store direction skipped: {ve}")
+
+                first_asset_df = next(iter(report.assets.values())).base_df
+                _d = pd.Series(first_asset_df.index).diff().dropna()
+                bps = float(_d.median().total_seconds()) if len(_d) else 300.0
+                if bps <= 0:
+                    bps = 300.0
+
+                prox_oos_frames = {}
+                for h in PROX_HORIZONS:
+                    train_frame = store.load_proximity(h, "train")
+                    oos_frame = store.load_proximity(h, "oos")
+                    prox_oos_frames[h] = oos_frame
+                    try:
+                        pm = ProximityModel(horizon=h, base_period_seconds=bps).fit_frame(
+                            train_frame, seed=cfg.opt_seed + 300 + h,
+                        )
+                        report.unified_proximity[h] = pm
+                    except ValueError as ve:
+                        print(f"[multi_asset] feature-store proximity h={h} skipped: {ve}")
+
+                if report.unified_direction is not None and report.unified_proximity:
+                    report.unified_timing_report = evaluate_timing_frames(
+                        direction_oos, prox_oos_frames,
+                        report.unified_direction, report.unified_proximity,
+                    )
+                return report
 
             # Build a GLOBAL pool list across all assets so one DirectionModel/ProximityModel can
             # train on combined snapshots. Snapshot.pool_touches stores pool indices, so we
@@ -979,3 +1031,15 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
             print(f"\n[unified proximity h={shortest} — top 8 features]", file=file)
             for name, gain in pm.feature_importance(8):
                 print(f"  {name:<32} {gain:>10.1f}", file=file)
+
+    if report.feature_store_stats:
+        fs = report.feature_store_stats
+        print(f"\n[feature store]", file=file)
+        print(f"  root:                 {fs.get('root')}", file=file)
+        print(f"  quality rows:         {fs.get('quality_rows', 0)}", file=file)
+        print(f"  post-touch rows:      {fs.get('post_touch_rows', 0)}", file=file)
+        for key, n in sorted(fs.get("proximity_rows", {}).items()):
+            cand = fs.get("proximity_candidates", {}).get(key, n)
+            kept = fs.get("proximity_kept", {}).get(key, n)
+            keep_rate = (kept / cand) if cand else 0.0
+            print(f"  proximity {key:<10} {n:>8} rows kept ({keep_rate:.1%})", file=file)

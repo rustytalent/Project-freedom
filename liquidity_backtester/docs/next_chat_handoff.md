@@ -327,6 +327,59 @@ Even after architecture improvements, full benchmark runs should eventually move
 
 The next high-impact engineering step is a feature-store/chunked-training architecture, not merely "use Polars".
 
+Implementation status as of 2026-05-24:
+
+- Core25 local universe has been added for MacBook development:
+  - Config: `config/universe_core25.yaml`
+  - CLI: `--universe core25`
+  - Symbols: 5 each from BANKING, IT, FMCG, AUTO, PHARMA
+- Feature-store foundation has been added:
+  - Module: `liqpool/feature_store.py`
+  - CLI: `--feature-store-dir`
+  - If `--universe core25 --mode train` is used and no feature-store dir is supplied, it defaults to `output_feature_store/core25`.
+- The new Mac-safe timing path writes per-symbol parquet shards and trains direction/proximity from feature tables instead of a full-universe in-memory snapshot list:
+  - `bars/timeframe=<tf>/symbol=<symbol>/year=<year>/part.parquet`
+  - `pools/symbol=<symbol>/<split>.parquet`
+  - `quality/symbol=<symbol>/<split>.parquet`
+  - `direction/symbol=<symbol>/split=<split>/fold=<n>.parquet`
+  - `proximity/horizon=<h>/symbol=<symbol>/split=<split>/fold=<n>.parquet`
+  - `reaction_events/symbol=<symbol>/<split>.parquet`
+- `DirectionModel.fit_frame()` and `ProximityModel.fit_frame()` now fit from persisted feature rows.
+- `evaluate_timing_frames()` evaluates OOS direction/proximity from feature-store rows.
+- Note: the quality model still fits from the existing full in-memory pool-level DataFrame in this pass because that table is not the RAM bottleneck. Full quality rows are persisted to the feature store for audit/future table-native training, and no quality rows are sampled away.
+- Smart proximity reduction is implemented in shard generation:
+  - keep all touch-positive rows
+  - keep all rows inside 0-3 ATR
+  - keep 50% of 3-5 ATR negatives
+  - keep 20% of 5-10 ATR negatives
+  - keep 5% of 10+ ATR negatives
+- `examples/multi_asset_run.py` now exports:
+  - `research_summary.json`
+  - `post_touch_events.parquet`
+  - `post_touch_report.csv`
+  - existing live/validation/feature-importance files
+
+Core25 local run template:
+
+```bash
+cd /Users/abc/Projects/Project-freedom/liquidity_backtester
+
+export DATA_ROOT="/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data"
+export RESAMPLED_DIR="$DATA_ROOT/resampled"
+
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
+  --universe core25 \
+  --data-source parquet \
+  --data-dir "$RESAMPLED_DIR" \
+  --mode train \
+  --model-dir output_models/core25_latest \
+  --asset-workers 2 \
+  --checkpoint-dir output_checkpoints/core25 \
+  --resume \
+  --regularization-preset conservative_finml \
+  --out output_core25_train
+```
+
 Core idea:
 
 ```text

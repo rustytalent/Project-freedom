@@ -366,6 +366,58 @@ class DirectionModel:
         self.val_auc = float(roc_auc_score(y_v, val_cal)) if len(set(y_v)) > 1 else 0.0
         return self
 
+    def fit_frame(self, frame: pd.DataFrame, val_frac: float = 0.25,
+                  seed: int = 19) -> "DirectionModel":
+        """Fit from persisted direction feature rows instead of in-memory Snapshot objects."""
+        if frame is None or frame.empty:
+            raise ValueError("DirectionModel needs non-empty direction feature frame")
+        if "direction_label" not in frame.columns:
+            raise ValueError("direction feature frame missing direction_label")
+        X_df = frame.reindex(columns=STATE_FEATURE_NAMES).fillna(0.0)
+        y = frame["direction_label"].astype(int).to_numpy()
+        if len(y) < 30:
+            raise ValueError(f"DirectionModel needs >= 30 valid rows, got {len(y)}")
+        if len(np.unique(y)) < 2:
+            raise ValueError("DirectionModel needs both classes")
+        self.feature_names = list(X_df.columns)
+        self.base_rate = float(y.mean())
+
+        import lightgbm as lgb
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+
+        rng = np.random.default_rng(seed)
+        pos, neg = np.where(y == 1)[0], np.where(y == 0)[0]
+        rng.shuffle(pos); rng.shuffle(neg)
+        n_vp = max(1, int(round(len(pos) * val_frac)))
+        n_vn = max(1, int(round(len(neg) * val_frac)))
+        val_idx = np.concatenate([pos[:n_vp], neg[:n_vn]])
+        tr_idx = np.concatenate([pos[n_vp:], neg[n_vn:]])
+        rng.shuffle(val_idx); rng.shuffle(tr_idx)
+
+        X_tr, y_tr = X_df.iloc[tr_idx].values, y[tr_idx]
+        X_v, y_v = X_df.iloc[val_idx].values, y[val_idx]
+        params = dict(objective="binary", metric="binary_logloss",
+                       learning_rate=0.05, num_leaves=15, max_depth=4,
+                       min_data_in_leaf=8, feature_fraction=0.85,
+                       bagging_fraction=0.85, bagging_freq=5,
+                       lambda_l2=2.0, verbose=-1, seed=seed)
+        dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
+        dval = lgb.Dataset(X_v, label=y_v, reference=dtr, feature_name=self.feature_names)
+        self._gbm = lgb.train(params, dtr, num_boost_round=300, valid_sets=[dval],
+                               valid_names=["val"],
+                               callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False),
+                                          lgb.log_evaluation(0)])
+        val_raw = self._gbm.predict(X_v, num_iteration=self._gbm.best_iteration)
+        self._iso = IsotonicRegression(out_of_bounds="clip")
+        self._iso.fit(val_raw, y_v)
+        val_cal = self._iso.transform(val_raw)
+        self.train_n = int(len(tr_idx)); self.val_n = int(len(val_idx))
+        self.val_brier = float(brier_score_loss(y_v, val_cal))
+        self.val_logloss = float(log_loss(y_v, np.clip(val_cal, 1e-6, 1 - 1e-6)))
+        self.val_auc = float(roc_auc_score(y_v, val_cal)) if len(set(y_v)) > 1 else 0.0
+        return self
+
     def predict_state(self, state: Dict[str, float]) -> float:
         X = pd.DataFrame([state], columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
@@ -513,6 +565,76 @@ class ProximityModel:
             tr = float(y_v[top].mean()) if len(top) else 0.0
             self.val_decile_lift = (tr / br) if br > 0 else float("inf")
         return self
+
+    def fit_frame(self, frame: pd.DataFrame, val_frac: float = 0.25,
+                  seed: int = 21) -> "ProximityModel":
+        """Fit from persisted proximity rows.
+
+        This is the Mac-safe path used by the feature store: each row already contains state
+        features, pool features, and the horizon-specific touch label.
+        """
+        import lightgbm as lgb
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+
+        if frame is None or frame.empty:
+            raise ValueError(f"ProximityModel at horizon {self.horizon} needs non-empty frame")
+        if "touch_label" not in frame.columns:
+            raise ValueError("proximity feature frame missing touch_label")
+        feature_cols = STATE_FEATURE_NAMES + _POOL_FEATURE_NAMES
+        X_df = frame.reindex(columns=feature_cols).fillna(0.0)
+        y = frame["touch_label"].astype(int).to_numpy()
+        if len(y) < 100:
+            raise ValueError(f"ProximityModel at horizon {self.horizon} needs >= 100 rows, "
+                              f"got {len(y)}")
+        if len(np.unique(y)) < 2:
+            raise ValueError(f"ProximityModel at horizon {self.horizon} needs both classes")
+        self.feature_names = list(X_df.columns)
+        self.base_rate = float(y.mean())
+
+        rng = np.random.default_rng(seed)
+        pos, neg = np.where(y == 1)[0], np.where(y == 0)[0]
+        rng.shuffle(pos); rng.shuffle(neg)
+        n_vp = max(1, int(round(len(pos) * val_frac)))
+        n_vn = max(1, int(round(len(neg) * val_frac)))
+        val_idx = np.concatenate([pos[:n_vp], neg[:n_vn]])
+        tr_idx = np.concatenate([pos[n_vp:], neg[n_vn:]])
+        rng.shuffle(val_idx); rng.shuffle(tr_idx)
+        X_tr, y_tr = X_df.iloc[tr_idx].values, y[tr_idx]
+        X_v, y_v = X_df.iloc[val_idx].values, y[val_idx]
+
+        params = dict(objective="binary", metric="binary_logloss",
+                       learning_rate=0.05, num_leaves=20, max_depth=5,
+                       min_data_in_leaf=20, feature_fraction=0.85,
+                       bagging_fraction=0.85, bagging_freq=5,
+                       lambda_l2=2.0, verbose=-1, seed=seed)
+        dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
+        dval = lgb.Dataset(X_v, label=y_v, reference=dtr, feature_name=self.feature_names)
+        self._gbm = lgb.train(params, dtr, num_boost_round=500, valid_sets=[dval],
+                               valid_names=["val"],
+                               callbacks=[lgb.early_stopping(stopping_rounds=40, verbose=False),
+                                          lgb.log_evaluation(0)])
+        val_raw = self._gbm.predict(X_v, num_iteration=self._gbm.best_iteration)
+        self._iso = IsotonicRegression(out_of_bounds="clip")
+        self._iso.fit(val_raw, y_v)
+        val_cal = self._iso.transform(val_raw)
+        self.train_n = int(len(tr_idx)); self.val_n = int(len(val_idx))
+        self.val_brier = float(brier_score_loss(y_v, val_cal))
+        self.val_logloss = float(log_loss(y_v, np.clip(val_cal, 1e-6, 1 - 1e-6)))
+        self.val_auc = float(roc_auc_score(y_v, val_cal)) if len(set(y_v)) > 1 else 0.0
+        if len(val_cal) >= 20:
+            order = np.argsort(val_cal)
+            nv = len(val_cal)
+            bot = order[: nv // 10]; top = order[-nv // 10:]
+            br = float(y_v[bot].mean()) if len(bot) else 0.0
+            tr = float(y_v[top].mean()) if len(top) else 0.0
+            self.val_decile_lift = (tr / br) if br > 0 else float("inf")
+        return self
+
+    def predict_frame(self, frame: pd.DataFrame) -> np.ndarray:
+        X = frame.reindex(columns=self.feature_names).fillna(0.0).values
+        raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
+        return np.clip(self._iso.transform(raw), 0.0, 1.0)
 
     def predict_one(self, pool: Pool, dist_atr: float, side: str,
                     state: Dict[str, float], quality_pred: float) -> float:
@@ -688,6 +810,95 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
                               if rpt.joint_bottom_quartile_respect > 0 else float("inf"))
             rpt.n_joint_evaluated = m
 
+    return rpt
+
+
+def evaluate_timing_frames(direction_frame: pd.DataFrame,
+                           proximity_frames: Dict[int, pd.DataFrame],
+                           direction_model: Optional[DirectionModel],
+                           proximity_models: Dict[int, ProximityModel]) -> TimingReport:
+    """Evaluate timing models from persisted feature-store rows."""
+    from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+
+    rpt = TimingReport()
+    if direction_model is not None and direction_frame is not None and not direction_frame.empty:
+        if "direction_label" in direction_frame.columns:
+            X = direction_frame.reindex(columns=direction_model.feature_names).fillna(0.0)
+            y = direction_frame["direction_label"].astype(int).to_numpy()
+            if len(y):
+                p = direction_model.predict_batch(X)
+                rpt.direction_horizon = direction_model.horizon
+                rpt.direction_n = int(len(y))
+                rpt.direction_brier = float(brier_score_loss(y, p))
+                rpt.direction_logloss = float(log_loss(y, np.clip(p, 1e-6, 1 - 1e-6)))
+                if len(set(y)) > 1:
+                    rpt.direction_auc = float(roc_auc_score(y, p))
+                conf = np.abs(p - 0.5)
+                thr = float(np.quantile(conf, 0.75)) if len(conf) else 1.0
+                m = conf >= thr
+                if m.sum() > 0:
+                    rpt.direction_top_quartile_acc = float(((p[m] >= 0.5).astype(int) == y[m]).mean())
+
+    primary_horizon = None
+    primary_scores = None
+    primary_respect = None
+    for h in sorted(proximity_models.keys()):
+        frame = proximity_frames.get(h)
+        if frame is None or frame.empty or "touch_label" not in frame.columns:
+            continue
+        pm = proximity_models[h]
+        y = frame["touch_label"].astype(int).to_numpy()
+        p = pm.predict_frame(frame)
+        auc = float(roc_auc_score(y, p)) if len(set(y)) > 1 else 0.0
+        bucket_rows = []
+        dist_arr = frame["distance_atr"].astype(float).to_numpy() if "distance_atr" in frame else np.zeros(len(y))
+        for bucket in ("0-1 ATR", "1-3 ATR", "3-5 ATR", "5-10 ATR", "10+ ATR"):
+            mask = np.array([distance_bucket(d) == bucket for d in dist_arr], dtype=bool)
+            if not mask.any():
+                continue
+            row = _bucket_binary_metrics(y[mask], p[mask])
+            row["bucket"] = bucket
+            bucket_rows.append(row)
+        decile_lift = 0.0
+        if len(p) >= 20:
+            order = np.argsort(p)
+            nv = len(p)
+            bot = order[: nv // 10]; top = order[-nv // 10:]
+            bot_rate = float(y[bot].mean()) if len(bot) else 0.0
+            top_rate = float(y[top].mean()) if len(top) else 0.0
+            decile_lift = (top_rate / bot_rate) if bot_rate > 0 else float("inf")
+        rpt.proximity_per_horizon.append(HorizonProxStats(
+            horizon=h,
+            n=int(len(y)),
+            auc=auc,
+            brier=float(brier_score_loss(y, p)),
+            decile_lift=decile_lift,
+            base_rate=float(y.mean()),
+            logloss=float(log_loss(y, np.clip(p, 1e-6, 1 - 1e-6))),
+            distance_bucket_metrics=bucket_rows,
+        ))
+        if primary_horizon is None:
+            primary_horizon = h
+            q = frame["pool_quality"].astype(float).to_numpy() if "pool_quality" in frame else np.ones(len(p))
+            primary_scores = q * p
+            primary_respect = frame["respect_label"].to_numpy() if "respect_label" in frame else None
+
+    if primary_horizon is not None:
+        rpt.primary_prox_horizon = int(primary_horizon)
+    if primary_scores is not None and primary_respect is not None:
+        valid = ~pd.isna(primary_respect)
+        if valid.sum() >= 20:
+            items = sorted(zip(primary_scores[valid], primary_respect[valid]), key=lambda x: x[0])
+            m = len(items)
+            bot = items[: m // 4]
+            top = items[-m // 4:]
+            rpt.joint_bottom_quartile_respect = float(np.mean([r for _, r in bot]))
+            rpt.joint_top_quartile_respect = float(np.mean([r for _, r in top]))
+            rpt.joint_lift = (
+                rpt.joint_top_quartile_respect / rpt.joint_bottom_quartile_respect
+                if rpt.joint_bottom_quartile_respect > 0 else float("inf")
+            )
+            rpt.n_joint_evaluated = int(m)
     return rpt
 
 
