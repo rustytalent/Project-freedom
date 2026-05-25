@@ -188,6 +188,23 @@ class FeatureStore:
     def load_proximity(self, horizon: int, split: str) -> pd.DataFrame:
         return self.scan(f"proximity/horizon={int(horizon)}/*/split={split}/*.parquet")
 
+    def write_policy_labels(self, labels: pd.DataFrame) -> int:
+        """Persist Phase 3C policy-return labels by execution mode and split."""
+        if labels is None or labels.empty:
+            return 0
+        total = 0
+        required = {"mode", "split"}
+        missing = required.difference(labels.columns)
+        if missing:
+            raise ValueError(
+                "policy labels are missing required columns: "
+                + ", ".join(sorted(missing))
+            )
+        for (mode, split), df in labels.groupby(["mode", "split"], dropna=False):
+            rel = f"policy_labels/mode={mode}/split={split}/part.parquet"
+            total += self._write(df.copy(), rel)
+        return int(total)
+
 
 def pool_result_row(symbol: str, split: str, pool_idx: int,
                     pool: Pool, result: PoolResult) -> Dict:

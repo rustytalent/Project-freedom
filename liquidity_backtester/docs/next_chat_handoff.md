@@ -12,10 +12,15 @@
 
 ## Important Local Status
 
-The default branch is synced with GitHub through the Phase 2B execution-backtest
-commit. This handoff has been updated for the Phase 2C direction-aware execution
-work; check `git log --oneline -5` first in the next session to confirm whether
-the Phase 2C commit has already been pushed.
+Local branch is ahead of GitHub with the Phase 3B post-touch reaction alert
+commit:
+
+- `b9bec66 Add post-touch reaction model alerts`
+
+This handoff is being updated for Phase 3C Consistency Layer v1. Check
+`git log --oneline -5` and `git status --short --branch` at the start of the
+next session to confirm whether the Phase 3C commit has already been created
+or pushed.
 
 Do not accidentally commit these local/untracked runtime files unless explicitly requested:
 
@@ -27,6 +32,11 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 - `liquidity_backtester/.DS_Store`
 
 ## Recent Uploaded Commits / Completed Work
+
+- `b9bec66 Add post-touch reaction model alerts`
+  - Added Phase 3B reaction confirmation alerts in predict/live output.
+  - Writes `reaction_alerts.csv` when recent touched pools can be scored.
+  - Not pushed at the time this handoff was edited unless `git status` says otherwise.
 
 - `9167860 Add execution mode backtest reports`
   - Added Phase 2B execution-mode historical PnL reports.
@@ -152,6 +162,55 @@ Phase 3A post-touch reaction model work, started after Phase 2C:
   - Current live pre-touch candidates still use the conservative bucket-shrunk `P_reaction` prior.
   - Next step is to add a post-touch/paper-trading workflow that scores an event after touch candles print.
 
+Phase 3C Consistency Layer v1 work, started after Opus review:
+
+- Opus review pushed the roadmap toward leakage/execution foundations before more alpha layers.
+- Added leakage audit module:
+  - Module: `liqpool/leakage_audit.py`
+  - Checks bar index integrity, required OHLCV columns, contributor `known_at`,
+    higher-timeframe closed-bar timing, pool `available_at`, label/touch timing,
+    sampled detector replay, and whether effective embargo covers the maximum
+    active label horizon.
+  - `--embargo-bars` is now only the requested minimum. Default strict behavior
+    computes `effective_embargo_bars = max(requested_embargo_bars, max_active_label_horizon)`.
+  - `max_active_label_horizon` currently comes from the quality horizon and
+    proximity horizons, typically maxing at `312` bars.
+  - `--allow-short-embargo` exists only for debug/legacy comparison.
+  - Leakage `ERROR` rows are run-blocking by default after artifacts are written.
+    Use `--allow-leakage-errors` only for debugging.
+  - Sampled replay audit is controlled by `--replay-audit-samples` and
+    `--replay-audit-severity warn|error`; default replay misses are warnings so
+    the detector can be audited before making replay strict.
+  - Writes `leakage_audit.json` and `leakage_issues.csv`.
+- Added execution-policy label module:
+  - Module: `liqpool/policy_labels.py`
+  - Emits one row per pool-policy pair for `blind_limit`, `touch_confirmed`,
+    `reclaim_confirmed`, and `displacement_confirmed`.
+  - Keeps no-trade rows so gated/live strategy evaluation cannot hide selection bias.
+  - Adds first-class supervision fields:
+    - `policy_target_return_r`
+    - `policy_target_win`
+    - `policy_target_trade_generated`
+    - `policy_target_censored`
+  - In train mode, policy labels are also written into the feature store under:
+    `policy_labels/mode=<mode>/split=<split>/part.parquet`.
+  - Writes `execution_policy_outcomes.parquet` and `policy_label_summary.csv`.
+- Console Phase 3C block now reports:
+  - leakage status/error/warning counts
+  - requested vs effective embargo and max active horizon
+  - replay audit checked/miss/skipped counts
+  - best/worst policy mean R
+- `research_summary.json` and `live_plan.json` include:
+  - `consistency_status`
+  - `leakage_audit`
+  - `policy_label_summary`
+  - requested/effective embargo metadata
+- Important interpretation:
+  - Reaction taxonomies remain diagnostics.
+  - Supervision should move toward policy-specific realized net return/R labels.
+  - `P_touch * P_reaction` should eventually be replaced by a final-stage trade model
+    that learns dependence between touch, direction, respect, reaction, regime, and costs.
+
 - `c3b53a4 Support per-symbol parquet folders`
   - `ParquetProvider` can read both all-symbol parquet files and folder-style per-symbol files such as `resampled/5m/TCS_5m.parquet`.
   - This matches the user's Google Drive warehouse layout.
@@ -260,6 +319,57 @@ git push origin claude/liquidity-pool-backtester-1uskb
   - embeds `reaction_confirmation` inside `live_plan.json`
   - prints a concise `POST-TOUCH REACTION CONFIRMATIONS` console section
   - these alerts are confirmation intelligence only and do **not** automatically make a setup tradeable.
+- Phase 3C Consistency Layer v1:
+  - `python3 -m compileall liqpool examples`
+  - `git diff --check`
+  - Real TCS/INFY parquet train smoke with temporary `/private/tmp/lb_phase3c_*` paths:
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
+  --symbols TCS,INFY \
+  --data-source parquet \
+  --data-dir "/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data/resampled" \
+  --mode train \
+  --model-dir /private/tmp/lb_phase3c_model_smoke \
+  --feature-store-dir /private/tmp/lb_phase3c_feature_store_smoke \
+  --checkpoint-dir /private/tmp/lb_phase3c_checkpoints_smoke \
+  --folds 2 --iters 1 --final-iters 1 \
+  --asset-workers 1 \
+  --regularization-preset conservative_finml \
+  --skip-execution-backtest \
+  --replay-audit-samples 2 \
+  --out /private/tmp/lb_phase3c_output_smoke
+```
+
+  - Produced:
+    - `leakage_audit.json`
+    - `leakage_issues.csv`
+    - `policy_label_summary.csv`
+    - `execution_policy_outcomes.parquet`
+    - feature-store policy labels at
+      `/private/tmp/lb_phase3c_feature_store_smoke/policy_labels/mode=<mode>/split=oos/part.parquet`
+  - Smoke leakage audit:
+    - status `WARN`
+    - `0` errors
+    - `54` warnings, all non-blocking label-window warnings near the data end
+    - requested embargo `78`, effective embargo `312`, max active horizon `312`, covers `true`
+    - sampled replay audit checked `4`, misses `0`, skipped `0`
+  - Policy label artifact sanity:
+    - `execution_policy_outcomes.parquet` shape was `(11764, 46)`
+    - new columns present:
+      `split`, `policy_target_return_r`, `policy_target_win`,
+      `policy_target_trade_generated`, `policy_target_censored`
+  - Predict-mode smoke from `/private/tmp/lb_phase3c_model_smoke` also passed:
+    - no retraining / no model save
+    - parquet data source only
+    - leakage audit still `0` errors, effective embargo `312`, replay misses `0`
+  - Smoke policy labels on TCS/INFY OOS were negative for all execution policies:
+    - `displacement_confirmed`: mean R `-0.43`, trade rate `15.8%`
+    - `touch_confirmed`: mean R `-0.55`, trade rate `46.1%`
+    - `blind_limit`: mean R `-0.84`, trade rate `59.5%`
+    - `reclaim_confirmed`: mean R `-1.06`, trade rate `19.4%`
+  - Interpretation: this validates the artifact path and reinforces the Opus point that
+    execution-policy outcomes, not respect taxonomy alone, must become the main training target.
 
 Real-data smoke note:
 
@@ -671,7 +781,9 @@ feature-store reaction shards and includes reaction labels/diagnostics. Phase 3A
 now also trains a standalone post-touch reaction model suite from those events
 when feature-store train mode is used. Phase 3B makes that model operational in
 live/predict output by scoring recent touched pools after a small confirmation
-window has printed.
+window has printed. After the Opus review, Phase 3C shifted the immediate priority
+toward leakage probes and execution-policy labels before adding more model
+complexity.
 
 Implemented:
 
@@ -707,11 +819,23 @@ Implemented:
     - `RECLAIM_WATCH_DOWN`
     - `AVOID_BREAK_CONTINUATION`
     - `WATCH_REACTION`
+- First-pass leakage audit:
+  - Module: `liqpool/leakage_audit.py`
+  - Artifacts: `leakage_audit.json`, `leakage_issues.csv`
+  - Checks pool/contributor availability timestamps, label-window sanity,
+    OHLCV/index integrity, and active-horizon vs embargo coverage.
+- First-pass execution-policy labels:
+  - Module: `liqpool/policy_labels.py`
+  - Artifacts: `execution_policy_outcomes.parquet`, `policy_label_summary.csv`
+  - Keeps no-trade rows and labels realized net R under each explicit execution policy.
 
 Remaining:
 
 - Add sector regime and direction-state-at-touch features into the event table.
 - Add 1-minute post-touch replay so confirmation features use finer intrabar ordering.
+- Add bar-by-bar detector replay vs batch-generation diff checks.
+- Add MTF closed-bar/as-of join audit with explicit higher-timeframe completion timestamps.
+- Add final-stage trade model only after leakage/execution artifacts are trusted.
 - Turn reaction alerts into a true stateful alert workflow:
   - pre-touch watchlist arms a pool
   - after touch, a follow-up command scores that pool using only candles printed since touch
@@ -831,6 +955,9 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 - Distance-binned quality/proximity diagnostics: implemented
 - Post-touch reaction diagnostics: implemented
 - Strict conditional-edge live gate: implemented
+- Phase 3A reaction model suite: implemented
+- Phase 3B post-touch reaction alerts: implemented
+- Phase 3C Consistency Layer v1: implemented and smoke-tested
 
 ## Next Goals
 
@@ -861,14 +988,24 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
    - Look for factor/TF/sector/Q buckets with high strict respect and low broken_strong rate.
    - This should drive future feature or gate changes more than aggregate touch probability.
 
-6. Continue Phase 3 proper: make the reaction model operational after touch.
+6. Harden Phase 3C toward strict replay/point-in-time enforcement.
+   - Run Core25 train/predict after Phase 3C and inspect `leakage_audit.json`.
+   - Any leakage `ERROR` now blocks the run by default after artifacts are written.
+   - `embargo_bars < max_active_horizon` should no longer appear unless
+     `--allow-short-embargo` is explicitly passed.
+   - Inspect `policy_label_summary.csv` and feature-store `policy_labels/*` to see whether
+     gates improve explicit policy returns or only reduce sample size.
+   - Next hardening step: make replay audit stricter after fixing any detector-causality misses,
+     then add point-in-time feature-store join tests.
+
+7. Continue Phase 3 proper: make the reaction model operational after touch.
    - The standalone reaction model suite now exists and trains from `post_touch_events.parquet`.
    - Phase 3B now adds first-pass reaction alerts for recently touched pools.
    - Next harden this into a stateful "pool armed -> pool touched -> score event -> entry allowed/blocked" workflow.
    - Add sector regime at touch, direction state at touch, and eventually 1-minute replay features.
    - Live plan should eventually require touch + confirmation + reaction model agreement.
 
-7. If metrics still show high overfit, the next high-impact options are:
+8. If metrics still show high overfit, the next high-impact options are:
    - Raise `min_sector_train_n` / `min_sector_class_n`
    - Increase `min_data_in_leaf` for `conservative_finml`
    - Reduce feature_fraction/bagging_fraction further

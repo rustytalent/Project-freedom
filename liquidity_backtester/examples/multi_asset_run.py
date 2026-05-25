@@ -29,8 +29,16 @@ from liqpool.execution_backtest import (
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.feature_store import FeatureStore, post_touch_event_row
 from liqpool.indicators import atr
+from liqpool.leakage_audit import (
+    build_leakage_audit_for_report,
+    max_active_label_horizon,
+)
 from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
                                  distance_bucket)
+from liqpool.policy_labels import (
+    build_policy_labels_for_report,
+    summarise_policy_labels,
+)
 from liqpool.pools import build_pools, project_to_base
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
@@ -56,6 +64,10 @@ def _save_model_bundle(report, model_dir: str, args, cfg: Config) -> None:
         "regularization_preset": cfg.regularization_preset,
         "validation_method": cfg.validation_method,
         "embargo_bars": cfg.embargo_bars,
+        "requested_embargo_bars": getattr(args, "requested_embargo_bars", args.embargo_bars),
+        "effective_embargo_bars": cfg.embargo_bars,
+        "max_active_label_horizon": getattr(args, "max_active_label_horizon", None),
+        "allow_short_embargo": getattr(args, "allow_short_embargo", False),
         "data_source": args.data_source,
         "data_dir": args.data_dir,
         "universe": args.universe,
@@ -381,6 +393,9 @@ def main():
                     help=("Partitioned parquet feature-store root. If omitted with "
                           "--universe core25 train mode, defaults to output_feature_store/core25."))
     ap.add_argument("--embargo-bars", type=int, default=78)
+    ap.add_argument("--allow-short-embargo", action="store_true",
+                    help=("Debug/legacy only: do not lift --embargo-bars to cover the "
+                          "maximum active label horizon"))
     ap.add_argument("--gate-q", type=float, default=0.70)
     ap.add_argument("--gate-t-today", type=float, default=0.50, dest="gate_t_today")
     ap.add_argument("--gate-min-distance-atr", type=float, default=0.5,
@@ -406,6 +421,18 @@ def main():
                     help="Skip Phase 2B OOS execution-mode backtest artifacts")
     ap.add_argument("--execution-backtest-split", default="oos", choices=("oos", "train"),
                     help="Historical split used for execution-mode profitability reports")
+    ap.add_argument("--skip-leakage-audit", action="store_true",
+                    help="Skip Phase 3C leakage audit artifacts")
+    ap.add_argument("--allow-leakage-errors", action="store_true",
+                    help="Write leakage artifacts but do not fail the run on ERROR rows")
+    ap.add_argument("--replay-audit-samples", type=int, default=3,
+                    help="Sampled detector replay checks per symbol for Phase 3C leakage audit")
+    ap.add_argument("--replay-audit-severity", default="warn", choices=("warn", "error"),
+                    help="Severity assigned to sampled replay misses")
+    ap.add_argument("--skip-policy-labels", action="store_true",
+                    help="Skip Phase 3C execution-policy label artifacts")
+    ap.add_argument("--policy-label-split", default="oos", choices=("oos", "train", "final"),
+                    help="Pool split used for execution-policy triple-barrier labels")
     ap.add_argument("--reaction-feature-bars", type=int, default=6,
                     help="Bars after first touch used by Phase 3 reaction confirmation features")
     ap.add_argument("--reaction-alert-lookback-bars", type=int, default=78,
@@ -441,6 +468,25 @@ def main():
     if not symbols:
         raise SystemExit("--symbols cannot be empty")
 
+    args.requested_embargo_bars = int(args.embargo_bars)
+    provisional_cfg = Config(
+        symbol=symbols[0],
+        base_interval=args.base,
+        period=args.period,
+        higher_tfs=args.tfs.split(","),
+        test_horizon_bars=args.horizon,
+        embargo_bars=args.requested_embargo_bars,
+        regularization_preset=args.regularization_preset,
+    )
+    args.max_active_label_horizon = max_active_label_horizon(provisional_cfg)
+    effective_embargo_bars = args.requested_embargo_bars
+    if not args.allow_short_embargo:
+        effective_embargo_bars = max(
+            args.requested_embargo_bars,
+            int(args.max_active_label_horizon),
+        )
+    args.effective_embargo_bars = int(effective_embargo_bars)
+
     cfg = Config(
         symbol=symbols[0],          # cfg.symbol is just informational here
         base_interval=args.base,
@@ -451,7 +497,7 @@ def main():
         opt_explore_frac=0.35,
         opt_seed=11,
         min_pool_score=args.min_score,
-        embargo_bars=args.embargo_bars,
+        embargo_bars=args.effective_embargo_bars,
         regularization_preset=args.regularization_preset,
     )
 
@@ -463,6 +509,10 @@ def main():
           f"{' @ ' + args.data_dir if args.data_source == 'parquet' else ''}")
     print(f"  universe:   {args.universe}"
           f"{'  feature-store: ' + args.feature_store_dir if args.feature_store_dir else ''}")
+    print(f"  embargo:    requested={args.requested_embargo_bars} "
+          f"effective={cfg.embargo_bars} "
+          f"max_horizon={args.max_active_label_horizon}"
+          f"{' (short override)' if args.allow_short_embargo else ''}")
     if args.mode == "train":
         print(f"  workers:    {args.asset_workers}  checkpoints: {args.checkpoint_dir}"
               f"{' (resume)' if args.resume else ''}")
@@ -1075,6 +1125,119 @@ def main():
         except Exception as e:
             print(f"  [execution_backtest] skipped: {e}")
 
+    # ---- Phase 3C: leakage probes and execution-policy labels ----
+    leakage_summary = {}
+    leakage_issues = pd.DataFrame()
+    if not args.skip_leakage_audit:
+        print("\n================ PHASE 3C CONSISTENCY ================")
+        try:
+            leakage_summary, leakage_issues = build_leakage_audit_for_report(
+                report,
+                cfg,
+                requested_embargo_bars=args.requested_embargo_bars,
+                allow_short_embargo=args.allow_short_embargo,
+                replay_audit_samples=args.replay_audit_samples,
+                replay_severity=args.replay_audit_severity.upper(),
+            )
+            counts = leakage_summary.get("severity_counts", {})
+            embargo = leakage_summary.get("embargo", {})
+            replay = leakage_summary.get("replay_audit", {})
+            print(f"  Status: {leakage_summary.get('status', 'UNKNOWN')}  "
+                  f"errors={counts.get('ERROR', 0)} warnings={counts.get('WARN', 0)}")
+            print(f"  Embargo: requested={embargo.get('requested_embargo_bars', args.requested_embargo_bars)} "
+                  f"effective={embargo.get('effective_embargo_bars', cfg.embargo_bars)} bars; "
+                  f"max active horizon={embargo.get('max_active_horizon', 'n/a')} bars; "
+                  f"covers={embargo.get('embargo_covers_max_horizon', False)}")
+            print(f"  Replay audit: checked={replay.get('checked', 0)} "
+                  f"misses={replay.get('misses', 0)} "
+                  f"skipped={replay.get('skipped', 0)} "
+                  f"severity={replay.get('severity', args.replay_audit_severity.upper())}")
+            if not leakage_issues.empty:
+                for _, row in leakage_issues.head(5).iterrows():
+                    print(f"  [{row['severity']}] {row['check']} {row['symbol']}: "
+                          f"{row['message']}")
+                if len(leakage_issues) > 5:
+                    print(f"  ... {len(leakage_issues) - 5} more audit rows in artifact")
+        except Exception as e:
+            leakage_summary = {"status": "ERROR", "error": str(e)}
+            print(f"  [leakage_audit] skipped: {e}")
+
+    policy_labels = pd.DataFrame()
+    policy_label_summary = pd.DataFrame()
+    policy_feature_store_rows = 0
+    policy_feature_store_root = None
+    if not args.skip_policy_labels:
+        print("\n================ POLICY LABELS ================")
+        try:
+            policy_labels = build_policy_labels_for_report(
+                report,
+                cfg,
+                cost_cfg,
+                quantity=args.cost_quantity,
+                split=args.policy_label_split,
+            )
+            policy_label_summary = summarise_policy_labels(policy_labels)
+            if policy_label_summary.empty:
+                print("  (no policy labels generated)")
+            else:
+                print(f"  Split: {args.policy_label_split.upper()}  "
+                      "target = net return under explicit execution policy")
+                print(f"  {'mode':<22} {'rows':>8} {'trades':>8} {'trade%':>7} "
+                      f"{'win':>7} {'mean_R':>8} {'PF':>7} {'no_trade':>9}")
+                for _, row in policy_label_summary.iterrows():
+                    pf = row.get("profit_factor", 0.0)
+                    pf_s = "inf" if not np.isfinite(pf) else f"{pf:.2f}"
+                    print(f"  {row['mode']:<22} {int(row['pool_policy_rows']):>8} "
+                          f"{int(row['generated_trades']):>8} "
+                          f"{row['trade_rate']:>6.1%} {row['win_rate']:>6.1%} "
+                          f"{row['mean_return_r']:>+7.2f} {pf_s:>7} "
+                          f"{row['no_trade_rate']:>8.1%}")
+                best = policy_label_summary.iloc[0]
+                worst = policy_label_summary.iloc[-1]
+                print(f"  Best/Worst mean_R: {best['mode']}={best['mean_return_r']:+.2f} / "
+                      f"{worst['mode']}={worst['mean_return_r']:+.2f}")
+                print("  Note: no-trade rows are kept so gates cannot hide selection bias.")
+                if args.mode == "train" and not policy_labels.empty:
+                    root = (
+                        (report.feature_store_stats or {}).get("root")
+                        if report.feature_store_stats else None
+                    ) or (args.feature_store_dir or None)
+                    if root:
+                        fs = FeatureStore(root)
+                        policy_feature_store_rows = fs.write_policy_labels(policy_labels)
+                        policy_feature_store_root = str(fs.root)
+                        print(f"  Feature store: wrote {policy_feature_store_rows} "
+                              f"policy label rows -> {policy_feature_store_root}/policy_labels")
+        except Exception as e:
+            print(f"  [policy_labels] skipped: {e}")
+
+    leakage_counts = leakage_summary.get("severity_counts", {}) if leakage_summary else {}
+    leakage_error_count = int(leakage_counts.get("ERROR", 0))
+    if leakage_summary.get("status") == "ERROR" and not leakage_counts:
+        leakage_error_count = 1
+    embargo_summary = leakage_summary.get("embargo", {}) if leakage_summary else {}
+    consistency_status = "SKIPPED" if args.skip_leakage_audit else (
+        "FAIL" if leakage_error_count else
+        "WARN" if int(leakage_counts.get("WARN", 0)) else
+        "PASS"
+    )
+    consistency_details = {
+        "status": consistency_status,
+        "leakage_errors_block_run": bool(leakage_error_count and not args.allow_leakage_errors),
+        "leakage_error_count": leakage_error_count,
+        "leakage_warning_count": int(leakage_counts.get("WARN", 0)),
+        "requested_embargo_bars": args.requested_embargo_bars,
+        "effective_embargo_bars": int(cfg.embargo_bars),
+        "max_active_label_horizon": int(args.max_active_label_horizon),
+        "allow_short_embargo": bool(args.allow_short_embargo),
+        "embargo_covers_max_horizon": bool(
+            embargo_summary.get("embargo_covers_max_horizon", False)
+        ) if leakage_summary else None,
+        "replay_audit": leakage_summary.get("replay_audit", {}) if leakage_summary else {},
+        "policy_feature_store_rows": int(policy_feature_store_rows),
+        "policy_feature_store_root": policy_feature_store_root,
+    }
+
     # ---- Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     sector_intel = serialise_sector_intel(sec_metrics, sec_oos, rotation, corr_df)
@@ -1115,6 +1278,11 @@ def main():
                              if report.unified_ml else cfg.validation_method,
         "regularization_preset": cfg.regularization_preset,
         "embargo_bars": cfg.embargo_bars,
+        "requested_embargo_bars": args.requested_embargo_bars,
+        "effective_embargo_bars": int(cfg.embargo_bars),
+        "max_active_label_horizon": int(args.max_active_label_horizon),
+        "allow_short_embargo": bool(args.allow_short_embargo),
+        "consistency_status": consistency_details,
         "model_hyperparameters": getattr(report.unified_ml, "hyperparameters", {})
                                   if report.unified_ml else {},
         "validation_fold_stats": [
@@ -1151,6 +1319,14 @@ def main():
             execution_by_direction.to_dict(orient="records")
             if not execution_by_direction.empty else []
         ),
+        "leakage_audit": leakage_summary,
+        "policy_label_split": args.policy_label_split,
+        "policy_label_summary": (
+            policy_label_summary.to_dict(orient="records")
+            if not policy_label_summary.empty else []
+        ),
+        "policy_feature_store_rows": int(policy_feature_store_rows),
+        "policy_feature_store_root": policy_feature_store_root,
         "gate_post_touch_min_strict": MIN_POST_TOUCH_STRICT,
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
@@ -1197,6 +1373,12 @@ def main():
         "execution_backtest_by_direction": (
             execution_by_direction.to_dict(orient="records")
             if not execution_by_direction.empty else []
+        ),
+        "consistency_status": consistency_details,
+        "leakage_audit": leakage_summary,
+        "policy_label_summary": (
+            policy_label_summary.to_dict(orient="records")
+            if not policy_label_summary.empty else []
         ),
         "reaction_model_report": getattr(report, "reaction_model_report", []),
         "reaction_confirmation": {
@@ -1265,6 +1447,22 @@ def main():
     if reaction_alerts:
         reaction_alerts_path = out / "reaction_alerts.csv"
         pd.DataFrame(reaction_alerts).to_csv(reaction_alerts_path, index=False)
+    leakage_audit_path = None
+    leakage_issues_path = None
+    if leakage_summary:
+        leakage_audit_path = out / "leakage_audit.json"
+        leakage_audit_path.write_text(json.dumps(leakage_summary, indent=2, default=str))
+    if not leakage_issues.empty:
+        leakage_issues_path = out / "leakage_issues.csv"
+        leakage_issues.to_csv(leakage_issues_path, index=False)
+    policy_label_summary_path = None
+    policy_labels_path = None
+    if not policy_label_summary.empty:
+        policy_label_summary_path = out / "policy_label_summary.csv"
+        policy_label_summary.to_csv(policy_label_summary_path, index=False)
+    if not policy_labels.empty:
+        policy_labels_path = out / "execution_policy_outcomes.parquet"
+        policy_labels.to_parquet(policy_labels_path, index=False)
     execution_summary_path = None
     execution_trades_path = None
     execution_by_direction_path = None
@@ -1329,6 +1527,16 @@ def main():
         print(f"           {execution_by_direction_path}  ← Phase 2C UP/DOWN split")
     if execution_trades_path is not None:
         print(f"           {execution_trades_path}  ← Phase 2B trade-level fills")
+    if leakage_audit_path is not None:
+        print(f"           {leakage_audit_path}  ← Phase 3C leakage audit")
+    if leakage_issues_path is not None:
+        print(f"           {leakage_issues_path}  ← Phase 3C leakage issue rows")
+    if policy_label_summary_path is not None:
+        print(f"           {policy_label_summary_path}  ← Phase 3C policy label summary")
+    if policy_labels_path is not None:
+        print(f"           {policy_labels_path}  ← Phase 3C policy outcome labels")
+    if policy_feature_store_rows:
+        print(f"           {policy_feature_store_root}/policy_labels  ← Phase 3C feature-store policy labels")
     if reaction_report_path is not None:
         print(f"           {reaction_report_path}  ← Phase 3 post-touch model metrics")
     if reaction_calibration_path is not None:
@@ -1337,6 +1545,13 @@ def main():
         print(f"           {reaction_importance_path}  ← Phase 3 reaction features")
     if reaction_alerts_path is not None:
         print(f"           {reaction_alerts_path}  ← Phase 3 post-touch alerts")
+
+    if leakage_error_count and not args.allow_leakage_errors:
+        raise SystemExit(
+            "leakage audit found "
+            f"{leakage_error_count} ERROR row(s); artifacts were written. "
+            "Use --allow-leakage-errors only for debugging/legacy comparisons."
+        )
 
     # Per-asset chart
     for symbol, ad in report.assets.items():
