@@ -22,6 +22,7 @@ from liqpool.costs import (
     trade_levels,
 )
 from liqpool.data import ParquetProvider
+from liqpool.execution_backtest import build_execution_backtest_for_report
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.feature_store import FeatureStore
 from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
@@ -225,6 +226,10 @@ def main():
                     help="Assumed slippage in bps per side")
     ap.add_argument("--cost-quantity", type=int, default=1,
                     help="Quantity used for flat-charge cost estimates in reports")
+    ap.add_argument("--skip-execution-backtest", action="store_true",
+                    help="Skip Phase 2B OOS execution-mode backtest artifacts")
+    ap.add_argument("--execution-backtest-split", default="oos", choices=("oos", "train"),
+                    help="Historical split used for execution-mode profitability reports")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
@@ -812,6 +817,38 @@ def main():
                 row += f"{corr_df.loc[s, s2]:>{col_w}.2f}"
             print(row)
 
+    # ---- Phase 2B: execution-mode profitability backtest ----
+    execution_trades = pd.DataFrame()
+    execution_summary = pd.DataFrame()
+    if not args.skip_execution_backtest:
+        print("\n================ EXECUTION BACKTEST ================")
+        try:
+            execution_trades, execution_summary = build_execution_backtest_for_report(
+                report,
+                cfg,
+                cost_cfg,
+                quantity=args.cost_quantity,
+                split=args.execution_backtest_split,
+            )
+            if execution_summary.empty:
+                print("  (no historical execution trades generated)")
+            else:
+                print(f"  Split: {args.execution_backtest_split.upper()}  "
+                      f"Costs: Zerodha {args.cost_product}, "
+                      f"{args.slippage_bps:.1f}bps/side slippage")
+                print(f"  {'mode':<18} {'trades':>8} {'win':>7} "
+                      f"{'net_exp':>10} {'net_R':>8} {'PF':>7} {'maxDD':>10}")
+                for _, row in execution_summary.iterrows():
+                    pf = row.get("profit_factor", 0.0)
+                    pf_s = "inf" if not np.isfinite(pf) else f"{pf:.2f}"
+                    print(f"  {row['mode']:<18} {int(row['trades']):>8} "
+                          f"{row['win_rate']:>6.1%} "
+                          f"₹{row['net_expectancy']:>8.2f} "
+                          f"{row['net_expectancy_r']:>+7.2f} "
+                          f"{pf_s:>7} ₹{row['max_drawdown']:>9.0f}")
+        except Exception as e:
+            print(f"  [execution_backtest] skipped: {e}")
+
     # ---- Artifacts ----
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     sector_intel = serialise_sector_intel(sec_metrics, sec_oos, rotation, corr_df)
@@ -880,6 +917,10 @@ def main():
         "model_health_warning": model_health_warning,
         "execution_mode": args.execution_mode,
         "cost_model": cost_cfg.to_dict(),
+        "execution_backtest_split": args.execution_backtest_split,
+        "execution_backtest_summary": (
+            execution_summary.to_dict(orient="records") if not execution_summary.empty else []
+        ),
         "gate_post_touch_min_strict": MIN_POST_TOUCH_STRICT,
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
@@ -910,6 +951,9 @@ def main():
         "model_health_warning": model_health_warning,
         "execution_mode": args.execution_mode,
         "cost_model": cost_cfg.to_dict(),
+        "execution_backtest_summary": (
+            execution_summary.to_dict(orient="records") if not execution_summary.empty else []
+        ),
         "gate": {
             "min_q": GATE_Q,
             "min_p_touch_today": GATE_T_TODAY,
@@ -961,6 +1005,14 @@ def main():
         gate_df[gate_df["decision"] == "REJECTED_WITH_REASON"].to_csv(
             out / "rejected_setups.csv", index=False,
         )
+    execution_summary_path = None
+    execution_trades_path = None
+    if not execution_summary.empty:
+        execution_summary_path = out / "execution_backtest_summary.csv"
+        execution_summary.to_csv(execution_summary_path, index=False)
+    if not execution_trades.empty:
+        execution_trades_path = out / "execution_backtest_trades.csv"
+        execution_trades.to_csv(execution_trades_path, index=False)
     validation_rows = summary["validation_fold_stats"]
     if validation_rows:
         pd.DataFrame(validation_rows).to_csv(out / "validation_report.csv", index=False)
@@ -988,6 +1040,10 @@ def main():
         print(f"           {audit_csv_path}  ← Phase 3A global/sector/blended OOS rows")
     if audit_calibration_path is not None:
         print(f"           {audit_calibration_path}  ← Phase 3A per-sector calibration")
+    if execution_summary_path is not None:
+        print(f"           {execution_summary_path}  ← Phase 2B execution-mode PnL")
+    if execution_trades_path is not None:
+        print(f"           {execution_trades_path}  ← Phase 2B trade-level fills")
 
     # Per-asset chart
     for symbol, ad in report.assets.items():

@@ -56,6 +56,27 @@ Phase 2A local work in progress (not necessarily committed unless the user asks)
   - High `P_touch` is now treated as "price may come here", not as "take a trade".
   - The default live execution mode is `reclaim_confirmed`, so the plan should arm alerts and wait for touch/reclaim/displacement confirmation instead of blind limit entries.
 
+Phase 2B execution-backtest work:
+
+- Added `liqpool/execution_backtest.py`.
+- It replays historical pool opportunities and compares:
+  - `blind_limit`
+  - `touch_confirmed`
+  - `reclaim_confirmed`
+- Each simulated trade includes:
+  - entry/exit timestamps, entry, stop, target, exit reason
+  - gross PnL, Zerodha/slippage cost, net PnL, net R
+  - reaction label, MAE/MFE, factor, TF count, sector, symbol
+- `examples/multi_asset_run.py` now writes:
+  - `execution_backtest_summary.csv`
+  - `execution_backtest_trades.csv`
+- Console prints execution-mode profitability metrics:
+  - trades, win rate, net expectancy, net R, profit factor, max drawdown.
+- New CLI flags:
+  - `--skip-execution-backtest`
+  - `--execution-backtest-split oos|train`
+- This is still a first-pass simulator. It uses conservative same-bar handling: if stop and target are both hit in the same candle, stop wins. Next likely improvement is to use 1-minute post-touch replay for more precise intrabar ordering.
+
 - `fc35a0f Add parallel asset checkpoints`
   - Added `--asset-workers`, `--checkpoint-dir`, and `--resume`.
   - Per-symbol parquet training can run in parallel with deterministic final merge order.

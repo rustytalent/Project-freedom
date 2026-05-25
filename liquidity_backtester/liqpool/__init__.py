@@ -22,6 +22,7 @@ from . import event_engine
 from . import feature_store
 from . import universe
 from . import costs
+from . import execution_backtest
 # broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
@@ -49,4 +50,5 @@ __all__ = [
     "feature_store",
     "universe",
     "costs",
+    "execution_backtest",
 ]
