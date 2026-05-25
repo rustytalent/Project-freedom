@@ -17,7 +17,7 @@ commit:
 
 - `b9bec66 Add post-touch reaction model alerts`
 
-This handoff is being updated for Phase 3C Consistency Layer v1. Check
+This handoff is being updated through Phase 3D policy outcome modeling. Check
 `git log --oneline -5` and `git status --short --branch` at the start of the
 next session to confirm whether the Phase 3C commit has already been created
 or pushed.
@@ -211,6 +211,34 @@ Phase 3C Consistency Layer v1 work, started after Opus review:
   - `P_touch * P_reaction` should eventually be replaced by a final-stage trade model
     that learns dependence between touch, direction, respect, reaction, regime, and costs.
 
+Phase 3D policy outcome model work:
+
+- Added research-only executable policy outcome modeling:
+  - Module: `liqpool/policy_model.py`
+  - Class: `PolicyOutcomeModelSuite`
+  - Trains one small LightGBM + isotonic classifier per execution mode.
+  - Target is `policy_target_win` on generated trades only.
+  - Uses pool structure/timing metadata and excludes realized outcomes, MAE/MFE,
+    `bars_to_touch`, entry/exit prices, and barrier fields from model features.
+- `examples/multi_asset_run.py` now has:
+  - `--skip-policy-model`
+  - `--policy-model-min-trades`
+- In train mode, after policy labels are generated:
+  - builds train/oos policy-label tables,
+  - trains policy outcome models per mode,
+  - evaluates on OOS generated trades,
+  - refreshes the saved model bundle so future predict/shadow-live work can access
+    `report.policy_model`.
+- New Phase 3D artifacts:
+  - `policy_model_report.csv`
+  - `policy_model_calibration.csv`
+  - `policy_model_feature_importance.csv`
+  - `policy_model_oos_predictions.csv`
+- Important interpretation:
+  - This is **not** used by live gates yet.
+  - The immediate purpose is model selection: does the top-ranked slice of a real
+    execution policy improve OOS net R after costs compared with the full policy?
+
 - `c3b53a4 Support per-symbol parquet folders`
   - `ParquetProvider` can read both all-symbol parquet files and folder-style per-symbol files such as `resampled/5m/TCS_5m.parquet`.
   - This matches the user's Google Drive warehouse layout.
@@ -370,6 +398,28 @@ PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
     - `reclaim_confirmed`: mean R `-1.06`, trade rate `19.4%`
   - Interpretation: this validates the artifact path and reinforces the Opus point that
     execution-policy outcomes, not respect taxonomy alone, must become the main training target.
+- Phase 3D policy outcome model smoke:
+  - Real TCS/INFY parquet train smoke with temporary `/private/tmp/lb_phase3d_*` paths.
+  - Same strict effective embargo behavior: requested `78`, effective `312`.
+  - Produced:
+    - `policy_model_report.csv`
+    - `policy_model_calibration.csv`
+    - `policy_model_feature_importance.csv`
+    - `policy_model_oos_predictions.csv`
+  - Artifact sanity:
+    - `policy_model_report.csv` shape `(4, 20)`
+    - `policy_model_calibration.csv` shape `(16, 7)`
+    - `policy_model_feature_importance.csv` shape `(81, 3)`
+    - `policy_model_oos_predictions.csv` shape `(800, 10)`
+    - saved model bundle contains `report.policy_model`
+  - Smoke policy outcome model results:
+    - `blind_limit`: OOS AUC `0.559`, base win `25.1%`, top10 R `-0.68`, mean R `-0.84`
+    - `displacement_confirmed`: OOS AUC `0.537`, base win `41.2%`, top10 R `+0.01`, mean R `-0.43`
+    - `reclaim_confirmed`: OOS AUC `0.523`, base win `19.9%`, top10 R `-1.00`, mean R `-1.06`
+    - `touch_confirmed`: OOS AUC `0.561`, base win `37.0%`, top10 R `-0.26`, mean R `-0.55`
+  - Interpretation: weak but useful research signal. On this tiny IT smoke, the model
+    separated the least-bad policy slices, but only `displacement_confirmed` top decile
+    reached near breakeven. Do not use this live until Core25/full OOS confirms it.
 
 Real-data smoke note:
 
@@ -958,6 +1008,7 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 - Phase 3A reaction model suite: implemented
 - Phase 3B post-touch reaction alerts: implemented
 - Phase 3C Consistency Layer v1: implemented and smoke-tested
+- Phase 3D policy outcome model diagnostics: implemented and smoke-tested
 
 ## Next Goals
 
@@ -998,14 +1049,23 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
    - Next hardening step: make replay audit stricter after fixing any detector-causality misses,
      then add point-in-time feature-store join tests.
 
-7. Continue Phase 3 proper: make the reaction model operational after touch.
+7. Validate Phase 3D policy outcome models on Core25 before using them anywhere live.
+   - Inspect `policy_model_report.csv`.
+   - Good sign: top-decile OOS `policy_target_return_r` improves materially over
+     full-policy mean R and stays positive after costs.
+   - Bad sign: AUC near 0.50 and top-decile R still negative. In that case the model is
+     only a diagnostic and should not be promoted.
+   - Do not let `policy_model_p_win` enter the live gate until Core25/full-universe OOS
+     and shadow-live validation agree.
+
+8. Continue Phase 3 proper: make the reaction model operational after touch.
    - The standalone reaction model suite now exists and trains from `post_touch_events.parquet`.
    - Phase 3B now adds first-pass reaction alerts for recently touched pools.
    - Next harden this into a stateful "pool armed -> pool touched -> score event -> entry allowed/blocked" workflow.
    - Add sector regime at touch, direction state at touch, and eventually 1-minute replay features.
    - Live plan should eventually require touch + confirmation + reaction model agreement.
 
-8. If metrics still show high overfit, the next high-impact options are:
+9. If metrics still show high overfit, the next high-impact options are:
    - Raise `min_sector_train_n` / `min_sector_class_n`
    - Increase `min_data_in_leaf` for `conservative_finml`
    - Reduce feature_fraction/bagging_fraction further

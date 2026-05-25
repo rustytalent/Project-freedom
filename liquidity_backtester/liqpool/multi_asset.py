@@ -43,6 +43,7 @@ from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, Proxim
 from .feature_store import (FeatureStore, build_feature_store_for_report,
                             PROXIMITY_HORIZONS, DEFAULT_DIRECTION_HORIZON)
 from .reaction_model import ReactionModelSuite
+from .policy_model import PolicyOutcomeModelSuite
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .indicators import atr
 from .stratified import _headline_factor
@@ -90,6 +91,10 @@ class MultiAssetReport:
     reaction_model_report: List[Dict] = field(default_factory=list)
     reaction_model_calibration: List[Dict] = field(default_factory=list)
     reaction_feature_importance: List[Dict] = field(default_factory=list)
+    policy_model: Optional[PolicyOutcomeModelSuite] = None
+    policy_model_report: List[Dict] = field(default_factory=list)
+    policy_model_calibration: List[Dict] = field(default_factory=list)
+    policy_model_feature_importance: List[Dict] = field(default_factory=list)
     feature_store_stats: Dict = field(default_factory=dict)
 
 

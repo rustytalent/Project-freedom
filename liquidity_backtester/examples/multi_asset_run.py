@@ -39,6 +39,7 @@ from liqpool.policy_labels import (
     build_policy_labels_for_report,
     summarise_policy_labels,
 )
+from liqpool.policy_model import PolicyOutcomeModelSuite
 from liqpool.pools import build_pools, project_to_base
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
@@ -88,6 +89,10 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
         ("reaction_model_report", []),
         ("reaction_model_calibration", []),
         ("reaction_feature_importance", []),
+        ("policy_model", None),
+        ("policy_model_report", []),
+        ("policy_model_calibration", []),
+        ("policy_model_feature_importance", []),
     ):
         if not hasattr(report, attr):
             setattr(report, attr, default)
@@ -433,6 +438,10 @@ def main():
                     help="Skip Phase 3C execution-policy label artifacts")
     ap.add_argument("--policy-label-split", default="oos", choices=("oos", "train", "final"),
                     help="Pool split used for execution-policy triple-barrier labels")
+    ap.add_argument("--skip-policy-model", action="store_true",
+                    help="Skip Phase 3D policy outcome model diagnostics")
+    ap.add_argument("--policy-model-min-trades", type=int, default=80,
+                    help="Minimum generated trades per execution mode to train a policy outcome model")
     ap.add_argument("--reaction-feature-bars", type=int, default=6,
                     help="Bars after first touch used by Phase 3 reaction confirmation features")
     ap.add_argument("--reaction-alert-lookback-bars", type=int, default=78,
@@ -1211,6 +1220,80 @@ def main():
         except Exception as e:
             print(f"  [policy_labels] skipped: {e}")
 
+    policy_model_report = pd.DataFrame()
+    policy_model_calibration = pd.DataFrame()
+    policy_model_importance = pd.DataFrame()
+    policy_model_predictions = pd.DataFrame()
+    if (
+        args.mode == "train"
+        and not args.skip_policy_labels
+        and not args.skip_policy_model
+    ):
+        print("\n================ POLICY OUTCOME MODEL ================")
+        try:
+            train_policy_labels = (
+                policy_labels if args.policy_label_split == "train" else
+                build_policy_labels_for_report(
+                    report, cfg, cost_cfg,
+                    quantity=args.cost_quantity,
+                    split="train",
+                )
+            )
+            oos_policy_labels = (
+                policy_labels if args.policy_label_split == "oos" else
+                build_policy_labels_for_report(
+                    report, cfg, cost_cfg,
+                    quantity=args.cost_quantity,
+                    split="oos",
+                )
+            )
+            suite = PolicyOutcomeModelSuite().fit(
+                train_policy_labels,
+                oos_policy_labels,
+                seed=cfg.opt_seed + 900,
+                min_trades=args.policy_model_min_trades,
+            )
+            report.policy_model = suite
+            policy_model_report = suite.report_frame()
+            policy_model_calibration = suite.calibration_table
+            policy_model_importance = suite.feature_importance_frame(top_k=40)
+            policy_model_predictions = suite.prediction_table
+            report.policy_model_report = (
+                policy_model_report.to_dict(orient="records")
+                if not policy_model_report.empty else []
+            )
+            report.policy_model_calibration = (
+                policy_model_calibration.to_dict(orient="records")
+                if not policy_model_calibration.empty else []
+            )
+            report.policy_model_feature_importance = (
+                policy_model_importance.to_dict(orient="records")
+                if not policy_model_importance.empty else []
+            )
+            if policy_model_report.empty:
+                print("  (no policy outcome models trained)")
+            else:
+                print(f"  Target: policy_target_win on generated trades only; "
+                      f"min trades/mode={args.policy_model_min_trades}")
+                print(f"  {'mode':<22} {'status':<8} {'tr':>6} {'oos':>6} "
+                      f"{'base':>7} {'auc':>7} {'top10_R':>9} {'mean_R':>8}")
+                for _, row in policy_model_report.iterrows():
+                    auc = row.get("oos_auc")
+                    auc_s = "n/a" if pd.isna(auc) else f"{auc:.3f}"
+                    print(f"  {row['mode']:<22} {row['status']:<8} "
+                          f"{int(row.get('train_n', 0)):>6} "
+                          f"{int(row.get('oos_n', 0)):>6} "
+                          f"{row.get('oos_base_win', 0.0):>6.1%} "
+                          f"{auc_s:>7} "
+                          f"{row.get('oos_top_decile_return_r', 0.0):>+8.2f} "
+                          f"{row.get('oos_mean_return_r', 0.0):>+7.2f}")
+                print("  Note: this is research-only; live gates do not use it yet.")
+            # The early model save happened before policy diagnostics; refresh the bundle so
+            # the suite and reports are available to future predict/shadow-live work.
+            _save_model_bundle(report, args.model_dir, args, cfg)
+        except Exception as e:
+            print(f"  [policy_model] skipped: {e}")
+
     leakage_counts = leakage_summary.get("severity_counts", {}) if leakage_summary else {}
     leakage_error_count = int(leakage_counts.get("ERROR", 0))
     if leakage_summary.get("status") == "ERROR" and not leakage_counts:
@@ -1327,6 +1410,15 @@ def main():
         ),
         "policy_feature_store_rows": int(policy_feature_store_rows),
         "policy_feature_store_root": policy_feature_store_root,
+        "policy_model_report": (
+            policy_model_report.to_dict(orient="records")
+            if not policy_model_report.empty else getattr(report, "policy_model_report", [])
+        ),
+        "policy_model_calibration": (
+            policy_model_calibration.to_dict(orient="records")
+            if not policy_model_calibration.empty
+            else getattr(report, "policy_model_calibration", [])
+        ),
         "gate_post_touch_min_strict": MIN_POST_TOUCH_STRICT,
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
@@ -1379,6 +1471,10 @@ def main():
         "policy_label_summary": (
             policy_label_summary.to_dict(orient="records")
             if not policy_label_summary.empty else []
+        ),
+        "policy_model_report": (
+            policy_model_report.to_dict(orient="records")
+            if not policy_model_report.empty else getattr(report, "policy_model_report", [])
         ),
         "reaction_model_report": getattr(report, "reaction_model_report", []),
         "reaction_confirmation": {
@@ -1463,6 +1559,22 @@ def main():
     if not policy_labels.empty:
         policy_labels_path = out / "execution_policy_outcomes.parquet"
         policy_labels.to_parquet(policy_labels_path, index=False)
+    policy_model_report_path = None
+    policy_model_calibration_path = None
+    policy_model_importance_path = None
+    policy_model_predictions_path = None
+    if not policy_model_report.empty:
+        policy_model_report_path = out / "policy_model_report.csv"
+        policy_model_report.to_csv(policy_model_report_path, index=False)
+    if not policy_model_calibration.empty:
+        policy_model_calibration_path = out / "policy_model_calibration.csv"
+        policy_model_calibration.to_csv(policy_model_calibration_path, index=False)
+    if not policy_model_importance.empty:
+        policy_model_importance_path = out / "policy_model_feature_importance.csv"
+        policy_model_importance.to_csv(policy_model_importance_path, index=False)
+    if not policy_model_predictions.empty:
+        policy_model_predictions_path = out / "policy_model_oos_predictions.csv"
+        policy_model_predictions.to_csv(policy_model_predictions_path, index=False)
     execution_summary_path = None
     execution_trades_path = None
     execution_by_direction_path = None
@@ -1537,6 +1649,14 @@ def main():
         print(f"           {policy_labels_path}  ← Phase 3C policy outcome labels")
     if policy_feature_store_rows:
         print(f"           {policy_feature_store_root}/policy_labels  ← Phase 3C feature-store policy labels")
+    if policy_model_report_path is not None:
+        print(f"           {policy_model_report_path}  ← Phase 3D policy outcome model metrics")
+    if policy_model_calibration_path is not None:
+        print(f"           {policy_model_calibration_path}  ← Phase 3D policy model calibration")
+    if policy_model_importance_path is not None:
+        print(f"           {policy_model_importance_path}  ← Phase 3D policy model features")
+    if policy_model_predictions_path is not None:
+        print(f"           {policy_model_predictions_path}  ← Phase 3D top OOS policy predictions")
     if reaction_report_path is not None:
         print(f"           {reaction_report_path}  ← Phase 3 post-touch model metrics")
     if reaction_calibration_path is not None:

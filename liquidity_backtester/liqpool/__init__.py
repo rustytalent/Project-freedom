@@ -26,6 +26,7 @@ from . import execution_backtest
 from . import reaction_model
 from . import leakage_audit
 from . import policy_labels
+from . import policy_model
 # broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
@@ -57,4 +58,5 @@ __all__ = [
     "reaction_model",
     "leakage_audit",
     "policy_labels",
+    "policy_model",
 ]
