@@ -22,7 +22,10 @@ from liqpool.costs import (
     trade_levels,
 )
 from liqpool.data import ParquetProvider
-from liqpool.execution_backtest import build_execution_backtest_for_report
+from liqpool.execution_backtest import (
+    build_execution_backtest_for_report,
+    summarise_execution_by_direction,
+)
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.feature_store import FeatureStore
 from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
@@ -217,7 +220,8 @@ def main():
                     dest="gate_min_post_touch_strict",
                     help="Minimum historical post-touch strict reaction rate for live trades")
     ap.add_argument("--execution-mode", default="reclaim_confirmed",
-                    choices=("blind_limit", "touch_confirmed", "reclaim_confirmed"),
+                    choices=("blind_limit", "touch_confirmed", "reclaim_confirmed",
+                             "displacement_confirmed"),
                     help="Live execution style. Default waits for reclaim/confirmation after touch.")
     ap.add_argument("--cost-product", default="intraday",
                     choices=("intraday", "delivery"),
@@ -449,8 +453,11 @@ def main():
                     "p_trade": trade_ev["p_trade"],
                     "dir_tag": tag, "ev": ev,
                     "gross_ev_legacy": q * t_today * bonus * sec_decision["multiplier"],
+                    "direction": trade_ev["direction"],
+                    "direction_sign": trade_ev["direction_sign"],
                     "net_expectancy_per_share": trade_ev["net_expectancy_per_share"],
                     "net_expectancy_r": trade_ev["net_expectancy_r"],
+                    "directional_net_expectancy_r": trade_ev["directional_net_expectancy_r"],
                     "conditional_net_expectancy_per_share": (
                         trade_ev["conditional_net_expectancy_per_share"]
                     ),
@@ -550,6 +557,8 @@ def main():
             "p_reaction": c["p_reaction"],
             "p_trade": c["p_trade"],
             "dir_tag": c["dir_tag"],
+            "direction": c["direction"],
+            "direction_sign": c["direction_sign"],
             "distance_atr": c["dist_atr"],
             "distance_bucket": c["distance_bucket"],
             "historical_bucket_n": c.get("historical_bucket_n", 0),
@@ -562,6 +571,7 @@ def main():
             "sector_weight": c.get("sector_weight", 0.0),
             "ev": c["ev"],
             "net_expectancy_r": c["net_expectancy_r"],
+            "directional_net_expectancy_r": c["directional_net_expectancy_r"],
             "net_expectancy_per_share": c["net_expectancy_per_share"],
             "expected_cost_per_share": c["expected_cost_per_share"],
             "execution_mode": args.execution_mode,
@@ -666,6 +676,8 @@ def main():
               f"P_reaction={top['p_reaction']:.1%}   P_trade={top['p_trade']:.1%}")
         print(f"  Net EV={top['net_expectancy_r']:+.2f}R  "
               f"(₹{top['net_expectancy_per_share']:+.2f}/share after costs)")
+        print(f"  Direction: {top['direction']}  "
+              f"direction-coded EV={top['directional_net_expectancy_r']:+.2f}R")
         print(f"  Drivers: {', '.join(srcs)}   |  TFs: {'+'.join(p.tfs)}")
         print(f"  Execution: {args.execution_mode}; arm alert, wait for touch + confirmation")
         side_word = "BUY" if top["side"] == "below" else "SELL"
@@ -690,7 +702,8 @@ def main():
                   f"{c.get('sector_alignment', 'NEUTRAL')}]   "
                   f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%} "
                   f"P_trade={c['p_trade']:.1%}  {t_strs}  "
-                  f"netEV={c['net_expectancy_r']:+.2f}R")
+                  f"netEV={c['net_expectancy_r']:+.2f}R "
+                  f"dirEV={c['directional_net_expectancy_r']:+.2f}R")
 
     print(f"\n--- WATCH_ONLY  (interesting, but failed at least one strict gate) ---")
     if not watch_only:
@@ -713,7 +726,8 @@ def main():
             p = c["pool"]
             print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f} "
                   f"P_touch={c['p_touch']:.1%} P_reaction={c['p_reaction']:.1%} "
-                  f"netEV={c['net_expectancy_r']:+.2f}R rejected: "
+                  f"netEV={c['net_expectancy_r']:+.2f}R "
+                  f"dirEV={c['directional_net_expectancy_r']:+.2f}R rejected: "
                   f"{'; '.join(c['gate_reasons'])}")
 
     # IMMINENT TOUCH list: pools likely to be touched today regardless of quality. Surfaces
@@ -820,6 +834,7 @@ def main():
     # ---- Phase 2B: execution-mode profitability backtest ----
     execution_trades = pd.DataFrame()
     execution_summary = pd.DataFrame()
+    execution_by_direction = pd.DataFrame()
     if not args.skip_execution_backtest:
         print("\n================ EXECUTION BACKTEST ================")
         try:
@@ -830,6 +845,7 @@ def main():
                 quantity=args.cost_quantity,
                 split=args.execution_backtest_split,
             )
+            execution_by_direction = summarise_execution_by_direction(execution_trades)
             if execution_summary.empty:
                 print("  (no historical execution trades generated)")
             else:
@@ -837,7 +853,8 @@ def main():
                       f"Costs: Zerodha {args.cost_product}, "
                       f"{args.slippage_bps:.1f}bps/side slippage")
                 print(f"  {'mode':<18} {'trades':>8} {'win':>7} "
-                      f"{'net_exp':>10} {'net_R':>8} {'PF':>7} {'maxDD':>10}")
+                      f"{'net_exp':>10} {'net_R':>8} {'up/dn':>11} "
+                      f"{'up_R':>8} {'dn_R':>8} {'PF':>7} {'maxDD':>10}")
                 for _, row in execution_summary.iterrows():
                     pf = row.get("profit_factor", 0.0)
                     pf_s = "inf" if not np.isfinite(pf) else f"{pf:.2f}"
@@ -845,7 +862,13 @@ def main():
                           f"{row['win_rate']:>6.1%} "
                           f"₹{row['net_expectancy']:>8.2f} "
                           f"{row['net_expectancy_r']:>+7.2f} "
+                          f"{int(row.get('up_trades', 0)):>5}/"
+                          f"{int(row.get('down_trades', 0)):<5} "
+                          f"{row.get('up_net_expectancy_r', 0.0):>+7.2f} "
+                          f"{row.get('down_net_expectancy_r', 0.0):>+7.2f} "
                           f"{pf_s:>7} ₹{row['max_drawdown']:>9.0f}")
+                print("  Note: net_R is profit/loss. Direction columns split UP longs "
+                      "from DOWN shorts.")
         except Exception as e:
             print(f"  [execution_backtest] skipped: {e}")
 
@@ -921,6 +944,10 @@ def main():
         "execution_backtest_summary": (
             execution_summary.to_dict(orient="records") if not execution_summary.empty else []
         ),
+        "execution_backtest_by_direction": (
+            execution_by_direction.to_dict(orient="records")
+            if not execution_by_direction.empty else []
+        ),
         "gate_post_touch_min_strict": MIN_POST_TOUCH_STRICT,
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
@@ -954,6 +981,10 @@ def main():
         "execution_backtest_summary": (
             execution_summary.to_dict(orient="records") if not execution_summary.empty else []
         ),
+        "execution_backtest_by_direction": (
+            execution_by_direction.to_dict(orient="records")
+            if not execution_by_direction.empty else []
+        ),
         "gate": {
             "min_q": GATE_Q,
             "min_p_touch_today": GATE_T_TODAY,
@@ -985,7 +1016,10 @@ def main():
                 "p_respect": c["p_respect"],
                 "p_reaction": c["p_reaction"],
                 "p_trade": c["p_trade"],
+                "direction": c["direction"],
+                "direction_sign": c["direction_sign"],
                 "net_expectancy_r": c["net_expectancy_r"],
+                "directional_net_expectancy_r": c["directional_net_expectancy_r"],
                 "net_expectancy_per_share": c["net_expectancy_per_share"],
             }
             for c in tradeable[:20]
@@ -1007,9 +1041,13 @@ def main():
         )
     execution_summary_path = None
     execution_trades_path = None
+    execution_by_direction_path = None
     if not execution_summary.empty:
         execution_summary_path = out / "execution_backtest_summary.csv"
         execution_summary.to_csv(execution_summary_path, index=False)
+    if not execution_by_direction.empty:
+        execution_by_direction_path = out / "execution_backtest_by_direction.csv"
+        execution_by_direction.to_csv(execution_by_direction_path, index=False)
     if not execution_trades.empty:
         execution_trades_path = out / "execution_backtest_trades.csv"
         execution_trades.to_csv(execution_trades_path, index=False)
@@ -1042,6 +1080,8 @@ def main():
         print(f"           {audit_calibration_path}  ← Phase 3A per-sector calibration")
     if execution_summary_path is not None:
         print(f"           {execution_summary_path}  ← Phase 2B execution-mode PnL")
+    if execution_by_direction_path is not None:
+        print(f"           {execution_by_direction_path}  ← Phase 2C UP/DOWN split")
     if execution_trades_path is not None:
         print(f"           {execution_trades_path}  ← Phase 2B trade-level fills")
 

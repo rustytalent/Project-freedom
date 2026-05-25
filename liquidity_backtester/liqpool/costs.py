@@ -134,11 +134,15 @@ def expected_trade_value(
     quantity = max(int(quantity), 1)
 
     if side == "below":
+        direction = "UP"
+        direction_sign = 1
         win_per_share = max(0.0, float(target) - float(entry))
         loss_per_share = max(0.0, float(entry) - float(stop))
         win_exit = target
         loss_exit = stop
     else:
+        direction = "DOWN"
+        direction_sign = -1
         win_per_share = max(0.0, float(entry) - float(target))
         loss_per_share = max(0.0, float(stop) - float(entry))
         win_exit = target
@@ -153,14 +157,18 @@ def expected_trade_value(
     gross_conditional = p_reaction * win_per_share - (1.0 - p_reaction) * loss_per_share
     net_conditional = gross_conditional - expected_cost_per_share
     risk_per_share = max(loss_per_share, 1e-9)
+    net_expectancy_r = float((p_touch * net_conditional) / risk_per_share)
 
     return {
+        "direction": direction,
+        "direction_sign": direction_sign,
         "p_touch": float(p_touch),
         "p_reaction": float(p_reaction),
         "p_trade": float(p_touch * p_reaction),
         "gross_expectancy_per_share": float(p_touch * gross_conditional),
         "net_expectancy_per_share": float(p_touch * net_conditional),
-        "net_expectancy_r": float((p_touch * net_conditional) / risk_per_share),
+        "net_expectancy_r": net_expectancy_r,
+        "directional_net_expectancy_r": float(abs(net_expectancy_r) * direction_sign),
         "conditional_net_expectancy_per_share": float(net_conditional),
         "win_per_share": float(win_per_share),
         "loss_per_share": float(loss_per_share),

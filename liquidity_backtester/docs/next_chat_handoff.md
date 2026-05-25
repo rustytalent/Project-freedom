@@ -12,7 +12,10 @@
 
 ## Important Local Status
 
-The default branch is synced with GitHub after the Phase 3 stability/gating commit.
+The default branch is synced with GitHub through the Phase 2B execution-backtest
+commit. This handoff has been updated for the Phase 2C direction-aware execution
+work; check `git log --oneline -5` first in the next session to confirm whether
+the Phase 2C commit has already been pushed.
 
 Do not accidentally commit these local/untracked runtime files unless explicitly requested:
 
@@ -20,10 +23,31 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 - `liquidity_backtester/.venv/`
 - `liquidity_backtester/generate_token.py`
 - `liquidity_backtester/run_morning.sh`
+- `liquidity_backtester/output_*`
+- `liquidity_backtester/.DS_Store`
 
-## Recent Uploaded Commits
+## Recent Uploaded Commits / Completed Work
 
-Phase 2A local work in progress (not necessarily committed unless the user asks):
+- `9167860 Add execution mode backtest reports`
+  - Added Phase 2B execution-mode historical PnL reports.
+  - Writes `execution_backtest_summary.csv` and `execution_backtest_trades.csv`.
+
+- `cd9e43f Add reaction-aware execution cost gates`
+  - Added Phase 2A reaction-aware live gates and Zerodha equity friction.
+
+- `af76f8a Add Core25 feature-store training path`
+  - Added Core25 local universe and feature-store-first training path.
+
+- `b198e2e Update handoff with scaling roadmap`
+  - Recorded the Core25/local-vs-cloud scaling plan.
+
+- `fc35a0f Add parallel asset checkpoints`
+  - Added `--asset-workers`, `--checkpoint-dir`, and `--resume`.
+  - Per-symbol parquet training can run in parallel with deterministic final merge order.
+  - Completed symbols are saved as pickle checkpoints, so a killed run can resume without repeating all asset work.
+  - Worker processes cap BLAS/OpenMP thread counts to avoid oversubscribing the M4 laptop.
+
+Phase 2A reaction-aware gate work:
 
 - Reframed live decision from static pool "quality" into a liquidity lifecycle:
   - `P_touch`: probability price reaches the pool/liquidity magnet.
@@ -77,11 +101,27 @@ Phase 2B execution-backtest work:
   - `--execution-backtest-split oos|train`
 - This is still a first-pass simulator. It uses conservative same-bar handling: if stop and target are both hit in the same candle, stop wins. Next likely improvement is to use 1-minute post-touch replay for more precise intrabar ordering.
 
-- `fc35a0f Add parallel asset checkpoints`
-  - Added `--asset-workers`, `--checkpoint-dir`, and `--resume`.
-  - Per-symbol parquet training can run in parallel with deterministic final merge order.
-  - Completed symbols are saved as pickle checkpoints, so a killed run can resume without repeating all asset work.
-  - Worker processes cap BLAS/OpenMP thread counts to avoid oversubscribing the M4 laptop.
+Phase 2C direction-aware execution reporting / logic upgrade:
+
+- Keep profitability and direction separate:
+  - `net_r`: profit/loss R. Positive means profitable; negative means loss.
+  - `direction`: `UP` for long/buy setups, `DOWN` for short/sell setups.
+  - `direction_sign`: `+1` for UP, `-1` for DOWN.
+  - `directional_net_r`: sign shows direction (`+` up, `-` down), magnitude is `abs(net_r)`.
+- Live expectancy also carries:
+  - `net_expectancy_r`: profit/loss expected R after costs.
+  - `directional_net_expectancy_r`: direction-coded expected R; positive means UP/long setup, negative means DOWN/short setup. Do not use this as profitability.
+- Added `execution_backtest_by_direction.csv`.
+- Execution summary now reports UP/DOWN trade counts and separate UP/DOWN net expectancy R.
+- Added new stricter execution mode:
+  - `displacement_confirmed`
+  - waits for a sweep/close-through, then requires a close back beyond the pool boundary in the trade direction before entering.
+- CLI `--execution-mode` now accepts `displacement_confirmed`.
+- `live_gate_decisions.csv` and `live_plan.json` now include `direction`, `direction_sign`, and `directional_net_expectancy_r` for tradeable/live candidates.
+- Bug fix:
+  - historical execution replay now uses each asset's optimized `final_cfg`, not only the top-level CLI config. This keeps horizons, reclaim windows, ATR settings, and tester thresholds consistent with the fitted symbol setup.
+- Interpretation rule:
+  - Do not read a negative `directional_net_r` as a losing trade by itself. Use `net_r`/`net_pnl` for profitability and `direction`/`directional_net_r` for long-vs-short mapping.
 
 - `c3b53a4 Support per-symbol parquet folders`
   - `ParquetProvider` can read both all-symbol parquet files and folder-style per-symbol files such as `resampled/5m/TCS_5m.parquet`.
@@ -300,6 +340,18 @@ Large parquet run status, observed 2026-05-23:
   - `ProximityModel.fit()` expands `snapshots x active_pools` into a large list of dict rows, then converts it to a pandas DataFrame.
   - This is much larger than the pool-quality dataset.
 
+Core25 data freshness, checked 2026-05-25:
+
+- User updated Google Drive parquet data.
+- Core25 raw and resampled parquet files are current through the May 25, 2026 close:
+  - `raw_1m`: latest `2026-05-25 15:29 IST`
+  - `5m`: latest `2026-05-25 15:25 IST`
+  - `15m`, `60m`, `180m`: latest `2026-05-25 15:15 IST`
+  - `1D`: latest `2026-05-25`
+  - `1W`: latest `2026-05-22` because weekly bars are week-labeled
+- Core25 had 25/25 symbols present with no laggards.
+- After daily data updates, run predict mode from parquet before judging any live plan.
+
 ## Current Architecture Read
 
 The current code does **not** appear to merge all 5m/15m/60m/180m/1D/1W candles into one giant candle matrix.
@@ -434,6 +486,37 @@ PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
   --out output_core25_train
 ```
 
+Core25 prediction-only template after daily parquet update:
+
+```bash
+cd /Users/abc/Projects/Project-freedom/liquidity_backtester
+
+export DATA_ROOT="/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data"
+export RESAMPLED_DIR="$DATA_ROOT/resampled"
+
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
+  --universe core25 \
+  --data-source parquet \
+  --data-dir "$RESAMPLED_DIR" \
+  --mode predict \
+  --model-dir output_models/core25_latest \
+  --execution-mode reclaim_confirmed \
+  --out output_core25_predict_latest
+```
+
+Phase 2C stricter confirmation test:
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
+  --universe core25 \
+  --data-source parquet \
+  --data-dir "$RESAMPLED_DIR" \
+  --mode predict \
+  --model-dir output_models/core25_latest \
+  --execution-mode displacement_confirmed \
+  --out output_core25_predict_displacement
+```
+
 Core idea:
 
 ```text
@@ -537,11 +620,13 @@ Remaining:
 
 ### Phase 3 - Post-Touch Reaction Intelligence
 
-Not fully implemented. Current code has post-touch diagnostics, but not a standalone event database/model.
+Partially implemented. Current code can export `post_touch_events.parquet` from
+feature-store reaction shards and includes reaction labels/diagnostics, but it
+does **not** yet have a standalone trained reaction model.
 
-Required:
+Implemented:
 
-- Generate `post_touch_events.parquet`.
+- Export `post_touch_events.parquet`.
 - Label events:
   - `HARD_REJECT`
   - `SWEEP_RECLAIM`
@@ -549,6 +634,10 @@ Required:
   - `FAIL_CONTINUE`
   - `LIQUIDITY_VACUUM`
   - `NO_SIGNAL`
+- Use historical post-touch bucket strict rates as a shrunk `P_reaction` prior in live gates.
+
+Remaining:
+
 - Add features from the first N candles after touch:
   - reclaim candle presence
   - displacement size
@@ -564,35 +653,33 @@ Required:
 
 ### Phase 4 - Execution And PnL Engine
 
-Not implemented yet.
+Partially implemented through Phase 2A/2B/2C.
 
-Required:
+Implemented:
 
 - Add execution modes:
   - `blind_limit`
   - `touch_confirmed`
   - `reclaim_confirmed`
+- `displacement_confirmed`
 - Prefer `reclaim_confirmed` by default for live decisions.
-- Simulate:
-  - slippage
-  - brokerage/fees placeholder
-  - stop by pool width + ATR
-  - target by historical MFE distribution
-  - partial TP
-  - time stop
-  - direction filter
-  - sector filter
-  - confirmation filter
+- Simulate Zerodha/friction-adjusted entries with stop, target, and time exit.
 - Report profitability metrics:
   - net expectancy per trade
   - win rate
   - avg win/loss
   - profit factor
   - max drawdown
-  - trades/month or trades/year
-  - exposure time
-  - per-symbol PnL
-  - per-sector PnL
+- Output trade-level fills and execution summary CSVs.
+- Separate profitability R from direction-coded R.
+
+Remaining:
+
+- Use 1-minute post-touch replay for better intrabar order instead of conservative same-bar handling.
+- Add partial TP simulation.
+- Use target sizing from historical MFE distribution, not only fixed ATR target.
+- Add richer exposure-time, trades/month, per-symbol PnL, and per-sector PnL reports.
+- Add confirmation-filter comparisons after the standalone reaction model exists.
 - Never call a setup profitable from respect rate alone.
 
 ### Phase 5 - Live Decision System
@@ -679,31 +766,39 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
 
 ## Next Goals
 
-1. Treat `conservative_finml` as the current preferred baseline unless a future run reverses the quality audit.
-   - First rerun `conservative_finml` after the new causal momentum features and compare against `output_conservative_baseline`.
-   - Then rerun from the real local parquet warehouse using `--data-source parquet`.
-   - On the MacBook M4/16GB, start with `--asset-workers 3`; use `--resume` with a checkpoint directory for restartability.
-   - Re-run default and conservative baselines when the data window changes materially or when `TATAMOTORS.NS` data becomes available.
-   - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, and post-touch strict respect.
+1. Run prediction-only mode from the freshly updated May 25 parquet.
+   - Use `--mode predict --universe core25 --data-source parquet`.
+   - Start with `--execution-mode reclaim_confirmed`.
+   - Optionally compare `--execution-mode displacement_confirmed`.
+   - Predict mode must do zero training and should consume `output_models/core25_latest`.
+
+2. Treat `conservative_finml` as the current preferred training preset unless a future run reverses the quality audit.
+   - Re-run train only when the historical data window changes materially, after major feature changes, or when model artifacts are missing/stale.
+   - Compare pooled OOS broad/strict, mean per-asset overfit gap, quality Brier/log-loss/AUC, post-touch strict respect, and execution net expectancy.
    - Do not judge success from proximity AUC alone; proximity is the reachability engine and distance dominates by design.
 
-2. Tune the new live gate only after seeing real OOS bucket counts.
+3. Tune the live gate only after seeing real OOS bucket counts and execution results.
    - Defaults are intentionally strict: Q >= 70%, T_today >= 50%, `DIR_ALIGN`, distance 0.5-12 ATR, bucket n >= 30.
-   - The 2026-05-21 baselines reject everything mainly because Q is far below 70%, not because every bucket is under-supported.
    - If it rejects everything again, inspect `gate_decisions` and `distance_bucket_metrics` before relaxing thresholds.
    - Trade count can drop; that is acceptable if post-touch quality improves.
+   - High `P_touch` remains watch-only unless `P_reaction`, bucket reliability, direction, sector, and net expectancy all pass.
 
-3. Inspect sector shrinkage behavior.
+4. Inspect sector shrinkage behavior.
    - Check `sector_shrinkage_report` in `multi_asset_summary.json`.
    - Good behavior: small/noisy sector experts get near-zero weights.
    - Only trust sector experts that beat global fallback on validation loss with reasonable AUC.
 
-4. Use post-touch reaction quality as the main alpha diagnostic.
+5. Use post-touch reaction quality as the main alpha diagnostic.
    - Focus on `post_touch_reaction_metrics`.
    - Look for factor/TF/sector/Q buckets with high strict respect and low broken_strong rate.
    - This should drive future feature or gate changes more than aggregate touch probability.
 
-5. If metrics still show high overfit, the next high-impact options are:
+6. Start Phase 3 proper: standalone reaction model.
+   - Use `post_touch_events.parquet` as the training table.
+   - Predict `reclaim_success`, `break_continuation`, and strict reaction separately.
+   - Live plan should eventually require touch + confirmation + reaction model agreement.
+
+7. If metrics still show high overfit, the next high-impact options are:
    - Raise `min_sector_train_n` / `min_sector_class_n`
    - Increase `min_data_in_leaf` for `conservative_finml`
    - Reduce feature_fraction/bagging_fraction further

@@ -8,6 +8,12 @@ This module answers a different question than the pool tester:
 The tester can say a pool was respected or swept/reclaimed. The execution
 backtest decides whether a strategy could have captured that behavior with a
 realistic entry, stop, target, time exit, and cost model.
+
+R semantics are explicit:
+- net_r is profitability R: positive = made money, negative = lost money.
+- directional_net_r is direction-coded R: positive = long/up trade, negative =
+  short/down trade; magnitude is abs(net_r). Use this for directional maps, not
+  profitability.
 """
 from __future__ import annotations
 
@@ -25,7 +31,12 @@ from .sectors import sector_of
 from .tester import PoolResult
 
 
-EXECUTION_MODES = ("blind_limit", "touch_confirmed", "reclaim_confirmed")
+EXECUTION_MODES = (
+    "blind_limit",
+    "touch_confirmed",
+    "reclaim_confirmed",
+    "displacement_confirmed",
+)
 
 
 @dataclass
@@ -34,6 +45,8 @@ class ExecutionTrade:
     symbol: str
     sector: str
     side: str
+    direction: str
+    direction_sign: int
     pool_idx: int
     entry_at: str
     exit_at: str
@@ -49,6 +62,7 @@ class ExecutionTrade:
     net_pnl: float
     risk_inr: float
     net_r: float
+    directional_net_r: float
     outcome: str
     reaction_label: str
     mae_atr: float
@@ -126,6 +140,20 @@ def _entry_for_mode(
                 bars_since_break = j - first_close_through_idx
                 if 0 < bars_since_break <= cfg.reclaim_within_bars and _inside(pool, close):
                     return j, close, "reclaim_close"
+                if bars_since_break > cfg.reclaim_within_bars:
+                    return None
+
+        if mode == "displacement_confirmed":
+            close_through = _close_through_atr(pool, close, atr_val)
+            if close_through >= cfg.weak_break_atr and first_close_through_idx is None:
+                first_close_through_idx = j
+            if first_close_through_idx is not None:
+                bars_since_break = j - first_close_through_idx
+                if 0 < bars_since_break <= cfg.reclaim_within_bars:
+                    if pool.side == "low" and close > pool.price_high:
+                        return j, close, "displacement_reclaim_close"
+                    if pool.side == "high" and close < pool.price_low:
+                        return j, close, "displacement_reclaim_close"
                 if bars_since_break > cfg.reclaim_within_bars:
                     return None
 
@@ -262,21 +290,28 @@ def simulate_pool_trade(
         gross_per_share = float(exit_price - entry_price)
         risk_per_share = max(float(entry_price - stop), 1e-9)
         side = "buy"
+        direction = "UP"
+        direction_sign = 1
     else:
         gross_per_share = float(entry_price - exit_price)
         risk_per_share = max(float(stop - entry_price), 1e-9)
         side = "sell"
+        direction = "DOWN"
+        direction_sign = -1
     gross = gross_per_share * qty
     charges = estimate_round_trip_charges(entry_price, exit_price, qty, cost_cfg)
     total_cost = float(charges["total_cost"])
     net = gross - total_cost
     risk = risk_per_share * qty
+    net_r = float(net / max(risk, 1e-9))
 
     return ExecutionTrade(
         mode=mode,
         symbol=symbol,
         sector=sector,
         side=side,
+        direction=direction,
+        direction_sign=direction_sign,
         pool_idx=int(result.pool_idx),
         entry_at=str(idx[entry_idx]),
         exit_at=str(idx[exit_idx]),
@@ -291,7 +326,8 @@ def simulate_pool_trade(
         total_cost=total_cost,
         net_pnl=float(net),
         risk_inr=float(risk),
-        net_r=float(net / max(risk, 1e-9)),
+        net_r=net_r,
+        directional_net_r=float(abs(net_r) * direction_sign),
         outcome=result.outcome,
         reaction_label=_reaction_label(result.outcome),
         mae_atr=float(result.max_excursion_through),
@@ -340,7 +376,9 @@ def summarise_execution_trades(trades: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "mode", "trades", "win_rate", "avg_win", "avg_loss",
             "net_expectancy", "net_expectancy_r", "profit_factor",
-            "max_drawdown", "trades_per_symbol", "avg_bars_held",
+            "max_drawdown", "up_trades", "down_trades",
+            "up_net_expectancy_r", "down_net_expectancy_r",
+            "directional_net_expectancy_r", "trades_per_symbol", "avg_bars_held",
         ])
 
     rows = []
@@ -352,6 +390,8 @@ def summarise_execution_trades(trades: pd.DataFrame) -> pd.DataFrame:
         drawdown = equity - equity.cummax()
         gross_win = float(wins.sum())
         gross_loss = float(-losses.sum())
+        up = df[df["direction"] == "UP"]
+        down = df[df["direction"] == "DOWN"]
         rows.append({
             "mode": mode,
             "trades": int(len(df)),
@@ -360,8 +400,14 @@ def summarise_execution_trades(trades: pd.DataFrame) -> pd.DataFrame:
             "avg_loss": float(losses.mean()) if len(losses) else 0.0,
             "net_expectancy": float(net.mean()) if len(df) else 0.0,
             "net_expectancy_r": float(df["net_r"].mean()) if len(df) else 0.0,
+            "directional_net_expectancy_r": float(df["directional_net_r"].mean())
+            if "directional_net_r" in df.columns and len(df) else 0.0,
             "profit_factor": float(gross_win / gross_loss) if gross_loss > 0 else float("inf"),
             "max_drawdown": float(drawdown.min()) if len(drawdown) else 0.0,
+            "up_trades": int(len(up)),
+            "down_trades": int(len(down)),
+            "up_net_expectancy_r": float(up["net_r"].mean()) if len(up) else 0.0,
+            "down_net_expectancy_r": float(down["net_r"].mean()) if len(down) else 0.0,
             "trades_per_symbol": float(len(df) / max(df["symbol"].nunique(), 1)),
             "avg_bars_held": float(df["bars_held"].mean()) if len(df) else 0.0,
             "target_exit_rate": float((df["exit_reason"] == "target").mean()),
@@ -369,6 +415,39 @@ def summarise_execution_trades(trades: pd.DataFrame) -> pd.DataFrame:
             "time_exit_rate": float((df["exit_reason"] == "time_exit").mean()),
         })
     return pd.DataFrame(rows).sort_values("net_expectancy_r", ascending=False)
+
+
+def summarise_execution_by_direction(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades is None or trades.empty:
+        return pd.DataFrame(columns=[
+            "mode", "direction", "trades", "win_rate", "net_expectancy",
+            "net_expectancy_r", "profit_factor", "max_drawdown",
+        ])
+
+    rows = []
+    for (mode, direction), df in trades.groupby(["mode", "direction"]):
+        net = df["net_pnl"].astype(float)
+        wins = net[net > 0]
+        losses = net[net < 0]
+        equity = net.cumsum()
+        drawdown = equity - equity.cummax()
+        gross_win = float(wins.sum())
+        gross_loss = float(-losses.sum())
+        rows.append({
+            "mode": mode,
+            "direction": direction,
+            "direction_sign": int(df["direction_sign"].iloc[0]),
+            "trades": int(len(df)),
+            "win_rate": float((net > 0).mean()) if len(df) else 0.0,
+            "net_expectancy": float(net.mean()) if len(df) else 0.0,
+            "net_expectancy_r": float(df["net_r"].mean()) if len(df) else 0.0,
+            "profit_factor": float(gross_win / gross_loss) if gross_loss > 0 else float("inf"),
+            "max_drawdown": float(drawdown.min()) if len(drawdown) else 0.0,
+            "target_exit_rate": float((df["exit_reason"] == "target").mean()),
+            "stop_exit_rate": float((df["exit_reason"] == "stop").mean()),
+            "time_exit_rate": float((df["exit_reason"] == "time_exit").mean()),
+        })
+    return pd.DataFrame(rows).sort_values(["mode", "direction_sign"])
 
 
 def build_execution_backtest_for_report(
@@ -387,13 +466,14 @@ def build_execution_backtest_for_report(
         else:
             pools = ad.walkforward.oos_pools
             results = ad.walkforward.oos_results
+        asset_cfg = getattr(ad, "final_cfg", None) or cfg
         frames.append(simulate_execution_modes(
             df_base=ad.base_df,
             pools=pools,
             results=results,
             symbol=symbol,
             sector=sector_of(symbol),
-            cfg=cfg,
+            cfg=asset_cfg,
             cost_cfg=cost_cfg,
             modes=modes,
             quantity=quantity,
