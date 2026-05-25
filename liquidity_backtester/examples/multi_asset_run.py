@@ -16,6 +16,11 @@ import numpy as np
 import pandas as pd
 
 from liqpool import Config, plot_chart
+from liqpool.costs import (
+    ZerodhaEquityCostConfig,
+    expected_trade_value,
+    trade_levels,
+)
 from liqpool.data import ParquetProvider
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.feature_store import FeatureStore
@@ -29,6 +34,7 @@ from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_si
 from liqpool.tester import test_pools
 from liqpool.timing import StateFeaturizer
 from liqpool.universe import symbols_for_universe
+from liqpool.stratified import _headline_factor
 
 
 def _bundle_path(model_dir: str) -> Path:
@@ -96,6 +102,70 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
     return report
 
 
+def _reaction_prior_for_candidate(cand: dict, post_touch_metrics: dict,
+                                  min_bucket_n: int) -> dict:
+    """Empirical-Bayes post-touch prior for the candidate's reaction quality.
+
+    Quality Q is a pre-touch prior. This function pulls it back toward the
+    historical post-touch bucket rate so a liquidity magnet is not treated as
+    a reversal trade just because touch probability is high.
+    """
+    overall = (post_touch_metrics or {}).get("overall", {}) or {}
+    by = (post_touch_metrics or {}).get("by", {}) or {}
+    global_rate = float(overall.get("strict_respect_rate", 0.0) or 0.0)
+    global_n = int(overall.get("n", 0) or 0)
+    prior_n = max(20, min_bucket_n)
+
+    choices = [
+        ("factor_type", cand.get("headline_factor")),
+        ("tf_count", str(cand.get("tf_count"))),
+        ("sector", cand.get("sector")),
+    ]
+    chosen_name = "overall"
+    chosen_bucket = "overall"
+    chosen = overall
+    for group_name, bucket_name in choices:
+        bucket = (by.get(group_name, {}) or {}).get(bucket_name)
+        if bucket and int(bucket.get("n", 0) or 0) >= min_bucket_n:
+            chosen_name = group_name
+            chosen_bucket = str(bucket_name)
+            chosen = bucket
+            break
+
+    n = int(chosen.get("n", 0) or 0)
+    raw_rate = float(chosen.get("strict_respect_rate", 0.0) or 0.0)
+    if n > 0:
+        shrunk = ((raw_rate * n) + (global_rate * prior_n)) / (n + prior_n)
+    else:
+        shrunk = global_rate
+    return {
+        "bucket_group": chosen_name,
+        "bucket": chosen_bucket,
+        "n": n,
+        "raw_strict_rate": raw_rate,
+        "shrunk_strict_rate": float(shrunk),
+        "global_strict_rate": global_rate,
+        "global_n": global_n,
+    }
+
+
+def _model_health_warning(report) -> str:
+    parts = []
+    auc = getattr(report.unified_ml, "val_auc", None) if report.unified_ml else None
+    if auc is not None and auc < 0.55:
+        parts.append(f"quality validation AUC is weak ({auc:.3f})")
+    pt = (report.post_touch_reaction_metrics or {}).get("overall", {})
+    if pt:
+        broken = float(pt.get("broken_strong_rate", 0.0) or 0.0)
+        strict = float(pt.get("strict_respect_rate", 0.0) or 0.0)
+        if broken > strict:
+            parts.append(
+                f"post-touch breaks dominate strict reactions "
+                f"({broken:.1%} broken vs {strict:.1%} strict)"
+            )
+    return "; ".join(parts)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols",
@@ -142,6 +212,19 @@ def main():
     ap.add_argument("--gate-max-distance-atr", type=float, default=12.0,
                     dest="gate_max_distance_atr")
     ap.add_argument("--gate-min-bucket-n", type=int, default=30, dest="gate_min_bucket_n")
+    ap.add_argument("--gate-min-post-touch-strict", type=float, default=0.45,
+                    dest="gate_min_post_touch_strict",
+                    help="Minimum historical post-touch strict reaction rate for live trades")
+    ap.add_argument("--execution-mode", default="reclaim_confirmed",
+                    choices=("blind_limit", "touch_confirmed", "reclaim_confirmed"),
+                    help="Live execution style. Default waits for reclaim/confirmation after touch.")
+    ap.add_argument("--cost-product", default="intraday",
+                    choices=("intraday", "delivery"),
+                    help="Zerodha equity cost profile used for net expectancy")
+    ap.add_argument("--slippage-bps", type=float, default=1.0,
+                    help="Assumed slippage in bps per side")
+    ap.add_argument("--cost-quantity", type=int, default=1,
+                    help="Quantity used for flat-charge cost estimates in reports")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
@@ -238,6 +321,12 @@ def main():
     PRACTICAL_MIN_ATR = args.gate_min_distance_atr
     PRACTICAL_MAX_ATR = args.gate_max_distance_atr
     MIN_BUCKET_N = args.gate_min_bucket_n
+    MIN_POST_TOUCH_STRICT = args.gate_min_post_touch_strict
+    cost_cfg = ZerodhaEquityCostConfig(
+        product=args.cost_product,
+        slippage_bps_per_side=args.slippage_bps,
+    )
+    model_health_warning = _model_health_warning(report)
 
     asset_dfs_for_sectors = {sym: ad.base_df for sym, ad in report.assets.items()}
     sec_metrics = compute_sector_metrics(asset_dfs_for_sectors)
@@ -320,12 +409,50 @@ def main():
                     sec_metrics, sec, trade_side_word, q,
                     min_override_q=max(TRADEABLE_Q + 0.08, 0.65),
                 )
-                ev = q * t_today * bonus * sec_decision["multiplier"]
                 dist_bucket = distance_bucket(float(dist_atr))
+                headline_factor = _headline_factor(p)
+                tf_count = len(set(p.tfs))
+                levels = trade_levels(p.price_low, p.price_high, atr_proxy, side_str)
+                skeleton = {
+                    "sector": sec,
+                    "headline_factor": headline_factor,
+                    "tf_count": tf_count,
+                }
+                reaction_prior = _reaction_prior_for_candidate(
+                    skeleton, report.post_touch_reaction_metrics, MIN_BUCKET_N,
+                )
+                p_reaction = min(float(q), float(reaction_prior["shrunk_strict_rate"]))
+                if tag == "DIR_FIGHT":
+                    p_reaction *= 0.85
+                p_reaction *= max(0.0, min(1.0, float(sec_decision["multiplier"])))
+                p_reaction = max(0.0, min(1.0, p_reaction))
+                trade_ev = expected_trade_value(
+                    side=side_str,
+                    entry=levels["entry"],
+                    stop=levels["stop"],
+                    target=levels["target"],
+                    p_touch=t_today,
+                    p_reaction=p_reaction,
+                    quantity=args.cost_quantity,
+                    cfg=cost_cfg,
+                )
+                ev = trade_ev["net_expectancy_r"]
                 cand = {
                     "symbol": symbol, "pool": p, "result": r, "side": side_str,
-                    "dist_atr": dist_atr, "q": q, "t_by_h": t_by_h,
+                    "dist_atr": dist_atr, "q": q, "p_respect": q, "t_by_h": t_by_h,
+                    "p_touch": t_today, "p_reaction": p_reaction,
+                    "p_trade": trade_ev["p_trade"],
                     "dir_tag": tag, "ev": ev,
+                    "gross_ev_legacy": q * t_today * bonus * sec_decision["multiplier"],
+                    "net_expectancy_per_share": trade_ev["net_expectancy_per_share"],
+                    "net_expectancy_r": trade_ev["net_expectancy_r"],
+                    "conditional_net_expectancy_per_share": (
+                        trade_ev["conditional_net_expectancy_per_share"]
+                    ),
+                    "expected_cost_per_share": trade_ev["expected_cost_per_share"],
+                    "entry": levels["entry"],
+                    "stop": levels["stop"],
+                    "target": levels["target"],
                     "current": current, "atr_proxy": atr_proxy,
                     "dir_p_up": dir_p_up,
                     "sector": sec,
@@ -336,6 +463,13 @@ def main():
                     "sector_allow_trade": sec_decision["allow_trade"],
                     "distance_bucket": dist_bucket,
                     "historical_bucket_n": blended_bucket_n.get(dist_bucket, 0),
+                    "headline_factor": headline_factor,
+                    "tf_count": tf_count,
+                    "post_touch_bucket_group": reaction_prior["bucket_group"],
+                    "post_touch_bucket": reaction_prior["bucket"],
+                    "post_touch_bucket_n": reaction_prior["n"],
+                    "post_touch_strict_rate": reaction_prior["shrunk_strict_rate"],
+                    "post_touch_raw_strict_rate": reaction_prior["raw_strict_rate"],
                     "global_q": q_components.get("global_q"),
                     "sector_q": q_components.get("sector_q"),
                     "sector_weight": q_components.get("gate_weight", 0.0),
@@ -373,6 +507,17 @@ def main():
                            f"{PRACTICAL_MIN_ATR:.1f}-{PRACTICAL_MAX_ATR:.1f}")
         if c.get("historical_bucket_n", 0) < MIN_BUCKET_N:
             reasons.append(f"bucket n={c.get('historical_bucket_n', 0)} < {MIN_BUCKET_N}")
+        if c.get("post_touch_bucket_n", 0) < MIN_BUCKET_N:
+            reasons.append(f"post-touch bucket n={c.get('post_touch_bucket_n', 0)} < "
+                           f"{MIN_BUCKET_N}")
+        if c.get("post_touch_strict_rate", 0.0) < MIN_POST_TOUCH_STRICT:
+            reasons.append(f"post-touch strict {c.get('post_touch_strict_rate', 0.0):.0%} "
+                           f"< {MIN_POST_TOUCH_STRICT:.0%}")
+        if c.get("headline_factor") == "REJ" and c.get("post_touch_strict_rate", 0.0) < 0.50:
+            reasons.append("REJ factor not validated above 50% post-touch strict")
+        if c.get("net_expectancy_per_share", 0.0) <= 0.0:
+            reasons.append(f"net expectancy ₹{c.get('net_expectancy_per_share', 0.0):.2f} <= 0 "
+                           "after costs")
         return reasons
 
     gate_decisions = []
@@ -394,13 +539,30 @@ def main():
             "pool_low": c["pool"].price_low,
             "pool_high": c["pool"].price_high,
             "q": c["q"],
+            "p_respect": c["p_respect"],
             "t_today": c["t_by_h"].get(primary_h, 0.0),
+            "p_touch": c["p_touch"],
+            "p_reaction": c["p_reaction"],
+            "p_trade": c["p_trade"],
             "dir_tag": c["dir_tag"],
             "distance_atr": c["dist_atr"],
             "distance_bucket": c["distance_bucket"],
             "historical_bucket_n": c.get("historical_bucket_n", 0),
+            "headline_factor": c.get("headline_factor"),
+            "tf_count": c.get("tf_count"),
+            "post_touch_bucket_group": c.get("post_touch_bucket_group"),
+            "post_touch_bucket": c.get("post_touch_bucket"),
+            "post_touch_bucket_n": c.get("post_touch_bucket_n", 0),
+            "post_touch_strict_rate": c.get("post_touch_strict_rate", 0.0),
             "sector_weight": c.get("sector_weight", 0.0),
             "ev": c["ev"],
+            "net_expectancy_r": c["net_expectancy_r"],
+            "net_expectancy_per_share": c["net_expectancy_per_share"],
+            "expected_cost_per_share": c["expected_cost_per_share"],
+            "execution_mode": args.execution_mode,
+            "entry": c["entry"],
+            "stop": c["stop"],
+            "target": c["target"],
             "decision": decision_name,
             "reasons": reasons,
         }
@@ -426,15 +588,15 @@ def main():
 
     if tradeable and best_ev >= 0.20:
         verdict = "TRADE_HIGH_CONFIDENCE"
-        verdict_why = f"top setup EV={best_ev:.0%}"
+        verdict_why = f"top setup net expectancy={best_ev:+.2f}R after costs"
     elif tradeable:
         verdict = "TRADE_CAUTIOUS"
-        verdict_why = f"top setup EV={best_ev:.0%}"
+        verdict_why = f"top setup net expectancy={best_ev:+.2f}R after costs"
     elif max_t_today >= 0.30 and max_t_today_cand is not None:
         verdict = "WATCH"
-        verdict_why = (f"a touch is likely (T_today={max_t_today:.0%} on "
-                       f"{max_t_today_cand['symbol']}) but Q={max_t_today_cand['q']:.0%} "
-                       f"is below the {GATE_Q:.0%} strict live gate")
+        verdict_why = (f"touch likely, reaction quality weak — watch only "
+                       f"(P_touch={max_t_today:.0%} on {max_t_today_cand['symbol']}, "
+                       f"P_reaction={max_t_today_cand['p_reaction']:.0%})")
     elif max_t_today >= 0.02 or max_t_2d >= 0.20:
         verdict = "WATCH"
         verdict_why = (f"no setup today; max T_today={max_t_today:.0%}, "
@@ -444,7 +606,7 @@ def main():
         verdict_why = "no actionable pool across the basket"
 
     print(f"  Assets in basket:           {', '.join(report.assets.keys())}")
-    print(f"  Best gated EV today:        {best_ev:.1%}  "
+    print(f"  Best gated net EV today:    {best_ev:+.2f}R  "
           f"({'qualified' if tradeable else 'none qualified'})")
     if max_t_today_cand is not None:
         sym_t = max_t_today_cand["symbol"]
@@ -456,15 +618,18 @@ def main():
     print(f"  Max T_2d (any pool):        {max_t_2d:.1%}")
     print(f"  VERDICT:                    {verdict}")
     print(f"  Why:                        {verdict_why}")
+    if model_health_warning:
+        print(f"  Model health warning:       {model_health_warning}")
     print(f"  Live gate:                  Q≥{GATE_Q:.0%}, T_today≥{GATE_T_TODAY:.0%}, "
           f"DIR_ALIGN, {PRACTICAL_MIN_ATR:.1f}-{PRACTICAL_MAX_ATR:.1f}ATR, "
-          f"bucket n≥{MIN_BUCKET_N}")
+          f"bucket n≥{MIN_BUCKET_N}, post-touch strict≥{MIN_POST_TOUCH_STRICT:.0%}, "
+          f"net EV>0")
     print("----------------------------------------------------------")
 
     # Per-asset compact dashboard
     print("\n[per-asset dashboard]")
     print(f"  {'symbol':<14} {'price':>10} {'P(up)':>7} {'bias':>10} "
-          f"{'top_Q':>7} {'top_T_today':>13} {'top_EV':>8}")
+          f"{'top_Q':>7} {'top_T_today':>13} {'top_EV_R':>9}")
     for sym, s in per_asset_summary.items():
         p_up = s["dir_p_up"]
         if p_up is None:
@@ -481,7 +646,7 @@ def main():
             else:
                 bias_str = "weak down"
         print(f"  {sym:<14} ₹{s['current']:>8.2f}  {p_up_str:>6}  {bias_str:>10} "
-              f"{s['top_q']:>6.0%} {s['top_t_today']:>12.0%} {s['top_ev']:>7.0%}")
+              f"{s['top_q']:>6.0%} {s['top_t_today']:>12.0%} {s['top_ev']:>+8.2f}")
 
     if tradeable:
         top = tradeable[0]
@@ -492,23 +657,20 @@ def main():
         print(f"  Pool ₹{p.price_low:.2f}-{p.price_high:.2f}  mid ₹{p.mid:.2f}  [{side_label}]")
         print(f"  Distance: {top['dist_atr']:.2f} ATRs from current ₹{top['current']:.2f}  "
               f"({top['dir_tag']})")
-        print(f"  Q={top['q']:.1%}   T_today={top['t_by_h'][primary_h]:.1%}   "
-              f"EV={top['ev']:.1%}")
+        print(f"  P_touch={top['p_touch']:.1%}   P_respect={top['p_respect']:.1%}   "
+              f"P_reaction={top['p_reaction']:.1%}   P_trade={top['p_trade']:.1%}")
+        print(f"  Net EV={top['net_expectancy_r']:+.2f}R  "
+              f"(₹{top['net_expectancy_per_share']:+.2f}/share after costs)")
         print(f"  Drivers: {', '.join(srcs)}   |  TFs: {'+'.join(p.tfs)}")
-        a = top["atr_proxy"]
-        if top["side"] == "below":
-            print(f"  Action: LIMIT BUY at ₹{p.price_high:.2f}, "
-                  f"stop ₹{p.price_low - 0.5 * a:.2f}, "
-                  f"target ₹{p.price_high + 2 * a:.2f}+")
-        else:
-            print(f"  Action: LIMIT SELL at ₹{p.price_low:.2f}, "
-                  f"stop ₹{p.price_high + 0.5 * a:.2f}, "
-                  f"target ₹{p.price_low - 2 * a:.2f}-")
+        print(f"  Execution: {args.execution_mode}; arm alert, wait for touch + confirmation")
+        side_word = "BUY" if top["side"] == "below" else "SELL"
+        print(f"  Plan: {side_word} trigger near ₹{top['entry']:.2f}, "
+              f"stop ₹{top['stop']:.2f}, target ₹{top['target']:.2f}")
     else:
         print(">>> NO TRADEABLE SETUP IN BASKET TODAY <<<")
     print("==========================================================")
 
-    print(f"\n--- TRADEABLE  (strict conditional-edge gate passed) ---")
+    print(f"\n--- TRADEABLE  (post-touch + net-expectancy gate passed) ---")
     if not tradeable:
         print("  (none — all pools across basket too far or low-quality)")
     else:
@@ -521,8 +683,9 @@ def main():
             print(f"  #{rank} [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f}  "
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, "
                   f"{c.get('sector_alignment', 'NEUTRAL')}]   "
-                  f"Q={c['q']:.1%}  {t_strs}  sector={c.get('sector_mult', 1.0):.2f}× "
-                  f"sector_w={c.get('sector_weight', 0.0):.0%}  EV={c['ev']:.1%}")
+                  f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%} "
+                  f"P_trade={c['p_trade']:.1%}  {t_strs}  "
+                  f"netEV={c['net_expectancy_r']:+.2f}R")
 
     print(f"\n--- WATCH_ONLY  (interesting, but failed at least one strict gate) ---")
     if not watch_only:
@@ -533,7 +696,8 @@ def main():
             side_lbl = "BELOW" if c["side"] == "below" else "ABOVE"
             print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f} "
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}] "
-                  f"Q={c['q']:.1%} T_today={c['t_by_h'].get(primary_h, 0.0):.1%} "
+                  f"P_touch={c['p_touch']:.1%} P_respect={c['p_respect']:.1%} "
+                  f"P_reaction={c['p_reaction']:.1%} "
                   f"watch: {'; '.join(c['gate_reasons'])}")
 
     print(f"\n--- REJECTED_WITH_REASON  (top 10 by EV) ---")
@@ -543,8 +707,9 @@ def main():
         for c in rejected[:10]:
             p = c["pool"]
             print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f} "
-                  f"Q={c['q']:.1%} T_today={c['t_by_h'].get(primary_h, 0.0):.1%} "
-                  f"EV={c['ev']:.1%} rejected: {'; '.join(c['gate_reasons'])}")
+                  f"P_touch={c['p_touch']:.1%} P_reaction={c['p_reaction']:.1%} "
+                  f"netEV={c['net_expectancy_r']:+.2f}R rejected: "
+                  f"{'; '.join(c['gate_reasons'])}")
 
     # IMMINENT TOUCH list: pools likely to be touched today regardless of quality. Surfaces
     # the high-T-but-low-Q pools that the Q-sorted watch list hides. These are warnings rather
@@ -565,7 +730,8 @@ def main():
             q_tag = "Q-OK" if c["q"] >= TRADEABLE_Q else "Q-LOW"
             print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f}  "
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, {q_tag}]   "
-                  f"Q={c['q']:.1%}  {t_strs}")
+                  f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%}  "
+                  f"{t_strs}")
 
     print(f"\n--- QUALITY WATCH  (top 10 by Q, T_today below tradeable threshold) ---")
     for c in sorted([c for c in watchlist if c["t_by_h"].get(primary_h, 0.0) < TRADEABLE_T_TODAY],
@@ -575,7 +741,8 @@ def main():
         t_strs = "  ".join(f"T_h{h}={c['t_by_h'].get(h, 0.0):.1%}" for h in PROX_HORIZONS)
         print(f"  [{c['symbol']:<14}] ₹{p.price_low:.2f}-{p.price_high:.2f}  "
               f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}]   "
-              f"Q={c['q']:.1%}  {t_strs}")
+              f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%}  "
+              f"{t_strs}")
 
     blocked_by_sector = [c for c in candidates if c.get("sector_block_reason")]
     if blocked_by_sector:
@@ -707,8 +874,13 @@ def main():
         "pooled_oos_ci_wilson": list(report.pooled_oos_ci_wilson),
         "verdict": verdict,
         "best_ev": best_ev,
+        "best_net_expectancy_r": best_ev,
         "n_tradeable": len(tradeable),
         "n_watchlist": len(watchlist),
+        "model_health_warning": model_health_warning,
+        "execution_mode": args.execution_mode,
+        "cost_model": cost_cfg.to_dict(),
+        "gate_post_touch_min_strict": MIN_POST_TOUCH_STRICT,
         "unified_ml_val_auc": report.unified_ml.val_auc if report.unified_ml else None,
         "unified_direction_auc": (report.unified_timing_report.direction_auc
                                    if report.unified_timing_report else None),
@@ -734,6 +906,10 @@ def main():
         "verdict": verdict,
         "why": verdict_why,
         "best_ev": best_ev,
+        "best_net_expectancy_r": best_ev,
+        "model_health_warning": model_health_warning,
+        "execution_mode": args.execution_mode,
+        "cost_model": cost_cfg.to_dict(),
         "gate": {
             "min_q": GATE_Q,
             "min_p_touch_today": GATE_T_TODAY,
@@ -741,13 +917,35 @@ def main():
             "min_distance_atr": PRACTICAL_MIN_ATR,
             "max_distance_atr": PRACTICAL_MAX_ATR,
             "min_bucket_n": MIN_BUCKET_N,
+            "min_post_touch_strict": MIN_POST_TOUCH_STRICT,
+            "requires_positive_net_expectancy_after_costs": True,
         },
         "best_observed_touch": {
             "symbol": max_t_today_cand["symbol"] if max_t_today_cand else None,
             "p_touch_today": max_t_today,
             "p_respect": max_t_today_cand["q"] if max_t_today_cand else None,
+            "p_reaction": max_t_today_cand["p_reaction"] if max_t_today_cand else None,
+            "p_trade": max_t_today_cand["p_trade"] if max_t_today_cand else None,
             "decision": "WATCH_ONLY" if max_t_today_cand and not tradeable else None,
         },
+        "tradeable_setups": [
+            {
+                "symbol": c["symbol"],
+                "side": c["side"],
+                "pool_low": c["pool"].price_low,
+                "pool_high": c["pool"].price_high,
+                "entry": c["entry"],
+                "stop": c["stop"],
+                "target": c["target"],
+                "p_touch": c["p_touch"],
+                "p_respect": c["p_respect"],
+                "p_reaction": c["p_reaction"],
+                "p_trade": c["p_trade"],
+                "net_expectancy_r": c["net_expectancy_r"],
+                "net_expectancy_per_share": c["net_expectancy_per_share"],
+            }
+            for c in tradeable[:20]
+        ],
     }
     live_plan_path = out / "live_plan.json"
     live_plan_path.write_text(json.dumps(live_plan, indent=2, default=str))

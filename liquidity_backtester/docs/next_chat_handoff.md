@@ -23,6 +23,39 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 
 ## Recent Uploaded Commits
 
+Phase 2A local work in progress (not necessarily committed unless the user asks):
+
+- Reframed live decision from static pool "quality" into a liquidity lifecycle:
+  - `P_touch`: probability price reaches the pool/liquidity magnet.
+  - `P_respect`: pre-touch calibrated quality prior.
+  - `P_reaction`: post-touch reaction prior, shrunk from historical reaction buckets.
+  - `P_trade`: `P_touch * P_reaction`, used as an alert/actionability measure.
+- Added an explicit Zerodha equity cost model in `liqpool/costs.py`:
+  - Intraday brokerage: 0.03% or ₹20 per executed order, whichever is lower.
+  - Delivery brokerage: ₹0.
+  - Intraday STT: 0.025% sell side.
+  - Delivery STT: 0.1% buy and sell.
+  - Exchange transaction charge, SEBI fee, stamp duty, GST, delivery DP charge, and slippage assumptions are all parameterised.
+  - Official source used: `https://zerodha.com/charges/`, checked 2026-05-25.
+- `examples/multi_asset_run.py` now has Phase 2A execution/friction flags:
+  - `--execution-mode blind_limit|touch_confirmed|reclaim_confirmed`
+  - `--cost-product intraday|delivery`
+  - `--slippage-bps`
+  - `--cost-quantity`
+  - `--gate-min-post-touch-strict`
+- Live gate now blocks trades when:
+  - post-touch bucket sample is too small,
+  - post-touch strict reaction rate is below threshold,
+  - REJ factor is not validated,
+  - cost-adjusted net expectancy is <= 0.
+- `post_touch_events.parquet` rows now include Phase 2 reaction labels/features:
+  - `reaction_label`, `reaction_family`
+  - `is_hard_reject`, `is_sweep_reclaim`, `is_absorption`, `is_fail_continue`, `is_no_signal`
+  - `reclaim_success_label`, `break_continuation_label`, `mae_minus_mfe_atr`
+- Important conceptual change:
+  - High `P_touch` is now treated as "price may come here", not as "take a trade".
+  - The default live execution mode is `reclaim_confirmed`, so the plan should arm alerts and wait for touch/reclaim/displacement confirmation instead of blind limit entries.
+
 - `fc35a0f Add parallel asset checkpoints`
   - Added `--asset-workers`, `--checkpoint-dir`, and `--resume`.
   - Per-symbol parquet training can run in parallel with deterministic final merge order.

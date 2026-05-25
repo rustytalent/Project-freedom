@@ -21,6 +21,7 @@ from . import drift
 from . import event_engine
 from . import feature_store
 from . import universe
+from . import costs
 # broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
@@ -47,4 +48,5 @@ __all__ = [
     "event_engine",
     "feature_store",
     "universe",
+    "costs",
 ]

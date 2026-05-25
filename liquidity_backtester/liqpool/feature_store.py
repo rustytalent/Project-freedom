@@ -208,6 +208,13 @@ def pool_result_row(symbol: str, split: str, pool_idx: int,
 
 
 def post_touch_label(result: PoolResult) -> str:
+    """Map old static pool outcomes into Phase 2 event-reaction labels.
+
+    This keeps the legacy tester compatible while making the downstream table
+    explicit: a pool touch can reject, sweep/reclaim, absorb, fail/continue, or
+    simply provide no signal. The model should learn this post-touch event, not
+    pretend every valid liquidity pool must immediately reverse.
+    """
     if result.outcome == "respected_strong":
         return "HARD_REJECT"
     if result.outcome == "swept_and_reclaimed":
@@ -224,11 +231,35 @@ def post_touch_label(result: PoolResult) -> str:
 def post_touch_event_row(symbol: str, split: str, pool_idx: int,
                          pool: Pool, result: PoolResult) -> Dict:
     row = pool_result_row(symbol, split, pool_idx, pool, result)
-    row["reaction_label"] = post_touch_label(result)
+    reaction_label = post_touch_label(result)
+    row["reaction_label"] = reaction_label
+    row["reaction_family"] = (
+        "reversal" if reaction_label in ("HARD_REJECT", "SWEEP_RECLAIM", "ABSORPTION")
+        else "continuation" if reaction_label == "FAIL_CONTINUE"
+        else "ambiguous"
+    )
+    row["is_touch_event"] = 1
+    row["is_hard_reject"] = 1 if reaction_label == "HARD_REJECT" else 0
+    row["is_sweep_reclaim"] = 1 if reaction_label == "SWEEP_RECLAIM" else 0
+    row["is_absorption"] = 1 if reaction_label == "ABSORPTION" else 0
+    row["is_fail_continue"] = 1 if reaction_label == "FAIL_CONTINUE" else 0
+    row["is_no_signal"] = 1 if reaction_label == "NO_SIGNAL" else 0
     row["strict_respect_label"] = (
         1 if result.outcome in ("respected_strong", "swept_and_reclaimed")
         else 0 if result.outcome in ("broken_strong", "broken_weak") else np.nan
     )
+    row["reclaim_success_label"] = (
+        1 if result.outcome == "swept_and_reclaimed"
+        else 0 if result.outcome in ("broken_strong", "broken_weak", "touched_no_signal")
+        else np.nan
+    )
+    row["break_continuation_label"] = (
+        1 if result.outcome in ("broken_strong", "broken_weak")
+        else 0 if result.outcome in ("respected_strong", "swept_and_reclaimed",
+                                     "respected_weak")
+        else np.nan
+    )
+    row["mae_minus_mfe_atr"] = float(result.max_excursion_through - result.reaction_atr)
     return row
 
 
