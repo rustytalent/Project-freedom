@@ -27,7 +27,8 @@ from liqpool.execution_backtest import (
     summarise_execution_by_direction,
 )
 from liqpool.featurize import MultiAssetFeaturizer
-from liqpool.feature_store import FeatureStore
+from liqpool.feature_store import FeatureStore, post_touch_event_row
+from liqpool.indicators import atr
 from liqpool.multi_asset import (AssetData, run_multi_asset, print_multi_asset_summary,
                                  distance_bucket)
 from liqpool.pools import build_pools, project_to_base
@@ -70,6 +71,14 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
         raise SystemExit(f"missing model bundle: {model_path}. Run --mode train first.")
     with model_path.open("rb") as f:
         report = pickle.load(f)
+    for attr, default in (
+        ("reaction_model", None),
+        ("reaction_model_report", []),
+        ("reaction_model_calibration", []),
+        ("reaction_feature_importance", []),
+    ):
+        if not hasattr(report, attr):
+            setattr(report, attr, default)
     if report.unified_ml is None or not report.unified_proximity:
         raise SystemExit(f"model bundle is incomplete: {model_path}")
 
@@ -170,6 +179,169 @@ def _model_health_warning(report) -> str:
     return "; ".join(parts)
 
 
+def _finite_or_none(value):
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if np.isfinite(out) else None
+
+
+def _fmt_pct(value) -> str:
+    value = _finite_or_none(value)
+    return "n/a" if value is None else f"{value:.0%}"
+
+
+def _fmt_price(value) -> str:
+    value = _finite_or_none(value)
+    return "n/a" if value is None else f"₹{value:.2f}"
+
+
+def _build_reaction_alerts(report, feature_bars: int, lookback_bars: int,
+                           confirm_threshold: float,
+                           break_risk_threshold: float):
+    """Score recent touched pools with the Phase 3 post-touch model.
+
+    This intentionally does not promote anything into a live trade. It is a
+    confirmation layer for "price has reached the pool; now evaluate reaction
+    candles".
+    """
+    suite = getattr(report, "reaction_model", None)
+    if suite is None or not getattr(suite, "models", None):
+        return [], "reaction model unavailable in this model bundle"
+
+    event_rows = []
+    for symbol, ad in report.assets.items():
+        base = ad.base_df
+        if base is None or base.empty:
+            continue
+        cfg_for_asset = ad.final_cfg
+        now_ts = base.index[-1]
+        atr_values = atr(base, cfg_for_asset.detect.atr_period).bfill().ffill()
+
+        for pool_idx, (pool, result) in enumerate(zip(ad.final_pools, ad.final_results)):
+            if result.touched_at is None:
+                continue
+            try:
+                touch_ts = pd.Timestamp(result.touched_at)
+            except Exception:
+                continue
+            if touch_ts > now_ts:
+                continue
+
+            touch_idx = int(base.index.searchsorted(touch_ts, side="left"))
+            if touch_idx < 0 or touch_idx >= len(base):
+                continue
+            bars_since_touch = int(len(base) - 1 - touch_idx)
+            if bars_since_touch < feature_bars:
+                continue
+            if bars_since_touch > lookback_bars:
+                continue
+
+            row = post_touch_event_row(
+                symbol, "live", pool_idx, pool, result,
+                df_base=base, cfg=cfg_for_asset, atr_values=atr_values,
+                feature_bars=feature_bars,
+            )
+            row["now_ts"] = str(now_ts)
+            row["bars_since_touch"] = bars_since_touch
+            event_rows.append(row)
+
+    if not event_rows:
+        return [], (
+            f"no touched pools with at least {feature_bars} confirmation bars "
+            f"inside the last {lookback_bars} bars"
+        )
+
+    events = pd.DataFrame(event_rows)
+    try:
+        preds = suite.predict_event_frame(events)
+    except Exception as exc:
+        return [], f"reaction alert scoring failed: {exc}"
+    scored = pd.concat([events.reset_index(drop=True), preds.reset_index(drop=True)], axis=1)
+
+    alerts = []
+    for _, row in scored.iterrows():
+        p_strict = _finite_or_none(row.get("p_strict_reaction"))
+        p_reclaim = _finite_or_none(row.get("p_reclaim_success"))
+        p_break = _finite_or_none(row.get("p_break_continuation"))
+        p_reaction = _finite_or_none(row.get("p_reaction_model"))
+        strict_for_gate = p_strict if p_strict is not None else (p_reaction or 0.0)
+        break_for_gate = p_break if p_break is not None else 0.0
+        reclaim_for_gate = p_reclaim if p_reclaim is not None else 0.0
+
+        direction = "UP" if row.get("side") == "low" else "DOWN"
+        if break_for_gate >= break_risk_threshold and break_for_gate >= strict_for_gate:
+            action = "AVOID_BREAK_CONTINUATION"
+            reason = (
+                f"break risk {_fmt_pct(break_for_gate)} >= "
+                f"{break_risk_threshold:.0%}"
+            )
+        elif strict_for_gate >= confirm_threshold and break_for_gate < break_risk_threshold:
+            action = f"CONFIRM_{direction}"
+            reason = (
+                f"strict reaction {_fmt_pct(strict_for_gate)} >= "
+                f"{confirm_threshold:.0%}"
+            )
+        elif reclaim_for_gate >= confirm_threshold and break_for_gate < break_risk_threshold:
+            action = f"RECLAIM_WATCH_{direction}"
+            reason = (
+                f"reclaim probability {_fmt_pct(reclaim_for_gate)} >= "
+                f"{confirm_threshold:.0%}"
+            )
+        else:
+            action = "WATCH_REACTION"
+            reason = "confirmation model is not strong enough yet"
+
+        tfs = str(row.get("tfs", ""))
+        tf_count = len([x for x in tfs.split("+") if x]) if tfs else None
+        alerts.append({
+            "symbol": row.get("symbol"),
+            "sector": row.get("sector"),
+            "direction": direction,
+            "side": "below" if row.get("side") == "low" else "above",
+            "pool_low": _finite_or_none(row.get("price_low")),
+            "pool_high": _finite_or_none(row.get("price_high")),
+            "mid": _finite_or_none(row.get("mid")),
+            "score": _finite_or_none(row.get("score")),
+            "headline_factor": row.get("headline_factor"),
+            "tf_bucket": row.get("tf_bucket"),
+            "tf_count": tf_count,
+            "touched_at": row.get("touched_at"),
+            "now_ts": row.get("now_ts"),
+            "bars_since_touch": int(row.get("bars_since_touch", 0)),
+            "observed_outcome_so_far": row.get("outcome"),
+            "reaction_label_so_far": row.get("reaction_label"),
+            "p_strict_reaction": p_strict,
+            "p_reclaim_success": p_reclaim,
+            "p_break_continuation": p_break,
+            "p_reaction_model": p_reaction,
+            "pt_close_back_inside_6": _finite_or_none(row.get("pt_close_back_inside_6")),
+            "pt_n_closes_inside_6": _finite_or_none(row.get("pt_n_closes_inside_6")),
+            "pt_n_closes_through_6": _finite_or_none(row.get("pt_n_closes_through_6")),
+            "pt_max_reaction_6_atr": _finite_or_none(row.get("pt_max_reaction_6_atr")),
+            "pt_max_close_through_6_atr": _finite_or_none(
+                row.get("pt_max_close_through_6_atr")
+            ),
+            "pt_wick_rejection_ratio": _finite_or_none(row.get("pt_wick_rejection_ratio")),
+            "pt_touch_bar_volume_ratio_20": _finite_or_none(
+                row.get("pt_touch_bar_volume_ratio_20")
+            ),
+            "action": action,
+            "reason": reason,
+        })
+
+    alerts.sort(
+        key=lambda x: (
+            x["action"] == "AVOID_BREAK_CONTINUATION",
+            -(x.get("p_reaction_model") or x.get("p_strict_reaction") or 0.0),
+            x.get("p_break_continuation") or 0.0,
+            x["bars_since_touch"],
+        )
+    )
+    return alerts, ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols",
@@ -234,6 +406,14 @@ def main():
                     help="Skip Phase 2B OOS execution-mode backtest artifacts")
     ap.add_argument("--execution-backtest-split", default="oos", choices=("oos", "train"),
                     help="Historical split used for execution-mode profitability reports")
+    ap.add_argument("--reaction-feature-bars", type=int, default=6,
+                    help="Bars after first touch used by Phase 3 reaction confirmation features")
+    ap.add_argument("--reaction-alert-lookback-bars", type=int, default=78,
+                    help="Only score pools touched within this many base bars")
+    ap.add_argument("--reaction-confirm-threshold", type=float, default=0.60,
+                    help="Minimum post-touch model probability for confirmation alerts")
+    ap.add_argument("--reaction-break-risk-threshold", type=float, default=0.60,
+                    help="Break-continuation probability that blocks confirmation alerts")
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
 
@@ -590,6 +770,13 @@ def main():
         else:
             rejected.append(c)
     watchlist = watch_only + rejected
+    reaction_alerts, reaction_alert_note = _build_reaction_alerts(
+        report,
+        feature_bars=args.reaction_feature_bars,
+        lookback_bars=args.reaction_alert_lookback_bars,
+        confirm_threshold=args.reaction_confirm_threshold,
+        break_risk_threshold=args.reaction_break_risk_threshold,
+    )
 
     # Day verdict — explicitly track the "best observed T" pool too so the user can see
     # a high-T pool that failed the Q threshold (the Q/T anti-correlation case).
@@ -751,6 +938,22 @@ def main():
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, {q_tag}]   "
                   f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%}  "
                   f"{t_strs}")
+
+    print("\n--- POST-TOUCH REACTION CONFIRMATIONS  "
+          f"(last {args.reaction_alert_lookback_bars} bars) ---")
+    if not reaction_alerts:
+        print(f"  ({reaction_alert_note or 'none'})")
+    else:
+        for a in reaction_alerts[:10]:
+            side_lbl = "BELOW" if a["side"] == "below" else "ABOVE"
+            price_zone = f"{_fmt_price(a['pool_low'])}-{_fmt_price(a['pool_high'])}"
+            print(f"  [{a['symbol']:<14}] {price_zone} "
+                  f"[{side_lbl}, {a['direction']}, touched {a['bars_since_touch']}b ago] "
+                  f"strict={_fmt_pct(a.get('p_strict_reaction'))} "
+                  f"reclaim={_fmt_pct(a.get('p_reclaim_success'))} "
+                  f"break={_fmt_pct(a.get('p_break_continuation'))} "
+                  f"→ {a['action']}: {a['reason']}")
+        print("  Note: these are post-touch confirmation alerts, not automatic entries.")
 
     print(f"\n--- QUALITY WATCH  (top 10 by Q, T_today below tradeable threshold) ---")
     for c in sorted([c for c in watchlist if c["t_by_h"].get(primary_h, 0.0) < TRADEABLE_T_TODAY],
@@ -963,6 +1166,16 @@ def main():
         },
         "sector_shrinkage_report": sector_shrinkage_report,
         "post_touch_reaction_metrics": report.post_touch_reaction_metrics,
+        "reaction_model_report": getattr(report, "reaction_model_report", []),
+        "reaction_model_calibration": getattr(report, "reaction_model_calibration", []),
+        "reaction_alert_config": {
+            "feature_bars": args.reaction_feature_bars,
+            "lookback_bars": args.reaction_alert_lookback_bars,
+            "confirm_threshold": args.reaction_confirm_threshold,
+            "break_risk_threshold": args.reaction_break_risk_threshold,
+        },
+        "reaction_alert_note": reaction_alert_note,
+        "reaction_alerts": reaction_alerts,
         "feature_store": report.feature_store_stats,
         "gate_decisions": gate_decisions,
     }
@@ -985,6 +1198,15 @@ def main():
             execution_by_direction.to_dict(orient="records")
             if not execution_by_direction.empty else []
         ),
+        "reaction_model_report": getattr(report, "reaction_model_report", []),
+        "reaction_confirmation": {
+            "note": reaction_alert_note,
+            "feature_bars": args.reaction_feature_bars,
+            "lookback_bars": args.reaction_alert_lookback_bars,
+            "confirm_threshold": args.reaction_confirm_threshold,
+            "break_risk_threshold": args.reaction_break_risk_threshold,
+            "alerts": reaction_alerts[:20],
+        },
         "gate": {
             "min_q": GATE_Q,
             "min_p_touch_today": GATE_T_TODAY,
@@ -1039,6 +1261,10 @@ def main():
         gate_df[gate_df["decision"] == "REJECTED_WITH_REASON"].to_csv(
             out / "rejected_setups.csv", index=False,
         )
+    reaction_alerts_path = None
+    if reaction_alerts:
+        reaction_alerts_path = out / "reaction_alerts.csv"
+        pd.DataFrame(reaction_alerts).to_csv(reaction_alerts_path, index=False)
     execution_summary_path = None
     execution_trades_path = None
     execution_by_direction_path = None
@@ -1070,6 +1296,25 @@ def main():
                 ).to_csv(out / "post_touch_report.csv", index=False)
         except Exception as e:
             print(f"[feature_store] could not export post_touch_events.parquet: {e}")
+    reaction_report_path = None
+    reaction_calibration_path = None
+    reaction_importance_path = None
+    reaction_model_report = getattr(report, "reaction_model_report", [])
+    reaction_model_calibration = getattr(report, "reaction_model_calibration", [])
+    reaction_feature_importance = getattr(report, "reaction_feature_importance", [])
+    if reaction_model_report:
+        reaction_report_path = out / "reaction_model_report.csv"
+        pd.DataFrame(reaction_model_report).to_csv(reaction_report_path, index=False)
+    if reaction_model_calibration:
+        reaction_calibration_path = out / "reaction_model_calibration.csv"
+        pd.DataFrame(reaction_model_calibration).to_csv(
+            reaction_calibration_path, index=False,
+        )
+    if reaction_feature_importance:
+        reaction_importance_path = out / "reaction_feature_importance.csv"
+        pd.DataFrame(reaction_feature_importance).to_csv(
+            reaction_importance_path, index=False,
+        )
     print(f"\nartifacts: {out_json}")
     print(f"           {research_json}")
     print(f"           {live_plan_path}")
@@ -1084,6 +1329,14 @@ def main():
         print(f"           {execution_by_direction_path}  ← Phase 2C UP/DOWN split")
     if execution_trades_path is not None:
         print(f"           {execution_trades_path}  ← Phase 2B trade-level fills")
+    if reaction_report_path is not None:
+        print(f"           {reaction_report_path}  ← Phase 3 post-touch model metrics")
+    if reaction_calibration_path is not None:
+        print(f"           {reaction_calibration_path}  ← Phase 3 reaction calibration")
+    if reaction_importance_path is not None:
+        print(f"           {reaction_importance_path}  ← Phase 3 reaction features")
+    if reaction_alerts_path is not None:
+        print(f"           {reaction_alerts_path}  ← Phase 3 post-touch alerts")
 
     # Per-asset chart
     for symbol, ad in report.assets.items():

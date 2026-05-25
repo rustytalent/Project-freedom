@@ -42,6 +42,7 @@ from .timing import (StateFeaturizer, generate_snapshots, DirectionModel, Proxim
                      evaluate_timing, evaluate_timing_frames, TimingReport)
 from .feature_store import (FeatureStore, build_feature_store_for_report,
                             PROXIMITY_HORIZONS, DEFAULT_DIRECTION_HORIZON)
+from .reaction_model import ReactionModelSuite
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .indicators import atr
 from .stratified import _headline_factor
@@ -85,6 +86,10 @@ class MultiAssetReport:
     unified_timing_report: Optional[TimingReport] = None
     unified_oos_audit: Optional["OOSPredictionAudit"] = None
     post_touch_reaction_metrics: Dict = field(default_factory=dict)
+    reaction_model: Optional[ReactionModelSuite] = None
+    reaction_model_report: List[Dict] = field(default_factory=list)
+    reaction_model_calibration: List[Dict] = field(default_factory=list)
+    reaction_feature_importance: List[Dict] = field(default_factory=list)
     feature_store_stats: Dict = field(default_factory=dict)
 
 
@@ -698,6 +703,35 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                 )
                 report.feature_store_stats = fs_stats.to_dict()
                 store = FeatureStore(feature_store_dir)
+
+                try:
+                    if progress:
+                        progress("[reaction_model]", "training post-touch reaction suite")
+                    reaction_train = store.scan("reaction_events/*/train.parquet")
+                    reaction_oos = store.scan("reaction_events/*/oos.parquet")
+                    if len(reaction_train) >= 100:
+                        suite = ReactionModelSuite().fit(
+                            reaction_train, reaction_oos,
+                            seed=cfg.opt_seed + 700,
+                        )
+                        report.reaction_model = suite
+                        report.reaction_model_report = suite.report_frame().to_dict(
+                            orient="records",
+                        )
+                        report.reaction_model_calibration = (
+                            suite.calibration_table.to_dict(orient="records")
+                            if not suite.calibration_table.empty else []
+                        )
+                        fi = suite.feature_importance_frame(top_k=50)
+                        report.reaction_feature_importance = (
+                            fi.to_dict(orient="records") if not fi.empty else []
+                        )
+                    else:
+                        print("[multi_asset] reaction model skipped: "
+                              f"need >=100 post-touch train events, got {len(reaction_train)}")
+                except Exception as e:
+                    print(f"[multi_asset] reaction model skipped: {e}")
+
                 direction_train = store.load_direction("train")
                 direction_oos = store.load_direction("oos")
                 if len(direction_train) >= 30:
@@ -995,6 +1029,24 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
                       f"{row.get('broken_strong_rate', 0.0):>7.1%} "
                       f"{row.get('avg_mfe_after_touch', 0.0):>6.2f} "
                       f"{row.get('avg_mae_after_touch', 0.0):>6.2f}", file=file)
+
+    reaction_model_report = getattr(report, "reaction_model_report", [])
+    if reaction_model_report:
+        print(f"\n[Phase 3 reaction model suite]  target = post-touch confirmation outcome",
+              file=file)
+        print(f"  {'target':<20} {'train':>7} {'val':>7} {'oos':>7} "
+              f"{'base':>7} {'val_auc':>8} {'oos_auc':>8} "
+              f"{'oos_brier':>10} {'top10':>8}", file=file)
+        for row in reaction_model_report:
+            val_auc = row.get("val_auc")
+            oos_auc = row.get("oos_auc")
+            val_s = f"{val_auc:.3f}" if isinstance(val_auc, float) else "n/a"
+            oos_s = f"{oos_auc:.3f}" if isinstance(oos_auc, float) else "n/a"
+            print(f"  {row.get('target', ''):<20} {int(row.get('train_n', 0)):>7} "
+                  f"{int(row.get('val_n', 0)):>7} {int(row.get('oos_n', 0)):>7} "
+                  f"{row.get('base_rate', 0.0):>6.1%} {val_s:>8} {oos_s:>8} "
+                  f"{row.get('oos_brier', 0.0):>10.4f} "
+                  f"{row.get('oos_top_decile_rate', 0.0):>7.1%}", file=file)
 
     # -- Unified direction + proximity models --
     if report.unified_timing_report is not None:

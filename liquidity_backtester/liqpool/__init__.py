@@ -23,6 +23,7 @@ from . import feature_store
 from . import universe
 from . import costs
 from . import execution_backtest
+from . import reaction_model
 # broker_zerodha is imported on demand (it has an optional kiteconnect dep)
 
 __all__ = [
@@ -51,4 +52,5 @@ __all__ = [
     "universe",
     "costs",
     "execution_backtest",
+    "reaction_model",
 ]

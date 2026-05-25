@@ -21,6 +21,7 @@ from .pools import Pool
 from .sectors import sector_of
 from .stratified import _headline_factor, _tf_bucket
 from .tester import PoolResult
+from .indicators import atr
 from .timing import (
     STATE_FEATURE_NAMES,
     _POOL_FEATURE_NAMES,
@@ -120,12 +121,22 @@ class FeatureStore:
         return self._write(rows, f"quality/symbol={symbol}/{split}.parquet")
 
     def write_reaction_events(self, symbol: str, split: str,
-                              pools: Sequence[Pool], results: Sequence[PoolResult]) -> int:
+                              pools: Sequence[Pool], results: Sequence[PoolResult],
+                              df_base: Optional[pd.DataFrame] = None,
+                              cfg=None,
+                              feature_bars: int = 6) -> int:
         rows = []
+        atr_values = None
+        if df_base is not None and cfg is not None and not df_base.empty:
+            atr_values = atr(df_base, cfg.detect.atr_period).bfill()
         for i, (pool, result) in enumerate(zip(pools, results)):
             if result.touched_at is None:
                 continue
-            rows.append(post_touch_event_row(symbol, split, i, pool, result))
+            rows.append(post_touch_event_row(
+                symbol, split, i, pool, result,
+                df_base=df_base, cfg=cfg, atr_values=atr_values,
+                feature_bars=feature_bars,
+            ))
         return self._write(
             pd.DataFrame(rows),
             f"reaction_events/symbol={symbol}/{split}.parquet",
@@ -228,8 +239,135 @@ def post_touch_label(result: PoolResult) -> str:
     return "LIQUIDITY_VACUUM"
 
 
+def post_touch_confirmation_features(pool: Pool, result: PoolResult,
+                                     df_base: Optional[pd.DataFrame],
+                                     atr_values: Optional[pd.Series],
+                                     feature_bars: int = 6) -> Dict:
+    """Features observable after waiting a few bars after the first touch.
+
+    These are intentionally **not** pre-touch features. They are for the Phase 3
+    reaction/confirmation model, which should be consulted after price reaches a
+    pool and the first reaction candles have printed.
+    """
+    prefix = "pt_"
+    defaults = {
+        f"{prefix}feature_bars": int(feature_bars),
+        f"{prefix}touch_bar_range_atr": 0.0,
+        f"{prefix}touch_bar_body_atr": 0.0,
+        f"{prefix}touch_bar_volume_ratio_20": 0.0,
+        f"{prefix}touch_close_position": 0.5,
+        f"{prefix}wick_rejection_ratio": 0.0,
+        f"{prefix}close_through_touch_atr": 0.0,
+        f"{prefix}max_close_through_3_atr": 0.0,
+        f"{prefix}max_close_through_6_atr": 0.0,
+        f"{prefix}max_reaction_3_atr": 0.0,
+        f"{prefix}max_reaction_6_atr": 0.0,
+        f"{prefix}reaction_minus_through_6_atr": 0.0,
+        f"{prefix}close_back_inside_1": 0.0,
+        f"{prefix}close_back_inside_3": 0.0,
+        f"{prefix}close_back_inside_6": 0.0,
+        f"{prefix}n_closes_inside_6": 0.0,
+        f"{prefix}n_closes_through_6": 0.0,
+        f"{prefix}first_reclaim_bars_6": 99.0,
+        f"{prefix}first_strong_through_bars_6": 99.0,
+    }
+    if (df_base is None or df_base.empty or result.touched_at is None
+            or atr_values is None or len(atr_values) == 0):
+        return defaults
+
+    idx = df_base.index
+    try:
+        touch_idx = int(idx.searchsorted(result.touched_at, side="left"))
+    except Exception:
+        return defaults
+    if touch_idx < 0 or touch_idx >= len(df_base):
+        return defaults
+
+    n = max(1, int(feature_bars))
+    end = min(len(df_base), touch_idx + n)
+    window = df_base.iloc[touch_idx:end]
+    if window.empty:
+        return defaults
+
+    atr_touch = max(float(atr_values.iloc[touch_idx]), 1e-9)
+    touch = df_base.iloc[touch_idx]
+    rng = max(float(touch["high"] - touch["low"]), 1e-9)
+    body = abs(float(touch["close"] - touch["open"]))
+    if pool.side == "low":
+        wick = min(float(touch["open"]), float(touch["close"])) - float(touch["low"])
+        close_through = max(0.0, (pool.price_low - float(touch["close"])) / atr_touch)
+    else:
+        wick = float(touch["high"]) - max(float(touch["open"]), float(touch["close"]))
+        close_through = max(0.0, (float(touch["close"]) - pool.price_high) / atr_touch)
+
+    vol_pre = df_base["volume"].iloc[max(0, touch_idx - 20):touch_idx]
+    vol_base = float(vol_pre.mean()) if len(vol_pre) else float(touch.get("volume", 0.0))
+    vol_ratio = float(touch.get("volume", 0.0)) / max(vol_base, 1e-9)
+    close_pos = (float(touch["close"]) - float(touch["low"])) / rng
+
+    closes = window["close"].astype(float).to_numpy()
+    highs = window["high"].astype(float).to_numpy()
+    lows = window["low"].astype(float).to_numpy()
+    atr_win = (
+        atr_values.iloc[touch_idx:end].astype(float)
+        .replace(0.0, np.nan)
+        .bfill()
+        .ffill()
+        .fillna(atr_touch)
+    )
+    atr_arr = np.maximum(atr_win.to_numpy(dtype=float), 1e-9)
+
+    if pool.side == "low":
+        through = np.maximum(0.0, (pool.price_low - closes) / atr_arr)
+        reaction = np.maximum(0.0, (highs - pool.price_high) / atr_arr)
+    else:
+        through = np.maximum(0.0, (closes - pool.price_high) / atr_arr)
+        reaction = np.maximum(0.0, (pool.price_low - lows) / atr_arr)
+    inside = (closes >= pool.price_low) & (closes <= pool.price_high)
+    through_mask = through > 0.0
+
+    def any_inside(k: int) -> float:
+        return float(bool(inside[:min(k, len(inside))].any()))
+
+    reclaim_idx = np.where(inside)[0]
+    strong_idx = np.where(through >= 1.0)[0]
+    max3 = min(3, len(through))
+    max6 = min(6, len(through))
+
+    out = dict(defaults)
+    out.update({
+        f"{prefix}touch_bar_range_atr": float(rng / atr_touch),
+        f"{prefix}touch_bar_body_atr": float(body / atr_touch),
+        f"{prefix}touch_bar_volume_ratio_20": float(vol_ratio),
+        f"{prefix}touch_close_position": float(np.clip(close_pos, 0.0, 1.0)),
+        f"{prefix}wick_rejection_ratio": float(max(0.0, wick) / rng),
+        f"{prefix}close_through_touch_atr": float(close_through),
+        f"{prefix}max_close_through_3_atr": float(np.max(through[:max3])) if max3 else 0.0,
+        f"{prefix}max_close_through_6_atr": float(np.max(through[:max6])) if max6 else 0.0,
+        f"{prefix}max_reaction_3_atr": float(np.max(reaction[:max3])) if max3 else 0.0,
+        f"{prefix}max_reaction_6_atr": float(np.max(reaction[:max6])) if max6 else 0.0,
+        f"{prefix}reaction_minus_through_6_atr": (
+            float(np.max(reaction[:max6]) - np.max(through[:max6])) if max6 else 0.0
+        ),
+        f"{prefix}close_back_inside_1": any_inside(1),
+        f"{prefix}close_back_inside_3": any_inside(3),
+        f"{prefix}close_back_inside_6": any_inside(6),
+        f"{prefix}n_closes_inside_6": float(inside[:max6].sum()) if max6 else 0.0,
+        f"{prefix}n_closes_through_6": float(through_mask[:max6].sum()) if max6 else 0.0,
+        f"{prefix}first_reclaim_bars_6": float(reclaim_idx[0]) if len(reclaim_idx) else 99.0,
+        f"{prefix}first_strong_through_bars_6": (
+            float(strong_idx[0]) if len(strong_idx) else 99.0
+        ),
+    })
+    return out
+
+
 def post_touch_event_row(symbol: str, split: str, pool_idx: int,
-                         pool: Pool, result: PoolResult) -> Dict:
+                         pool: Pool, result: PoolResult,
+                         df_base: Optional[pd.DataFrame] = None,
+                         cfg=None,
+                         atr_values: Optional[pd.Series] = None,
+                         feature_bars: int = 6) -> Dict:
     row = pool_result_row(symbol, split, pool_idx, pool, result)
     reaction_label = post_touch_label(result)
     row["reaction_label"] = reaction_label
@@ -260,6 +398,9 @@ def post_touch_event_row(symbol: str, split: str, pool_idx: int,
         else np.nan
     )
     row["mae_minus_mfe_atr"] = float(result.max_excursion_through - result.reaction_atr)
+    row.update(post_touch_confirmation_features(
+        pool, result, df_base, atr_values, feature_bars=feature_bars,
+    ))
     return row
 
 
@@ -362,8 +503,14 @@ def build_feature_store_for_report(report, multi_feat,
         oos_results = list(ad.walkforward.oos_results)
         stats.pool_rows += store.write_pools(symbol, "train", train_pools, train_results)
         stats.pool_rows += store.write_pools(symbol, "oos", oos_pools, oos_results)
-        stats.post_touch_rows += store.write_reaction_events(symbol, "train", train_pools, train_results)
-        stats.post_touch_rows += store.write_reaction_events(symbol, "oos", oos_pools, oos_results)
+        stats.post_touch_rows += store.write_reaction_events(
+            symbol, "train", train_pools, train_results,
+            df_base=ad.base_df, cfg=ad.final_cfg,
+        )
+        stats.post_touch_rows += store.write_reaction_events(
+            symbol, "oos", oos_pools, oos_results,
+            df_base=ad.base_df, cfg=ad.final_cfg,
+        )
 
         if train_pools:
             X_train = multi_feat.transform_batch(train_pools)

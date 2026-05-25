@@ -32,6 +32,11 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
   - Added Phase 2B execution-mode historical PnL reports.
   - Writes `execution_backtest_summary.csv` and `execution_backtest_trades.csv`.
 
+- `7c1df5b Add direction-aware execution reporting`
+  - Added Phase 2C UP/DOWN execution reporting and direction-coded R fields.
+  - Added `displacement_confirmed` execution mode.
+  - Pushed to `claude/liquidity-pool-backtester-1uskb`.
+
 - `cd9e43f Add reaction-aware execution cost gates`
   - Added Phase 2A reaction-aware live gates and Zerodha equity friction.
 
@@ -122,6 +127,30 @@ Phase 2C direction-aware execution reporting / logic upgrade:
   - historical execution replay now uses each asset's optimized `final_cfg`, not only the top-level CLI config. This keeps horizons, reclaim windows, ATR settings, and tester thresholds consistent with the fitted symbol setup.
 - Interpretation rule:
   - Do not read a negative `directional_net_r` as a losing trade by itself. Use `net_r`/`net_pnl` for profitability and `direction`/`directional_net_r` for long-vs-short mapping.
+
+Phase 3A post-touch reaction model work, started after Phase 2C:
+
+- Added standalone post-touch reaction model suite:
+  - Module: `liqpool/reaction_model.py`
+  - Targets:
+    - `strict_reaction` from `strict_respect_label`
+    - `reclaim_success` from `reclaim_success_label`
+    - `break_continuation` from `break_continuation_label`
+- Feature-store reaction events now include `pt_*` confirmation-window features from the first few bars after touch:
+  - touch-bar range/body/volume ratio
+  - close-through magnitude
+  - max close-through and reaction over first 3/6 bars
+  - close-back-inside/reclaim features
+  - wick rejection ratio
+- The reaction model trains only in feature-store train mode, after `reaction_events` shards are written.
+- New artifacts:
+  - `reaction_model_report.csv`
+  - `reaction_model_calibration.csv`
+  - `reaction_feature_importance.csv`
+- Important interpretation:
+  - This is a **post-touch confirmation model**, not a pre-touch signal.
+  - Current live pre-touch candidates still use the conservative bucket-shrunk `P_reaction` prior.
+  - Next step is to add a post-touch/paper-trading workflow that scores an event after touch candles print.
 
 - `c3b53a4 Support per-symbol parquet folders`
   - `ParquetProvider` can read both all-symbol parquet files and folder-style per-symbol files such as `resampled/5m/TCS_5m.parquet`.
@@ -214,6 +243,23 @@ git push origin claude/liquidity-pool-backtester-1uskb
 - Synthetic smoke test for purged/embargoed `PoolRespectModel.fit`
 - Synthetic smoke test for dynamic `SectorMoERespectModel` shrinkage
 - Synthetic smoke test for OOS audit distance buckets and post-touch metrics
+- Phase 3A synthetic reaction-model smoke:
+  - `ReactionModelSuite` trained strict/reclaim/break targets and predicted event rows.
+- Phase 3A real parquet smoke:
+  - `TCS,INFY`, `--folds 2 --iters 1 --final-iters 1`
+  - temporary feature store/model/output under `/private/tmp`
+  - produced `reaction_model_report.csv`, `reaction_model_calibration.csv`, and `reaction_feature_importance.csv`
+  - observed OOS reaction AUCs in the smoke around:
+    - strict reaction: `0.759`
+    - reclaim success: `0.716`
+    - break continuation: `0.765`
+  - Treat these only as a smoke sanity check, not a production benchmark.
+- Phase 3B code path added after Phase 3A:
+  - prediction/live output can score recent touched pools with the saved `ReactionModelSuite`
+  - writes `reaction_alerts.csv` when there are eligible recent touch events
+  - embeds `reaction_confirmation` inside `live_plan.json`
+  - prints a concise `POST-TOUCH REACTION CONFIRMATIONS` console section
+  - these alerts are confirmation intelligence only and do **not** automatically make a setup tradeable.
 
 Real-data smoke note:
 
@@ -621,8 +667,11 @@ Remaining:
 ### Phase 3 - Post-Touch Reaction Intelligence
 
 Partially implemented. Current code can export `post_touch_events.parquet` from
-feature-store reaction shards and includes reaction labels/diagnostics, but it
-does **not** yet have a standalone trained reaction model.
+feature-store reaction shards and includes reaction labels/diagnostics. Phase 3A
+now also trains a standalone post-touch reaction model suite from those events
+when feature-store train mode is used. Phase 3B makes that model operational in
+live/predict output by scoring recent touched pools after a small confirmation
+window has printed.
 
 Implemented:
 
@@ -635,21 +684,40 @@ Implemented:
   - `LIQUIDITY_VACUUM`
   - `NO_SIGNAL`
 - Use historical post-touch bucket strict rates as a shrunk `P_reaction` prior in live gates.
+- Add first-few-bars-after-touch confirmation features with `pt_*` prefixes.
+- Train/evaluate model targets:
+  - strict reaction
+  - reclaim success
+  - break continuation
+- Save model report, calibration, and feature-importance artifacts.
+- Score recent touched pools in train/predict output:
+  - CLI flags:
+    - `--reaction-feature-bars` default `6`
+    - `--reaction-alert-lookback-bars` default `78`
+    - `--reaction-confirm-threshold` default `0.60`
+    - `--reaction-break-risk-threshold` default `0.60`
+  - Outputs:
+    - `reaction_alerts.csv`
+    - `live_plan.json.reaction_confirmation`
+    - `multi_asset_summary.json.reaction_alerts`
+  - Actions are informational:
+    - `CONFIRM_UP`
+    - `CONFIRM_DOWN`
+    - `RECLAIM_WATCH_UP`
+    - `RECLAIM_WATCH_DOWN`
+    - `AVOID_BREAK_CONTINUATION`
+    - `WATCH_REACTION`
 
 Remaining:
 
-- Add features from the first N candles after touch:
-  - reclaim candle presence
-  - displacement size
-  - volume spike
-  - close back inside/outside pool
-  - wick rejection ratio
-  - time-to-reclaim
-  - MAE/MFE after touch
-  - sector regime at touch
-  - direction state at touch
-- Train a reaction model separately.
-- Live plan should be able to require confirmation after touch instead of blind limit entry.
+- Add sector regime and direction-state-at-touch features into the event table.
+- Add 1-minute post-touch replay so confirmation features use finer intrabar ordering.
+- Turn reaction alerts into a true stateful alert workflow:
+  - pre-touch watchlist arms a pool
+  - after touch, a follow-up command scores that pool using only candles printed since touch
+  - execution entry is allowed only when confirmation, regime, direction, and expectancy align.
+- Live plan should be able to arm an alert pre-touch and then require reaction-model
+  confirmation after touch before entry.
 
 ### Phase 4 - Execution And PnL Engine
 
@@ -793,9 +861,11 @@ The previous handoff said Phase 3A-E remained. Most of that is now implemented:
    - Look for factor/TF/sector/Q buckets with high strict respect and low broken_strong rate.
    - This should drive future feature or gate changes more than aggregate touch probability.
 
-6. Start Phase 3 proper: standalone reaction model.
-   - Use `post_touch_events.parquet` as the training table.
-   - Predict `reclaim_success`, `break_continuation`, and strict reaction separately.
+6. Continue Phase 3 proper: make the reaction model operational after touch.
+   - The standalone reaction model suite now exists and trains from `post_touch_events.parquet`.
+   - Phase 3B now adds first-pass reaction alerts for recently touched pools.
+   - Next harden this into a stateful "pool armed -> pool touched -> score event -> entry allowed/blocked" workflow.
+   - Add sector regime at touch, direction state at touch, and eventually 1-minute replay features.
    - Live plan should eventually require touch + confirmation + reaction model agreement.
 
 7. If metrics still show high overfit, the next high-impact options are:
