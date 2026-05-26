@@ -131,14 +131,40 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
   the detector stack over truncated history. Increase `--samples-per-symbol` for
   slower local/cloud validation.
 
+### Track A Gate: Proximity Distance-Bucket AUC — COMPLETE
+
+- Script: `analysis/run_phase4_track_a_proximity_bucket_audit.py`
+- Report: `reports/phase4_track_a_proximity_bucket_audit.md`
+- Metrics CSV: `reports/phase4_track_a_proximity_bucket_audit.csv`
+- Source: saved model report `output_models/core25_latest/multi_asset_report.pkl`
+  and feature store `output_feature_store/core25_fresh_may25`.
+- Decision: `VIABLE`.
+- Primary h=78 tradeable bucket `3-8 ATR`:
+  - Rows: `124,632`
+  - Base touch rate: `12.4%`
+  - AUC: `0.835`
+  - Top-decile actual touched: `46.9%`
+  - Lift over bucket base: `+34.55pp`
+- Longer horizons also remain strong:
+  - h=156 `3-8 ATR` AUC: `0.840`
+  - h=312 `3-8 ATR` AUC: `0.839`
+- Meaning: Track A is not just a trivial "pool is already close" effect. P_touch
+  remains predictive in the tradeable pre-touch zone. This does not prove
+  profitability; it clears the gate to test direction conditionality and then
+  execution under a realistic simulator.
+
 ### Next Recommended Step
 
 Continue Workstream 2 before Track A/B strategy work:
 
-1. Run the Track A proximity distance-bucket AUC viability gate.
-2. If 3-8 ATR proximity AUC is viable, continue to direction-conditional audit
-   and then the Track A pre-touch sweep.
-3. Keep daily/weekly MTF warnings in mind before adding any new MTF joined
+1. Run the Track A direction-conditional audit:
+   - Does the direction model still work inside high-P_touch and 2-8/3-8 ATR
+     subsets?
+   - If direction AUC collapses in that subset, the pre-touch thesis weakens.
+2. If direction conditionality passes, continue to Execution Simulator v2
+   before any large parameter sweep.
+3. Then run the Track A pre-touch sweep only under realistic execution/costs.
+4. Keep daily/weekly MTF warnings in mind before adding any new MTF joined
    features.
 
 ## Recent Uploaded Commits / Completed Work
