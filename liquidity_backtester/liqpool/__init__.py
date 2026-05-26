@@ -23,6 +23,7 @@ from . import feature_store
 from . import universe
 from . import costs
 from . import execution_backtest
+from . import execution_simulator_v2
 from . import reaction_model
 from . import leakage_audit
 from . import policy_labels
@@ -55,6 +56,7 @@ __all__ = [
     "universe",
     "costs",
     "execution_backtest",
+    "execution_simulator_v2",
     "reaction_model",
     "leakage_audit",
     "policy_labels",

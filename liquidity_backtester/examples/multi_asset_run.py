@@ -26,6 +26,11 @@ from liqpool.execution_backtest import (
     build_execution_backtest_for_report,
     summarise_execution_by_direction,
 )
+from liqpool.execution_simulator_v2 import (
+    ExecutionV2Config,
+    build_execution_backtest_v2_for_report,
+    compare_execution_summaries_v1_v2,
+)
 from liqpool.featurize import MultiAssetFeaturizer
 from liqpool.feature_store import FeatureStore, post_touch_event_row
 from liqpool.indicators import atr
@@ -426,6 +431,23 @@ def main():
                     help="Skip Phase 2B OOS execution-mode backtest artifacts")
     ap.add_argument("--execution-backtest-split", default="oos", choices=("oos", "train"),
                     help="Historical split used for execution-mode profitability reports")
+    ap.add_argument("--run-execution-backtest-v2", action="store_true",
+                    help="Run Phase 4 execution simulator v2 artifacts")
+    ap.add_argument("--fill-policy", default="neutral",
+                    choices=("generous", "neutral", "conservative"),
+                    help="Phase 4 v2 fill policy for adverse-selection-aware fills")
+    ap.add_argument("--use-1m-resolution", action="store_true",
+                    help="Use raw 1-minute bars to resolve v2 stop/target path")
+    ap.add_argument("--raw-1m-dir", default="",
+                    help=("Directory containing per-symbol raw 1m parquet. If omitted with "
+                          "--data-dir .../resampled, uses sibling raw_1m when present."))
+    ap.add_argument("--slippage-model", default="state_dependent",
+                    choices=("state_dependent", "flat"),
+                    help="Phase 4 v2 slippage model")
+    ap.add_argument("--v2-base-slippage-bps", type=float, default=2.0,
+                    help="Base bps/side used by execution simulator v2")
+    ap.add_argument("--execution-exchange", default="NSE", choices=("NSE", "BSE"),
+                    help="Exchange transaction charge profile for v2 itemized costs")
     ap.add_argument("--skip-leakage-audit", action="store_true",
                     help="Skip Phase 3C leakage audit artifacts")
     ap.add_argument("--allow-leakage-errors", action="store_true",
@@ -1097,6 +1119,9 @@ def main():
     execution_trades = pd.DataFrame()
     execution_summary = pd.DataFrame()
     execution_by_direction = pd.DataFrame()
+    execution_v2_trades = pd.DataFrame()
+    execution_v2_summary = pd.DataFrame()
+    execution_v2_delta = pd.DataFrame()
     if not args.skip_execution_backtest:
         print("\n================ EXECUTION BACKTEST ================")
         try:
@@ -1133,6 +1158,56 @@ def main():
                       "from DOWN shorts.")
         except Exception as e:
             print(f"  [execution_backtest] skipped: {e}")
+
+    # ---- Phase 4: execution simulator v2 ----
+    if args.run_execution_backtest_v2 and not args.skip_execution_backtest:
+        print("\n================ EXECUTION BACKTEST V2 ================")
+        try:
+            raw_1m_dir = args.raw_1m_dir
+            if not raw_1m_dir and args.data_dir:
+                data_dir = Path(args.data_dir).expanduser()
+                sibling_raw = data_dir.parent / "raw_1m"
+                if sibling_raw.exists():
+                    raw_1m_dir = str(sibling_raw)
+            v2_cfg = ExecutionV2Config(
+                fill_policy=args.fill_policy,
+                use_1m_resolution=args.use_1m_resolution,
+                slippage_model=args.slippage_model,
+                base_slippage_bps=args.v2_base_slippage_bps,
+                exchange=args.execution_exchange,
+                quantity=args.cost_quantity,
+            )
+            execution_v2_trades, execution_v2_summary = build_execution_backtest_v2_for_report(
+                report,
+                cfg,
+                v2_cfg,
+                raw_1m_dir=raw_1m_dir,
+                split=args.execution_backtest_split,
+            )
+            execution_v2_delta = compare_execution_summaries_v1_v2(
+                execution_summary, execution_v2_summary,
+            )
+            if execution_v2_summary.empty:
+                print("  (no v2 historical execution trades generated)")
+            else:
+                resolution = "1m" if args.use_1m_resolution else "5m fallback"
+                print(f"  Split: {args.execution_backtest_split.upper()}  "
+                      f"fill={args.fill_policy} slippage={args.slippage_model} "
+                      f"resolution={resolution}")
+                print(f"  {'mode':<18} {'trades':>8} {'win':>7} "
+                      f"{'net_R':>8} {'PF':>7} {'maxDD':>10}")
+                for _, row in execution_v2_summary.iterrows():
+                    pf = row.get("profit_factor", 0.0)
+                    pf_s = "inf" if not np.isfinite(pf) else f"{pf:.2f}"
+                    print(f"  {row['mode']:<18} {int(row['trades']):>8} "
+                          f"{row['win_rate']:>6.1%} "
+                          f"{row['net_expectancy_r']:>+7.2f} "
+                          f"{pf_s:>7} ₹{row['max_drawdown']:>9.0f}")
+                if args.use_1m_resolution and not raw_1m_dir:
+                    print("  Warning: --use-1m-resolution requested, but no raw_1m directory "
+                          "was found; v2 used 5m fallback where needed.")
+        except Exception as e:
+            print(f"  [execution_backtest_v2] skipped: {e}")
 
     # ---- Phase 3C: leakage probes and execution-policy labels ----
     leakage_summary = {}
@@ -1402,6 +1477,22 @@ def main():
             execution_by_direction.to_dict(orient="records")
             if not execution_by_direction.empty else []
         ),
+        "execution_backtest_v2_config": {
+            "enabled": bool(args.run_execution_backtest_v2),
+            "fill_policy": args.fill_policy,
+            "use_1m_resolution": bool(args.use_1m_resolution),
+            "slippage_model": args.slippage_model,
+            "base_slippage_bps": args.v2_base_slippage_bps,
+            "exchange": args.execution_exchange,
+        },
+        "execution_backtest_v2_summary": (
+            execution_v2_summary.to_dict(orient="records")
+            if not execution_v2_summary.empty else []
+        ),
+        "execution_backtest_v2_vs_v1_delta": (
+            execution_v2_delta.to_dict(orient="records")
+            if not execution_v2_delta.empty else []
+        ),
         "leakage_audit": leakage_summary,
         "policy_label_split": args.policy_label_split,
         "policy_label_summary": (
@@ -1465,6 +1556,22 @@ def main():
         "execution_backtest_by_direction": (
             execution_by_direction.to_dict(orient="records")
             if not execution_by_direction.empty else []
+        ),
+        "execution_backtest_v2_config": {
+            "enabled": bool(args.run_execution_backtest_v2),
+            "fill_policy": args.fill_policy,
+            "use_1m_resolution": bool(args.use_1m_resolution),
+            "slippage_model": args.slippage_model,
+            "base_slippage_bps": args.v2_base_slippage_bps,
+            "exchange": args.execution_exchange,
+        },
+        "execution_backtest_v2_summary": (
+            execution_v2_summary.to_dict(orient="records")
+            if not execution_v2_summary.empty else []
+        ),
+        "execution_backtest_v2_vs_v1_delta": (
+            execution_v2_delta.to_dict(orient="records")
+            if not execution_v2_delta.empty else []
         ),
         "consistency_status": consistency_details,
         "leakage_audit": leakage_summary,
@@ -1578,6 +1685,9 @@ def main():
     execution_summary_path = None
     execution_trades_path = None
     execution_by_direction_path = None
+    execution_v2_summary_path = None
+    execution_v2_trades_path = None
+    execution_v2_delta_path = None
     if not execution_summary.empty:
         execution_summary_path = out / "execution_backtest_summary.csv"
         execution_summary.to_csv(execution_summary_path, index=False)
@@ -1587,6 +1697,15 @@ def main():
     if not execution_trades.empty:
         execution_trades_path = out / "execution_backtest_trades.csv"
         execution_trades.to_csv(execution_trades_path, index=False)
+    if not execution_v2_summary.empty:
+        execution_v2_summary_path = out / "execution_backtest_v2_summary.csv"
+        execution_v2_summary.to_csv(execution_v2_summary_path, index=False)
+    if not execution_v2_trades.empty:
+        execution_v2_trades_path = out / "execution_backtest_v2_trades.csv"
+        execution_v2_trades.to_csv(execution_v2_trades_path, index=False)
+    if not execution_v2_delta.empty:
+        execution_v2_delta_path = out / "execution_backtest_v2_vs_v1_delta.csv"
+        execution_v2_delta.to_csv(execution_v2_delta_path, index=False)
     validation_rows = summary["validation_fold_stats"]
     if validation_rows:
         pd.DataFrame(validation_rows).to_csv(out / "validation_report.csv", index=False)
@@ -1639,6 +1758,12 @@ def main():
         print(f"           {execution_by_direction_path}  ← Phase 2C UP/DOWN split")
     if execution_trades_path is not None:
         print(f"           {execution_trades_path}  ← Phase 2B trade-level fills")
+    if execution_v2_summary_path is not None:
+        print(f"           {execution_v2_summary_path}  ← Phase 4 execution simulator v2 PnL")
+    if execution_v2_trades_path is not None:
+        print(f"           {execution_v2_trades_path}  ← Phase 4 v2 itemized trade fills")
+    if execution_v2_delta_path is not None:
+        print(f"           {execution_v2_delta_path}  ← Phase 4 v2 vs v1 delta")
     if leakage_audit_path is not None:
         print(f"           {leakage_audit_path}  ← Phase 3C leakage audit")
     if leakage_issues_path is not None:
