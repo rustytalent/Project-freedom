@@ -153,18 +153,50 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
   profitability; it clears the gate to test direction conditionality and then
   execution under a realistic simulator.
 
+### Track A Gate: Direction-Conditional Audit — COMPLETE
+
+- Script: `analysis/run_phase4_track_a_direction_conditional_audit.py`
+- Report: `reports/phase4_track_a_direction_conditional_audit.md`
+- Metrics CSV: `reports/phase4_track_a_direction_conditional_audit.csv`
+- Source: saved model report `output_models/core25_latest/multi_asset_report.pkl`
+  and feature store `output_feature_store/core25_fresh_may25`.
+- Decision: `VIABLE`.
+- Full OOS direction baseline:
+  - Direction rows: `22,000`
+  - p_up AUC: `0.621`
+  - Accuracy at 0.50: `58.4%`
+- Broad Track A subset:
+  - Segment `distance 2-8 ATR`
+  - Rows: `180,790`
+  - Pool-relative direction AUC: `0.715`
+  - Accuracy at 0.50: `67.1%`
+  - Top-quartile confidence accuracy: `81.8%`
+- Primary strict high-proximity subset:
+  - Segment `P_touch>=0.85 & distance 2-8 ATR`
+  - Rows: `173`
+  - Pool-relative direction AUC: `0.724`
+  - Accuracy at 0.50: `70.5%`
+  - Top-quartile confidence accuracy: `100.0%`
+  - Long/short rows: `148 / 25`
+  - Long/short AUC: `0.723 / 0.673`
+- Caution: the strict high-P_touch subset is small and long-heavy. The future
+  sweep should include broader thresholds such as `P_touch>=0.80` and distance
+  bands like `2-8`/`3-8`, then use DSR/multiple-testing correction.
+- Meaning: Direction survives Track A conditioning. The pre-touch thesis has now
+  passed the proximity and direction gates, but profitability is still unproven.
+
 ### Next Recommended Step
 
 Continue Workstream 2 before Track A/B strategy work:
 
-1. Run the Track A direction-conditional audit:
-   - Does the direction model still work inside high-P_touch and 2-8/3-8 ATR
-     subsets?
-   - If direction AUC collapses in that subset, the pre-touch thesis weakens.
-2. If direction conditionality passes, continue to Execution Simulator v2
-   before any large parameter sweep.
-3. Then run the Track A pre-touch sweep only under realistic execution/costs.
-4. Keep daily/weekly MTF warnings in mind before adding any new MTF joined
+1. Build Execution Simulator v2 before any large parameter sweep:
+   - 1m intra-bar path resolution.
+   - adverse-selection-aware fills.
+   - state-dependent slippage.
+   - itemized Zerodha intraday equity cost stack.
+   - pre-touch directional simulator hook.
+2. Then run the Track A pre-touch sweep only under realistic execution/costs.
+3. Keep daily/weekly MTF warnings in mind before adding any new MTF joined
    features.
 
 ## Recent Uploaded Commits / Completed Work
