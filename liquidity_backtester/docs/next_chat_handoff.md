@@ -12,15 +12,21 @@
 
 ## Important Local Status
 
-Local branch is ahead of GitHub with the Phase 3B post-touch reaction alert
-commit:
+The active Phase 4 branch/default branch is
+`claude/liquidity-pool-backtester-1uskb`. Recent Phase 4 work has been pushed
+to GitHub through:
 
-- `b9bec66 Add post-touch reaction model alerts`
+- `987183b Add Phase 4 Q scale audit`
+- `fcab4cd Add Q percentile policy research`
+- `1d27a89 Add fast leakage probe foundation`
 
-This handoff is being updated through Phase 3D policy outcome modeling. Check
-`git log --oneline -5` and `git status --short --branch` at the start of the
-next session to confirm whether the Phase 3C commit has already been created
-or pushed.
+This handoff is now being updated for the next Workstream 2 artifact-backed
+leakage probe: the real Core25 OOS proximity `distance_atr` audit.
+
+Note: GitHub rejected creation of active `.github/workflows/leakage_tests.yml`
+because the current token does not have `workflow` scope. The workflow template
+exists at `docs/workflows/leakage_tests.yml`; a user/token with workflow scope
+can copy it into `.github/workflows/leakage_tests.yml`.
 
 Do not accidentally commit these local/untracked runtime files unless explicitly requested:
 
@@ -30,6 +36,67 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 - `liquidity_backtester/run_morning.sh`
 - `liquidity_backtester/output_*`
 - `liquidity_backtester/.DS_Store`
+
+## Phase 4 Current Status
+
+### Workstream 0: Q Scale Audit — COMPLETE
+
+- Report: `reports/phase4_workstream0_q_audit.md`
+- Verdict: Branch A, Q is compressed and has real ranking edge.
+- Current absolute `Q >= 70%` gate is unreachable on the compressed scale.
+- Blended Q range was roughly 23.4% to 55.7%, with about 1.84 percentage
+  points of standard deviation.
+- Top 5% blended Q produced about +5.91pp strict-respect lift.
+- Top 1% blended Q produced about +8.82pp strict-respect lift.
+- Important: this proves the quality gate scale was broken, not that the old
+  execution policies are profitable.
+
+### Q Percentile Policy Research — COMPLETE
+
+- Report: `reports/phase4_q_percentile_policy_backtest.md`
+- Percentile Q improves existing policy cohorts but does not make them
+  profitable:
+  - `blind_limit`: roughly -0.802R to -0.583R
+  - `displacement_confirmed`: roughly -0.515R to -0.408R
+  - `reclaim_confirmed`: roughly -1.046R to -0.604R
+  - `touch_confirmed`: roughly -0.553R to -0.448R
+- Do not rewrite production live gates from this alone. It is research evidence
+  that percentile ranking matters, but v1 execution still has negative edge.
+
+### Workstream 2: Fast Leakage Probe Foundation — COMPLETE
+
+- Added `liqpool/leakage_probes.py`.
+- Added `tests/leakage/test_fast_leakage_probes.py`.
+- Added workflow template at `docs/workflows/leakage_tests.yml`.
+- Fast tests cover label-shuffle association, feature timestamp masks, and
+  snapshot-level `distance_atr` causality.
+
+### Workstream 2: Artifact-Backed Proximity Distance Audit — COMPLETE
+
+- Script: `analysis/run_phase4_proximity_distance_leakage_audit.py`
+- Report: `reports/phase4_proximity_distance_leakage_audit.md`
+- Issue sample CSV: `reports/phase4_proximity_distance_leakage_issues.csv`
+- Scope: Core25 feature store `output_feature_store/core25_fresh_may25`, OOS
+  proximity shards, horizons 78/156/312.
+- Rows checked: 7,673,506 across 375 parquet files.
+- Result: PASS.
+- Distance mismatches: 0.
+- Side mismatches: 0.
+- Invalid bar/pool indexes: 0.
+- Max absolute distance error: 0.
+- Important discovered/indexing detail: proximity shards store `pool_idx`
+  against the in-memory `train_pools + oos_pools` list, not the local OOS
+  pool index. Any future artifact audit must recreate that combined pool table.
+
+### Next Recommended Step
+
+Continue Workstream 2 before Track A/B strategy work:
+
+1. Add MTF closed-bar replay/metadata audit from feature-store artifacts.
+2. Add pool availability replay audit beyond the existing sampled Phase 3C
+   check.
+3. Only after leakage probes are green, run the Track A distance-bucket AUC
+   viability gate.
 
 ## Recent Uploaded Commits / Completed Work
 
