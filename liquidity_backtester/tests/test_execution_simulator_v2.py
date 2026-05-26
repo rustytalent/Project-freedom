@@ -4,12 +4,17 @@ import unittest
 
 import pandas as pd
 
+from liqpool.config import Config
 from liqpool.execution_simulator_v2 import (
+    ExecutionV2Config,
     PreTouchDirectionalSimulator,
     compute_slippage_bps,
     compute_zerodha_intraday_costs,
     resolve_intrabar_path,
+    simulate_pool_trade_v2,
 )
+from liqpool.pools import Pool
+from liqpool.tester import PoolResult
 
 
 def _one_minute_bars(rows):
@@ -92,6 +97,51 @@ class ExecutionSimulatorV2Tests(unittest.TestCase):
         self.assertEqual(result["direction"], "UP")
         self.assertEqual(result["exit_reason"], "target")
         self.assertGreater(result["gross_pnl"], 0.0)
+
+    def test_v2_skips_confirmed_entry_when_next_open_invalidates_geometry(self) -> None:
+        idx = pd.date_range("2026-05-26 09:15", periods=22, freq="5min")
+        df = pd.DataFrame({
+            "open": [105.0] * 22,
+            "high": [106.0] * 22,
+            "low": [104.0] * 22,
+            "close": [105.0] * 22,
+            "volume": [1000.0] * 22,
+        }, index=idx)
+        df.loc[idx[16], ["open", "high", "low", "close"]] = [101.5, 106.0, 100.5, 102.0]
+        df.loc[idx[17], ["open", "high", "low", "close"]] = [98.0, 99.0, 97.0, 98.2]
+        pool = Pool(
+            side="low",
+            price_low=100.0,
+            price_high=101.0,
+            formed_at=idx[8],
+            available_at=idx[10],
+            contributors=[],
+            score=1.0,
+            tfs=["base"],
+            asset="TEST",
+        )
+        result = PoolResult(
+            pool_idx=0,
+            side="low",
+            formed_at=pool.formed_at,
+            price_low=pool.price_low,
+            price_high=pool.price_high,
+            score=pool.score,
+            outcome="respected_strong",
+        )
+
+        trade = simulate_pool_trade_v2(
+            mode="touch_confirmed",
+            symbol="TEST",
+            sector="TEST",
+            df_base=df,
+            pool=pool,
+            result=result,
+            cfg=Config(test_horizon_bars=20),
+            v2_cfg=ExecutionV2Config(fill_policy="neutral", use_1m_resolution=False),
+        )
+
+        self.assertIsNone(trade)
 
 
 if __name__ == "__main__":

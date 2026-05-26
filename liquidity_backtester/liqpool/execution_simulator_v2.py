@@ -433,6 +433,10 @@ def simulate_pool_trade_v2(
     last_idx = min(end - 1, entry_idx + max(1, int(max_hold)))
     direction = "UP" if pool.side == "low" else "DOWN"
     direction_sign = 1 if direction == "UP" else -1
+    if direction == "UP" and not (stop < entry_price_ref < target):
+        return None
+    if direction == "DOWN" and not (target < entry_price_ref < stop):
+        return None
 
     resolution_source = "5m"
     if v2_cfg.use_1m_resolution and intrabar_1m is not None and not intrabar_1m.empty:
