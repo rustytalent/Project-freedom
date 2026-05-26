@@ -44,7 +44,11 @@ def _normalise_symbol_key(symbol: str) -> str:
     return symbol.upper().replace(".NS", "").replace(".BO", "")
 
 
-def _normalise_parquet_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+def _normalise_parquet_ohlcv(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str | None = None,
+) -> pd.DataFrame:
     """Normalize local parquet bars to the internal OHLCV format indexed by UTC-naive ts."""
     if df is None or df.empty:
         return pd.DataFrame()
@@ -60,6 +64,12 @@ def _normalise_parquet_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         out["ts"] = pd.to_datetime(out["ts"])
         out = out.set_index("ts")
     else:
+        if isinstance(out.index, pd.RangeIndex) or pd.api.types.is_numeric_dtype(out.index):
+            context = f"{symbol} {timeframe}" if timeframe else symbol
+            raise ValueError(
+                f"{context}: parquet has no date/datetime/timestamp/ts column and "
+                "uses a numeric index; refusing to interpret row numbers as timestamps"
+            )
         out.index = pd.to_datetime(out.index)
     if out.index.tz is not None:
         out.index = out.index.tz_convert("UTC").tz_localize(None)
@@ -71,7 +81,7 @@ def _normalise_parquet_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         out[c] = pd.to_numeric(out[c], errors="coerce")
     out = out.dropna(how="any").sort_index()
     out.index.name = "ts"
-    return _validate_ohlcv(out, symbol)
+    return _validate_ohlcv(out, symbol, timeframe=timeframe)
 
 
 def _synthetic(symbol: str, interval: str, n_bars: int = 4000, seed: int = 42) -> pd.DataFrame:
@@ -146,7 +156,7 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
         raise RuntimeError(f"No data for {symbol} @ {interval}")
 
     # Data quality validation — log + drop bars with broken OHLC, mark short series.
-    df = _validate_ohlcv(df, symbol)
+    df = _validate_ohlcv(df, symbol, timeframe=interval)
 
     df.to_parquet(fp)
     return df
@@ -246,7 +256,7 @@ class ParquetProvider(DataProvider):
             raw = raw.rename(columns={c: str(c).lower() for c in raw.columns})
             if "symbol" not in raw.columns:
                 raw["symbol"] = _normalise_symbol_key(symbol)
-            return _normalise_parquet_ohlcv(raw, symbol)
+            return _normalise_parquet_ohlcv(raw, symbol, timeframe=self._file_key(tf))
 
         path = self._path_for_tf(tf)
         raw = pd.read_parquet(path)
@@ -257,7 +267,7 @@ class ParquetProvider(DataProvider):
             raw = raw.loc[keys == wanted].copy()
         if raw.empty:
             raise FileNotFoundError(f"{symbol}: no rows in {path.name}")
-        return _normalise_parquet_ohlcv(raw, symbol)
+        return _normalise_parquet_ohlcv(raw, symbol, timeframe=self._file_key(tf))
 
     def load_base(self, symbol: str, interval: str, period: Optional[str] = None,
                   start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
@@ -292,12 +302,25 @@ class ParquetProvider(DataProvider):
         return out
 
 
-def _validate_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+def _min_bars_for_timeframe(timeframe: str | None) -> int:
+    if timeframe is None:
+        return 200
+    key = str(timeframe).replace("min", "m")
+    if key in ("1W", "1w", "W"):
+        return 52
+    if key in ("1D", "1d", "D"):
+        return 200
+    return 200
+
+
+def _validate_ohlcv(df: pd.DataFrame, symbol: str,
+                    timeframe: str | None = None) -> pd.DataFrame:
     """Sanity-check bars before they hit pool detection. Drops rows that violate OHLC
     invariants (high >= max(o,c), low <= min(o,c)) and reports counts. Doesn't drop volume=0
     rows because some sessions legitimately have low volume on illiquid times — we just
     log if too many are zero."""
     n_in = len(df)
+    context = f"{symbol} {timeframe}" if timeframe else symbol
     if n_in == 0:
         return df
 
@@ -307,19 +330,20 @@ def _validate_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     bad_mask = bad_high | bad_low
     n_bad = int(bad_mask.sum())
     if n_bad > 0:
-        print(f"[data] {symbol}: dropping {n_bad} bars with broken OHLC invariants")
+        print(f"[data] {context}: dropping {n_bad} bars with broken OHLC invariants")
         df = df.loc[~bad_mask]
 
     # Volume sanity (warn only)
     if "volume" in df.columns:
         zero_vol = int((df["volume"] <= 0).sum())
         if zero_vol > 0 and zero_vol > 0.05 * len(df):
-            print(f"[data] {symbol}: warning — {zero_vol} / {len(df)} bars have zero volume")
+            print(f"[data] {context}: warning — {zero_vol} / {len(df)} bars have zero volume")
 
     # Minimum bar count
-    if len(df) < 200:
-        print(f"[data] {symbol}: warning — only {len(df)} bars after cleaning "
-              f"(was {n_in}); models may be unstable")
+    min_bars = _min_bars_for_timeframe(timeframe)
+    if len(df) < min_bars:
+        print(f"[data] {context}: warning — only {len(df)} bars after cleaning "
+              f"(was {n_in}); expected at least {min_bars} for this timeframe")
 
     return df
 
