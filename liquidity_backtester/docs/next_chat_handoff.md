@@ -109,14 +109,37 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
 - This is not a current-code hard failure, but it is a guardrail for Track A/B
   and should be reviewed before adding any new MTF point-in-time features.
 
+### Workstream 2: Pool Availability Replay Audit — COMPLETE
+
+- Script: `analysis/run_phase4_pool_availability_replay_audit.py`
+- Report: `reports/phase4_pool_availability_replay_audit.md`
+- Issue CSV: `reports/phase4_pool_availability_replay_issues.csv`
+- Model report source: `output_models/core25_latest/multi_asset_report.pkl`.
+- Full metadata coverage:
+  - Pool rows audited: `237,364`
+  - Contributor rows audited: `3,696,717`
+  - Pool sets: `final`, `train`, `oos`
+- Sampled detector replay:
+  - Samples per symbol: `1`
+  - Checked/misses/skipped: `25 / 0 / 0`
+- Result: PASS, `0 ERROR`, `0 WARN`.
+- Meaning: no saved pool was consumed before its contributors were known, no
+  contributor was known before its source bar close, no touch/break label started
+  before pool availability, and every sampled pool was reproduced from detector
+  replay truncated at `available_at`.
+- Full replay of every pool remains expensive on Mac because each replay reruns
+  the detector stack over truncated history. Increase `--samples-per-symbol` for
+  slower local/cloud validation.
+
 ### Next Recommended Step
 
 Continue Workstream 2 before Track A/B strategy work:
 
-1. Add pool availability replay audit beyond the existing sampled Phase 3C
-   check.
-2. Only after leakage probes are green, run the Track A distance-bucket AUC
-   viability gate.
+1. Run the Track A proximity distance-bucket AUC viability gate.
+2. If 3-8 ATR proximity AUC is viable, continue to direction-conditional audit
+   and then the Track A pre-touch sweep.
+3. Keep daily/weekly MTF warnings in mind before adding any new MTF joined
+   features.
 
 ## Recent Uploaded Commits / Completed Work
 
