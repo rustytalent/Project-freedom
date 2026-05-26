@@ -1119,6 +1119,23 @@ Interpretation:
 - Do not make this a live-trading change yet. The next step is a
   percentile-gate research backtest and then execution validation.
 
+Branch A follow-up status:
+
+- Added `analysis/q_rescale.py`.
+- Added `analysis/run_phase4_q_percentile_research.py`.
+- Generated `reports/phase4_q_percentile_policy_backtest.md`.
+- Generated `reports/phase4_q_percentile_policy_backtest.csv`.
+- Finding: Q percentile ranking improves several existing-policy cohorts, but does
+  not make any current v1 execution policy profitable after costs.
+- Best top-1% cohort deltas:
+  - `blind_limit`: mean R improves from about -0.802 to -0.583.
+  - `displacement_confirmed`: mean R improves from about -0.515 to -0.408.
+  - `reclaim_confirmed`: mean R improves from about -1.046 to -0.604.
+  - `touch_confirmed`: mean R improves from about -0.553 to -0.448.
+- Interpretation: the Q scale bug is real and Q ranking is useful, but percentile
+  Q alone does not rescue the current execution policies. Continue with leakage
+  probes and execution simulator v2 before any live gate rewrite.
+
 ### Earlier Opus Review — Verbatim
 
 # Review
