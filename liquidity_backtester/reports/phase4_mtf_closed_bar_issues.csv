@@ -1,0 +1,176 @@
+severity,symbol,timeframe,check,message,detail
+INFO,AXISBANK,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,AXISBANK,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,AXISBANK,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,AXISBANK,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,AXISBANK,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,AXISBANK,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=7.95, max_volume=450440"
+INFO,AXISBANK,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BAJAJ-AUTO,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BAJAJ-AUTO,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BAJAJ-AUTO,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,BAJAJ-AUTO,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,BAJAJ-AUTO,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,BAJAJ-AUTO,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=8, max_volume=53106"
+INFO,BAJAJ-AUTO,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BRITANNIA,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BRITANNIA,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,BRITANNIA,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,BRITANNIA,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,BRITANNIA,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,BRITANNIA,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=83.55, max_volume=31422"
+INFO,BRITANNIA,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,CIPLA,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,CIPLA,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,CIPLA,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,CIPLA,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,CIPLA,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,CIPLA,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=18.9, max_volume=529016"
+INFO,CIPLA,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DABUR,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DABUR,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DABUR,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DABUR,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,DABUR,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DABUR,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=3.35, max_volume=157484"
+INFO,DABUR,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DIVISLAB,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DIVISLAB,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DIVISLAB,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DIVISLAB,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,DIVISLAB,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DIVISLAB,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=23.95, max_volume=39446"
+INFO,DIVISLAB,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DRREDDY,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DRREDDY,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,DRREDDY,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DRREDDY,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,DRREDDY,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,DRREDDY,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=39.45, max_volume=532152"
+INFO,DRREDDY,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,EICHERMOT,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,EICHERMOT,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,EICHERMOT,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,EICHERMOT,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,EICHERMOT,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,EICHERMOT,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=17.6, max_volume=109318"
+INFO,EICHERMOT,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HCLTECH,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HCLTECH,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HCLTECH,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HCLTECH,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,HCLTECH,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HCLTECH,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=14, max_volume=239128"
+INFO,HCLTECH,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HDFCBANK,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HDFCBANK,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HDFCBANK,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HDFCBANK,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,HDFCBANK,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HDFCBANK,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=6, max_volume=3.85829e+06"
+INFO,HDFCBANK,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HINDUNILVR,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HINDUNILVR,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,HINDUNILVR,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HINDUNILVR,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,HINDUNILVR,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,HINDUNILVR,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=3.05, max_volume=117297"
+INFO,HINDUNILVR,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ICICIBANK,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ICICIBANK,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ICICIBANK,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,ICICIBANK,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,ICICIBANK,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,ICICIBANK,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=0.15, max_volume=1.50948e+06"
+INFO,ICICIBANK,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,INFY,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,INFY,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,INFY,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,INFY,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,INFY,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,INFY,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=40, max_volume=557897"
+INFO,INFY,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ITC,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ITC,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,ITC,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,ITC,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,ITC,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,ITC,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=2.1, max_volume=1.65126e+06"
+INFO,ITC,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,KOTAKBANK,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,KOTAKBANK,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,KOTAKBANK,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,KOTAKBANK,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,KOTAKBANK,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,KOTAKBANK,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=0.9, max_volume=959455"
+INFO,KOTAKBANK,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,LUPIN,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,LUPIN,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,LUPIN,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,LUPIN,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,LUPIN,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,LUPIN,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=8.4, max_volume=104827"
+INFO,LUPIN,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,M&M,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,M&M,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,M&M,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,M&M,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,M&M,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,M&M,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=24.5, max_volume=1.03368e+06"
+INFO,M&M,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,MARUTI,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,MARUTI,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,MARUTI,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,MARUTI,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,MARUTI,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,MARUTI,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=145, max_volume=63668"
+INFO,MARUTI,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,NESTLEIND,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,NESTLEIND,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,NESTLEIND,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,NESTLEIND,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,NESTLEIND,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,NESTLEIND,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=4.9, max_volume=239480"
+INFO,NESTLEIND,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SBIN,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SBIN,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SBIN,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,SBIN,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,SBIN,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,SBIN,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=0.3, max_volume=1.88028e+06"
+INFO,SBIN,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SUNPHARMA,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SUNPHARMA,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,SUNPHARMA,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,SUNPHARMA,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,SUNPHARMA,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,SUNPHARMA,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=19.95, max_volume=124514"
+INFO,SUNPHARMA,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TCS,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TCS,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TCS,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TCS,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,TCS,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TCS,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=23.55, max_volume=164095"
+INFO,TCS,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TECHM,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TECHM,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TECHM,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TECHM,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,TECHM,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TECHM,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=9.1, max_volume=246841"
+INFO,TECHM,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TVSMOTOR,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TVSMOTOR,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,TVSMOTOR,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TVSMOTOR,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,TVSMOTOR,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,TVSMOTOR,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=1.15, max_volume=94037"
+INFO,TVSMOTOR,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,WIPRO,15m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,WIPRO,60m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+INFO,WIPRO,180m,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,WIPRO,1D,aggregate_coverage,stored bars missing from 5m-derived expected index,2
+INFO,WIPRO,1D,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880
+WARN,WIPRO,1W,aggregate_values,stored higher-TF OHLCV differs from 5m-derived aggregation,"rows=2, max_ohlc=0.35, max_volume=1.93208e+06"
+INFO,WIPRO,1W,naive_join_risk,naive backward join on bar-open timestamp would select an unclosed higher-TF bar,risk_rows=880/880

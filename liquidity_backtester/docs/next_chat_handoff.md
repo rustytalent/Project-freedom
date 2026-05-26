@@ -88,14 +88,34 @@ Do not accidentally commit these local/untracked runtime files unless explicitly
   against the in-memory `train_pools + oos_pools` list, not the local OOS
   pool index. Any future artifact audit must recreate that combined pool table.
 
+### Workstream 2: Artifact-Backed MTF Closed-Bar Audit — COMPLETE
+
+- Script: `analysis/run_phase4_mtf_closed_bar_audit.py`
+- Report: `reports/phase4_mtf_closed_bar_audit.md`
+- Issue CSV: `reports/phase4_mtf_closed_bar_issues.csv`
+- Scope: Core25 feature store `output_feature_store/core25_fresh_may25`,
+  higher timeframes `15m,60m,180m,1D,1W`, OOS direction decision rows.
+- Status: WARN, with `0 ERROR`, `50 WARN`, `125 INFO`.
+- Intraday higher-TF aggregations reproduced exactly from 5m:
+  `15m`, `60m`, `180m`.
+- Daily/weekly data-generation warnings:
+  - `1D`: 50 stored rows not present in the 5m-derived expected index
+    (2 per symbol).
+  - `1W`: 50 aggregate value mismatches (2 per symbol).
+- The audit also showed `110,000` decision-time join-risk rows: a naive
+  backward join on higher-TF bar-open timestamps would select unclosed bars
+  for every OOS direction decision. Future MTF joins must enforce:
+  `bar_open + timeframe <= decision_ts`.
+- This is not a current-code hard failure, but it is a guardrail for Track A/B
+  and should be reviewed before adding any new MTF point-in-time features.
+
 ### Next Recommended Step
 
 Continue Workstream 2 before Track A/B strategy work:
 
-1. Add MTF closed-bar replay/metadata audit from feature-store artifacts.
-2. Add pool availability replay audit beyond the existing sampled Phase 3C
+1. Add pool availability replay audit beyond the existing sampled Phase 3C
    check.
-3. Only after leakage probes are green, run the Track A distance-bucket AUC
+2. Only after leakage probes are green, run the Track A distance-bucket AUC
    viability gate.
 
 ## Recent Uploaded Commits / Completed Work
