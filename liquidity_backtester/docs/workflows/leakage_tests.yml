@@ -1,0 +1,32 @@
+name: Leakage Probes
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "30 2 * * *"
+
+jobs:
+  leakage-fast:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: liquidity_backtester
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Run fast leakage probes
+        run: pytest -q tests/leakage
+
+  leakage-slow-placeholder:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - run: |
+          echo "Full MTF/pool replay probes require the local Core25 parquet warehouse and are run outside GitHub CI for now."

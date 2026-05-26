@@ -1136,6 +1136,24 @@ Branch A follow-up status:
   Q alone does not rescue the current execution policies. Continue with leakage
   probes and execution simulator v2 before any live gate rewrite.
 
+Workstream 2 leakage probe status:
+
+- Added fast leakage probe utilities in `liqpool/leakage_probes.py`.
+- Added CI-runnable tests in `tests/leakage/test_fast_leakage_probes.py`.
+- Added GitHub workflow template in `docs/workflows/leakage_tests.yml`.
+- Active `.github/workflows/` could not be pushed from this environment because
+  the current GitHub token lacks `workflow` scope. A user/token with workflow
+  scope can copy the template into `.github/workflows/leakage_tests.yml`.
+- Added `reports/phase4_workstream2_leakage_probes.md`.
+- Current v1 probes cover label-shuffle association destruction, generic
+  `as_of_ts <= decision_ts` future-mask checks, snapshot `distance_atr`
+  recomputation, and a future-mutation regression for snapshot pool distances.
+- This is not full Workstream 2 completion yet. Remaining slow probes:
+  retrain models on shuffled labels, full feature metadata future-mask audit,
+  full MTF replay, full pool availability replay, and real OOS proximity
+  distance-at-decision audit.
+- Do not start Track A sweep before the real distance/proximity leakage audit.
+
 ### Earlier Opus Review — Verbatim
 
 # Review
