@@ -6,17 +6,17 @@ The project is now in Phase 4 Track A hardening. The current strategic thesis is
 **journey-to-liquidity**, not post-touch respect. The usable signal is price
 traveling toward a liquidity pool before touch.
 
-Latest pushed commit before this handoff update:
+Latest pushed commits before this handoff update:
 
 - `c6e2f1a Add Track A CPCV component null audit`
+- `5544019 Add Phase 4 multi-pocket slice analysis`
 
 Latest local work to commit:
 
-- `analysis/run_phase4_multi_pocket_slice_analysis.py`
-- `reports/phase4_multi_pocket_slice_analysis.md`
-- `reports/phase4_multi_pocket_slices.csv`
-- `reports/phase4_multi_pocket_candidates.csv`
-- `reports/phase4_multi_pocket_correlations.csv`
+- `analysis/run_phase4_multi_pocket_mini_sweeps.py`
+- `reports/phase4_multi_pocket_mini_sweeps.md`
+- `reports/phase4_multi_pocket_mini_sweep_cells.csv`
+- `reports/phase4_multi_pocket_mini_sweep_survivors.csv`
 
 ### Current Model/Prediction Reality
 
@@ -125,40 +125,58 @@ Important caveats:
 
 ### Next Plan Step
 
-Next engineering step should be a focused multi-pocket mini-sweep runner, not a
-new model and not live trading.
+Multi-pocket mini-sweeps are now implemented as Option B, reusing existing v2
+Track A sweep trade rows without re-running the 1-minute simulator.
 
-Recommended next script:
+Script:
 
 - `analysis/run_phase4_multi_pocket_mini_sweeps.py`
 
-It should test the top candidate slice filters with small pre-registered grids:
+Outputs:
 
-- `min_p_touch`: `[0.70, 0.75, 0.80]`
-- `min_p_direction`: `[0.60, 0.65, 0.70]`
-- `target_fraction`: `[0.6, 0.8, 1.0]`
-- `stop_atr_mult`: `[1.5, 2.0, 2.5]`
-- `max_hold_bars`: `[24, 36, 60]`
+- `reports/phase4_multi_pocket_mini_sweeps.md`
+- `reports/phase4_multi_pocket_mini_sweep_cells.csv`
+- `reports/phase4_multi_pocket_mini_sweep_survivors.csv`
 
-Candidate filters to prioritize:
+Verdict:
 
-1. `time_bucket == midday & distance_bucket == 5-8`
-2. `time_bucket == morning & distance_bucket == 5-8`
-3. `factor == EQHL & distance_bucket == 5-8`
-4. `vol_regime == normal_vol & distance_bucket == 5-8`
-5. `time_bucket == midday & direction == UP`
+- `ECONOMIC_SURVIVORS_NEED_CPCV`
+- `1944` mini-sweep cells tested
+- `3` deduplicated economic survivor cells
+- `0` strict DSR-confirmed survivors
+- no paper/live approval
 
-Acceptance for a mini-sweep survivor:
+Deduplicated economic survivors:
 
-- at least `200` trades,
-- mean R positive after 1.5x cost stress,
-- second-half mean R positive,
-- at least `2` sectors and `5` symbols unless explicitly marked narrow,
-- not merely a duplicate of another candidate with correlation above `0.80`.
+1. `normal_vol_5_8_long|T0.75|D0.65|tf1.0|sl1.5|h60`
+   - `175` trades, mean R `+1.112`, PF `3.98`, 1.5x-cost R `+0.889`
+   - selected-overlap with base pocket about `0.638`
+2. `eqhl_5_8_long|T0.75|D0.55|tf1.0|sl1.5|h60`
+   - `111` trades, mean R `+0.958`, PF `3.31`, 1.5x-cost R `+0.702`
+   - selected-overlap with base pocket about `0.329`
+3. `base_5_8_long|T0.75|D0.70|tf1.0|sl1.5|h60`
+   - `228` trades, mean R `+0.686`, PF `2.31`, 1.5x-cost R `+0.464`
+   - selected-overlap with normal-vol pocket about `0.638`
 
-After mini-sweeps, run CPCV/component nulls on survivors. Only after that should
-the project consider full synthetic random-pool/ATR-offset nulls or a
-final-stage triple-barrier journey model.
+Morning and midday families are `DEAD` under strict mini-sweep criteria because
+their best high-R cells are too thin. This does not mean time-of-day is useless;
+it means time-only pockets did not survive as broad standalone pockets in the
+current Option B grid.
+
+Next engineering step:
+
+- Build a CPCV/component-null runner for these three mini-sweep survivors.
+- Do not add final-stage model or triple-barrier labels yet.
+- Do not wire these pockets into live predict as tradeable.
+- A research-only "candidate pocket watchlist" can be added later, after CPCV.
+
+Recommended next script:
+
+- `analysis/run_phase4_multi_pocket_survivor_cpcv.py`
+
+It should run chronological path validation and shuffled-direction/component
+controls for the three survivor cell definitions above. After that, if any
+survive, run synthetic random-pool and ATR-offset nulls.
 
 ### Commands For Current Predict Run
 
