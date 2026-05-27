@@ -1,5 +1,208 @@
 # Next Chat Handoff
 
+## Latest Phase 4 Status — 2026-05-28
+
+The project is now in Phase 4 Track A hardening. The current strategic thesis is
+**journey-to-liquidity**, not post-touch respect. The usable signal is price
+traveling toward a liquidity pool before touch.
+
+Latest pushed commit before this handoff update:
+
+- `c6e2f1a Add Track A CPCV component null audit`
+
+Latest local work to commit:
+
+- `analysis/run_phase4_multi_pocket_slice_analysis.py`
+- `reports/phase4_multi_pocket_slice_analysis.md`
+- `reports/phase4_multi_pocket_slices.csv`
+- `reports/phase4_multi_pocket_candidates.csv`
+- `reports/phase4_multi_pocket_correlations.csv`
+
+### Current Model/Prediction Reality
+
+The multi-pocket slice analysis is **research-only**. It does not retrain the
+model, does not change the prediction model, and does not alter live gates.
+Running `--mode predict` again will only change outputs if:
+
+- the parquet market data changed,
+- the selected `--model-dir` changed,
+- code affecting predict/live plan output changed,
+- or model artifacts were retrained.
+
+Otherwise, prediction output should be effectively the same. The new slice
+analysis only creates research reports from existing Track A sweep trades.
+
+### Current Trust Level
+
+Use the model as a research/watchlist assistant, not an auto-trader.
+
+Trust more:
+
+- proximity / P_touch as the strongest current signal,
+- direction bias as context when it agrees with price action,
+- Track A pre-touch watchlist rows as setups worth human review,
+- no-trade/watch verdicts from honest gates.
+
+Trust less:
+
+- absolute `Q >= 70%` gates,
+- post-touch 90%+ reaction probabilities,
+- short Track A signals,
+- any live trade approval before CPCV/null validation.
+
+### Track A Current Findings
+
+Existing v2 legacy/post-touch modes remain negative under realistic execution:
+
+- `displacement_confirmed`: about `-0.68R`, PF `0.26`
+- `touch_confirmed`: about `-0.71R`, PF `0.24`
+- `blind_limit`: about `-1.20R`, PF `0.10`
+- `reclaim_confirmed`: about `-1.42R`, PF `0.07`
+
+Track A constrained pocket:
+
+- long-only,
+- sectors AUTO/FMCG/PHARMA,
+- P_touch >= 0.75,
+- direction-to-pool >= 0.65,
+- distance 3-8 ATR,
+- target fraction 1.0,
+- stop 2.0 ATR,
+- hold 60 bars, intraday bounded.
+
+Result:
+
+- `434` trades,
+- mean R about `+0.365`,
+- PF about `1.91`,
+- but first CPCV/component-null layer verdict is `CPCV_COMPONENT_MARGINAL`.
+
+First CPCV/component-null report:
+
+- `reports/phase4_track_a_cpcv_nulls.md`
+- fixed pocket positive on many paths, but worst path around `-0.251R`.
+- shuffled-direction null still makes money, median about `+0.222R`.
+- conclusion: direction adds lift, but proximity/geometry/time structure is
+  doing much of the work.
+
+### Multi-Pocket Slice Analysis — Latest Local Result
+
+Script:
+
+- `analysis/run_phase4_multi_pocket_slice_analysis.py`
+
+Outputs:
+
+- `reports/phase4_multi_pocket_slice_analysis.md`
+- `reports/phase4_multi_pocket_slices.csv`
+- `reports/phase4_multi_pocket_candidates.csv`
+- `reports/phase4_multi_pocket_correlations.csv`
+
+Verdict:
+
+- `MULTI_POCKET_CANDIDATES_FOUND`
+- `125` slice hypotheses tested
+- `6` candidate slices passed anti-overfit filters
+- discovery only; no live/paper-trade approval
+
+Top candidate slices:
+
+- `time_x_distance: midday / 5-8`: `576` trades, mean R `+0.722`, PF `2.77`
+- `time_x_distance: morning / 5-8`: `3348` trades, mean R `+0.668`, PF `2.60`
+- `time_x_direction: midday / UP`: `1368` trades, mean R `+0.480`, PF `2.07`
+- `factor_x_distance: EQHL / 5-8`: `4428` trades, mean R `+0.478`, PF `1.95`
+- `volatility_x_distance: normal_vol / 5-8`: `7632` trades, mean R `+0.437`, PF `1.85`
+- `time_bucket: midday`: `1584` trades, mean R `+0.295`, PF `1.57`
+
+Important caveats:
+
+- candidates can overlap and may include multiple geometries for the same
+  event;
+- distance `1-3 ATR` is only partially covered by the existing sweep because
+  Track A mostly tested `2-10 ATR`;
+- this is a pocket discovery map, not validation;
+- next validation must use mini-sweeps, then CPCV and synthetic nulls.
+
+### Next Plan Step
+
+Next engineering step should be a focused multi-pocket mini-sweep runner, not a
+new model and not live trading.
+
+Recommended next script:
+
+- `analysis/run_phase4_multi_pocket_mini_sweeps.py`
+
+It should test the top candidate slice filters with small pre-registered grids:
+
+- `min_p_touch`: `[0.70, 0.75, 0.80]`
+- `min_p_direction`: `[0.60, 0.65, 0.70]`
+- `target_fraction`: `[0.6, 0.8, 1.0]`
+- `stop_atr_mult`: `[1.5, 2.0, 2.5]`
+- `max_hold_bars`: `[24, 36, 60]`
+
+Candidate filters to prioritize:
+
+1. `time_bucket == midday & distance_bucket == 5-8`
+2. `time_bucket == morning & distance_bucket == 5-8`
+3. `factor == EQHL & distance_bucket == 5-8`
+4. `vol_regime == normal_vol & distance_bucket == 5-8`
+5. `time_bucket == midday & direction == UP`
+
+Acceptance for a mini-sweep survivor:
+
+- at least `200` trades,
+- mean R positive after 1.5x cost stress,
+- second-half mean R positive,
+- at least `2` sectors and `5` symbols unless explicitly marked narrow,
+- not merely a duplicate of another candidate with correlation above `0.80`.
+
+After mini-sweeps, run CPCV/component nulls on survivors. Only after that should
+the project consider full synthetic random-pool/ATR-offset nulls or a
+final-stage triple-barrier journey model.
+
+### Commands For Current Predict Run
+
+Use predict, not train, for the latest daily output. This scores current data
+with the current model. It does not learn new data.
+
+```bash
+cd /Users/abc/Projects/Project-freedom/liquidity_backtester
+git checkout claude/liquidity-pool-backtester-1uskb
+git pull origin claude/liquidity-pool-backtester-1uskb
+
+export DATA_ROOT="/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data"
+export RESAMPLED_DIR="$DATA_ROOT/resampled"
+
+mkdir -p logs
+
+caffeinate -dimsu env PYTHONPATH=. .venv/bin/python -u examples/multi_asset_run.py \
+  --universe core25 \
+  --data-source parquet \
+  --data-dir "$RESAMPLED_DIR" \
+  --mode predict \
+  --model-dir output_models/core25_phase4_v2_neutral \
+  --execution-mode reclaim_confirmed \
+  --skip-execution-backtest \
+  --skip-leakage-audit \
+  --skip-policy-labels \
+  --out output_core25_predict_latest_tracka \
+  2>&1 | tee logs/core25_predict_latest_tracka.log
+```
+
+Read outputs:
+
+```bash
+tail -220 logs/core25_predict_latest_tracka.log
+column -s, -t < output_core25_predict_latest_tracka/track_a_pretouch_setups.csv
+ls -lh output_core25_predict_latest_tracka
+```
+
+If `output_models/core25_phase4_v2_neutral` is missing on a fresh machine, use:
+
+```bash
+--model-dir output_models/core25_latest
+```
+
 ## Repo And Branch
 
 - Repo path on Mac: `/Users/abc/Projects/Project-freedom`
