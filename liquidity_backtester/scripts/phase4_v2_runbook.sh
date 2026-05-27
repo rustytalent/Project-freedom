@@ -153,8 +153,10 @@ show_status() {
 show_compare() {
   for policy in neutral generous conservative; do
     local fp="output_core25_phase4_v2_${policy}/execution_backtest_v2_summary.csv"
+    local label
+    label="$(printf '%s' "$policy" | tr '[:lower:]' '[:upper:]')"
     echo
-    echo "===== ${policy^^} ====="
+    echo "===== ${label} ====="
     if [[ -f "$fp" ]]; then
       column -s, -t < "$fp"
     else
