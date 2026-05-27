@@ -18,6 +18,7 @@ import pandas as pd
 from liqpool import Config, plot_chart
 from liqpool.costs import (
     ZerodhaEquityCostConfig,
+    estimate_round_trip_charges,
     expected_trade_value,
     trade_levels,
 )
@@ -217,6 +218,113 @@ def _fmt_pct(value) -> str:
 def _fmt_price(value) -> str:
     value = _finite_or_none(value)
     return "n/a" if value is None else f"₹{value:.2f}"
+
+
+TRACK_A_ALLOWED_SECTORS = {"AUTO", "PHARMA", "FMCG"}
+TRACK_A_MIN_TOUCH = 0.75
+TRACK_A_MIN_DIRECTION = 0.65
+TRACK_A_MIN_DISTANCE_ATR = 3.0
+TRACK_A_MAX_DISTANCE_ATR = 8.0
+TRACK_A_TARGET_FRACTION = 1.0
+TRACK_A_STOP_ATR_MULT = 2.0
+TRACK_A_MAX_HOLD_BARS = 60
+TRACK_A_OUTPUT_COLUMNS = [
+    "symbol", "sector", "direction", "side", "current", "pool_low", "pool_high",
+    "pool_mid", "entry_reference", "target", "stop", "target_fraction",
+    "stop_atr_mult", "max_hold_bars", "distance_atr", "p_touch",
+    "p_direction_to_pool", "p_up", "q", "headline_factor", "tf_count",
+    "gross_rr", "net_target_r", "net_stop_r", "target_cost_per_share",
+    "stop_cost_per_share", "pocket_score", "research_status", "note",
+]
+
+
+def _track_a_pretouch_setups(candidates, cost_cfg: ZerodhaEquityCostConfig,
+                             quantity: int) -> list[dict]:
+    """Research-only Track A pre-touch pocket from Phase 4 constrained validation.
+
+    This is not wired into the old post-touch live gate. It surfaces the
+    validated pocket as a separate watch panel:
+    long-only, pool above spot, AUTO/PHARMA/FMCG, T>=0.75, D>=0.65, 3-8 ATR,
+    target = pool lower boundary, stop = 2 ATR.
+    """
+    rows = []
+    for c in candidates:
+        p_direction_to_pool = c.get("p_direction_to_pool")
+        if p_direction_to_pool is None:
+            p_up = c.get("dir_p_up")
+            if p_up is None:
+                p_direction_to_pool = 0.0
+            else:
+                p_direction_to_pool = p_up if c["side"] == "above" else (1.0 - p_up)
+        p_direction_to_pool = float(p_direction_to_pool or 0.0)
+
+        if c["side"] != "above":
+            continue
+        if c.get("sector") not in TRACK_A_ALLOWED_SECTORS:
+            continue
+        if c.get("p_touch", 0.0) < TRACK_A_MIN_TOUCH:
+            continue
+        if p_direction_to_pool < TRACK_A_MIN_DIRECTION:
+            continue
+        if not (TRACK_A_MIN_DISTANCE_ATR <= c["dist_atr"] < TRACK_A_MAX_DISTANCE_ATR):
+            continue
+
+        pool = c["pool"]
+        entry = float(c["current"])
+        atr_value = max(float(c["atr_proxy"]), 1e-9)
+        target = entry + TRACK_A_TARGET_FRACTION * (float(pool.price_low) - entry)
+        stop = entry - TRACK_A_STOP_ATR_MULT * atr_value
+        reward = target - entry
+        risk = entry - stop
+        if reward <= 0.0 or risk <= 0.0:
+            continue
+
+        target_cost = estimate_round_trip_charges(entry, target, quantity, cost_cfg)
+        stop_cost = estimate_round_trip_charges(entry, stop, quantity, cost_cfg)
+        net_target_r = (reward - target_cost["cost_per_share"]) / risk
+        net_stop_r = -((risk + stop_cost["cost_per_share"]) / risk)
+        pocket_score = c["p_touch"] * p_direction_to_pool * net_target_r
+
+        rows.append({
+            "symbol": c["symbol"],
+            "sector": c["sector"],
+            "direction": "UP",
+            "side": c["side"],
+            "current": entry,
+            "pool_low": float(pool.price_low),
+            "pool_high": float(pool.price_high),
+            "pool_mid": float(pool.mid),
+            "entry_reference": entry,
+            "target": float(target),
+            "stop": float(stop),
+            "target_fraction": TRACK_A_TARGET_FRACTION,
+            "stop_atr_mult": TRACK_A_STOP_ATR_MULT,
+            "max_hold_bars": TRACK_A_MAX_HOLD_BARS,
+            "distance_atr": float(c["dist_atr"]),
+            "p_touch": float(c["p_touch"]),
+            "p_direction_to_pool": p_direction_to_pool,
+            "p_up": _finite_or_none(c.get("dir_p_up")),
+            "q": float(c.get("q", 0.0)),
+            "headline_factor": c.get("headline_factor"),
+            "tf_count": c.get("tf_count"),
+            "gross_rr": float(reward / risk),
+            "net_target_r": float(net_target_r),
+            "net_stop_r": float(net_stop_r),
+            "target_cost_per_share": float(target_cost["cost_per_share"]),
+            "stop_cost_per_share": float(stop_cost["cost_per_share"]),
+            "pocket_score": float(pocket_score),
+            "research_status": "PRETOUCH_RESEARCH_ONLY",
+            "note": (
+                "Phase 4 constrained pocket: long-only AUTO/PHARMA/FMCG; "
+                "not live-approved until CPCV/null baselines pass"
+            ),
+        })
+
+    return sorted(
+        rows,
+        key=lambda r: (r["pocket_score"], r["p_touch"], r["p_direction_to_pool"]),
+        reverse=True,
+    )
 
 
 def _build_reaction_alerts(report, feature_bars: int, lookback_bars: int,
@@ -646,11 +754,14 @@ def main():
         active = [(p, r) for p, r in zip(pools, results)
                    if not r.is_break and r.outcome != "horizon_insufficient"
                    and (r.touched_at is None or r.touched_at > now_ts)]
-        # Take top-5 by score on each side
+        # Take a compact but wider set per side. The original live gate still
+        # prints only top rows, but the Track A pre-touch research panel needs
+        # enough active pools to avoid missing a high-proximity journey setup.
+        live_pool_side_limit = 20
         above = sorted([(p, r) for p, r in active if p.price_low > current],
-                        key=lambda x: -x[0].score)[:5]
+                        key=lambda x: -x[0].score)[:live_pool_side_limit]
         below = sorted([(p, r) for p, r in active if p.price_high < current],
-                        key=lambda x: -x[0].score)[:5]
+                        key=lambda x: -x[0].score)[:live_pool_side_limit]
 
         asset_candidates = []   # candidates for THIS asset, used to populate per_asset_summary
 
@@ -670,6 +781,11 @@ def main():
                 for h in PROX_HORIZONS:
                     pm = report.unified_proximity[h]
                     t_by_h[h] = pm.predict_one(p, dist_atr, side_str, current_state, q)
+                p_direction_to_pool = None
+                if dir_p_up is not None:
+                    p_direction_to_pool = (
+                        float(dir_p_up) if side_str == "above" else 1.0 - float(dir_p_up)
+                    )
                 tag = direction_tag(side_str)
                 bonus = 1.15 if tag == "DIR_ALIGN" else (0.85 if tag == "DIR_FIGHT" else 1.0)
                 t_today = t_by_h.get(primary_h, 0.0)
@@ -728,6 +844,7 @@ def main():
                     "target": levels["target"],
                     "current": current, "atr_proxy": atr_proxy,
                     "dir_p_up": dir_p_up,
+                    "p_direction_to_pool": p_direction_to_pool,
                     "sector": sec,
                     "sector_mult": sec_decision["multiplier"],
                     "sector_alignment": sec_decision["alignment"],
@@ -763,6 +880,11 @@ def main():
         }
 
     candidates.sort(key=lambda c: -c["ev"])
+    track_a_pretouch = _track_a_pretouch_setups(
+        candidates,
+        cost_cfg=cost_cfg,
+        quantity=args.cost_quantity,
+    )
 
     def live_gate_reasons(c):
         reasons = []
@@ -1019,6 +1141,21 @@ def main():
                   f"[{side_lbl}, {c['dist_atr']:.1f}ATR, {c['dir_tag']}, {q_tag}]   "
                   f"P_respect={c['p_respect']:.1%} P_reaction={c['p_reaction']:.1%}  "
                   f"{t_strs}")
+
+    print("\n--- TRACK A PRE-TOUCH POCKET  "
+          "(research-only: long AUTO/PHARMA/FMCG, T≥75%, D≥65%, 3-8ATR) ---")
+    if not track_a_pretouch:
+        print("  (none in the current active-pool scan)")
+    else:
+        for row in track_a_pretouch[:10]:
+            print(f"  [{row['symbol']:<14}] {row['sector']:<6} "
+                  f"entry≈₹{row['entry_reference']:.2f} → target ₹{row['target']:.2f} "
+                  f"stop ₹{row['stop']:.2f}  "
+                  f"dist={row['distance_atr']:.1f}ATR "
+                  f"T={row['p_touch']:.1%} D={row['p_direction_to_pool']:.1%} "
+                  f"Q={row['q']:.1%} netTarget={row['net_target_r']:+.2f}R "
+                  f"score={row['pocket_score']:+.2f}")
+        print("  Note: not live-approved; this pocket still needs CPCV/null baselines.")
 
     print("\n--- POST-TOUCH REACTION CONFIRMATIONS  "
           f"(last {args.reaction_alert_lookback_bars} bars) ---")
@@ -1537,6 +1674,23 @@ def main():
         "reaction_alerts": reaction_alerts,
         "feature_store": report.feature_store_stats,
         "gate_decisions": gate_decisions,
+        "track_a_pretouch": {
+            "research_only": True,
+            "source": "Phase 4 constrained validation pocket",
+            "enabled": True,
+            "filters": {
+                "direction": "UP only",
+                "allowed_sectors": sorted(TRACK_A_ALLOWED_SECTORS),
+                "min_p_touch": TRACK_A_MIN_TOUCH,
+                "min_p_direction_to_pool": TRACK_A_MIN_DIRECTION,
+                "min_distance_atr": TRACK_A_MIN_DISTANCE_ATR,
+                "max_distance_atr": TRACK_A_MAX_DISTANCE_ATR,
+                "target_fraction": TRACK_A_TARGET_FRACTION,
+                "stop_atr_mult": TRACK_A_STOP_ATR_MULT,
+                "max_hold_bars": TRACK_A_MAX_HOLD_BARS,
+            },
+            "setups": track_a_pretouch[:50],
+        },
     }
     out_json = out / "multi_asset_summary.json"
     out_json.write_text(json.dumps(summary, indent=2, default=str))
@@ -1631,9 +1785,29 @@ def main():
             }
             for c in tradeable[:20]
         ],
+        "track_a_pretouch": {
+            "research_only": True,
+            "source": "Phase 4 constrained validation pocket",
+            "filters": {
+                "direction": "UP only",
+                "allowed_sectors": sorted(TRACK_A_ALLOWED_SECTORS),
+                "min_p_touch": TRACK_A_MIN_TOUCH,
+                "min_p_direction_to_pool": TRACK_A_MIN_DIRECTION,
+                "min_distance_atr": TRACK_A_MIN_DISTANCE_ATR,
+                "max_distance_atr": TRACK_A_MAX_DISTANCE_ATR,
+                "target_fraction": TRACK_A_TARGET_FRACTION,
+                "stop_atr_mult": TRACK_A_STOP_ATR_MULT,
+                "max_hold_bars": TRACK_A_MAX_HOLD_BARS,
+            },
+            "setups": track_a_pretouch[:20],
+        },
     }
     live_plan_path = out / "live_plan.json"
     live_plan_path.write_text(json.dumps(live_plan, indent=2, default=str))
+    track_a_pretouch_path = out / "track_a_pretouch_setups.csv"
+    pd.DataFrame(track_a_pretouch, columns=TRACK_A_OUTPUT_COLUMNS).to_csv(
+        track_a_pretouch_path, index=False,
+    )
     gate_df = pd.DataFrame(gate_decisions)
     if not gate_df.empty:
         gate_df.to_csv(out / "live_gate_decisions.csv", index=False)
@@ -1747,6 +1921,7 @@ def main():
     print(f"\nartifacts: {out_json}")
     print(f"           {research_json}")
     print(f"           {live_plan_path}")
+    print(f"           {track_a_pretouch_path}  ← Phase 4 Track A pre-touch research setups")
     print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
     if audit_csv_path is not None:
         print(f"           {audit_csv_path}  ← Phase 3A global/sector/blended OOS rows")
