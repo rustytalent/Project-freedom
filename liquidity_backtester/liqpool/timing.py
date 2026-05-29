@@ -476,8 +476,14 @@ class DirectionModel:
 # Proximity model — horizon-specific
 # ---------------------------------------------------------------------------
 
+# pool_quality (P_respect) is intentionally NOT a proximity model feature: it is an
+# in-sample prediction for train pools (the Q model trained on them), which leaks label
+# information into P_touch training/eval. It is also conceptually weak — whether price will
+# TOUCH a pool shouldn't depend on its post-touch respect quality, and distance dominates
+# importance anyway. The column is still emitted by _pool_features_for_snapshot for the
+# Q×T joint sanity-check diagnostic, just not consumed as a model input.
 _POOL_FEATURE_NAMES = ["distance_atr", "side_above",
-                       "pool_quality", "pool_score", "pool_width_atr",
+                       "pool_score", "pool_width_atr",
                        "pool_n_tfs", "pool_n_contributors",
                        "pool_age_at_avail_bars"]
 
