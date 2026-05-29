@@ -553,10 +553,15 @@ def build_feature_store_for_report(report, multi_feat,
 
         for fold_id, fr in enumerate(ad.walkforward.folds):
             max_h = max(list(horizons) + [direction_horizon])
+            # TRAIN snapshots must clip their future trajectory at train_end so a boundary
+            # snapshot cannot derive its label from bars inside the OOS test window (matches
+            # walkforward.py / multi_asset.py). OOS snapshots are NOT clipped: the future
+            # outcome is genuinely observable after the decision.
             tr = generate_snapshots(
                 ad.base_df, a_pools, a_results, state_feat,
                 window_start=fr.train_start, window_end=fr.train_end,
                 sample_every=sample_every, max_horizon=max_h,
+                clip_future_to_window=True,
             )
             os_ = generate_snapshots(
                 ad.base_df, a_pools, a_results, state_feat,

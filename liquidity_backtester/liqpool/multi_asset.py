@@ -19,7 +19,7 @@ This module orchestrates:
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Callable, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Callable, Union
 import copy
 import os
 import pickle
@@ -284,7 +284,9 @@ def build_oos_prediction_audit(model: Union[PoolRespectModel, SectorMoERespectMo
                 continue
             if p.asset not in atr_cache:
                 atr_cache[p.asset] = atr(df, 14).bfill()
-            pos = int(df.index.searchsorted(p.available_at, side="left"))
+            # Bar at-or-before available_at (side="right"-1), matching featurize.py — side="left"
+            # would select the NEXT bar for a non-matching timestamp, a 1-bar forward peek.
+            pos = int(df.index.searchsorted(p.available_at, side="right")) - 1
             pos = min(max(pos, 0), len(df) - 1)
             close = float(df["close"].iloc[pos])
             atr_val = max(float(atr_cache[p.asset].iloc[pos]), 1e-9)

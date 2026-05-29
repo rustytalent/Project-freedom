@@ -243,9 +243,12 @@ def detect_rotation(sector_metrics: Dict[str, Dict]) -> Dict:
     # The "baseline" trend must EXCLUDE the recent 5d, otherwise it overlaps the recent window
     # (ret_60d contains ret_5d) and the divergence signal is muddied. prior ≈ the 5d→60d segment.
     def _prior_return(s: str) -> float:
-        r5 = sector_metrics[s].get("ret_5d", 0.0)
-        r60 = sector_metrics[s].get("ret_60d", 0.0)
-        return (1.0 + r60) / (1.0 + r5) - 1.0 if (1.0 + r5) != 0 else r60
+        r5 = float(sector_metrics[s].get("ret_5d", 0.0) or 0.0)
+        r60 = float(sector_metrics[s].get("ret_60d", 0.0) or 0.0)
+        denom = 1.0 + r5
+        # Near-(-100%) 5d returns would make the prior explode and corrupt the rank ordering;
+        # fall back to the raw 60d trend in that degenerate case.
+        return (1.0 + r60) / denom - 1.0 if abs(denom) > 1e-9 else r60
 
     ranked_5d = sorted(sectors, key=lambda s: -sector_metrics[s]["ret_5d"])
     ranked_60d = sorted(sectors, key=lambda s: -sector_metrics[s]["ret_60d"])
