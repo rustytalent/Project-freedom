@@ -27,23 +27,31 @@ def policy_feature_frame(labels: pd.DataFrame,
         return pd.DataFrame(columns=feature_names or [])
 
     df = labels.copy()
-    out = pd.DataFrame(index=df.index)
-    out["score"] = pd.to_numeric(df.get("score", 0.0), errors="coerce").fillna(0.0)
-    out["tf_count"] = pd.to_numeric(df.get("tf_count", 0.0), errors="coerce").fillna(0.0)
-    out["side_high"] = (df.get("side", "") == "sell").astype(float)
-    out["direction_sign"] = pd.to_numeric(
-        df.get("direction_sign", 0.0), errors="coerce",
-    ).fillna(0.0)
-    low = pd.to_numeric(df.get("pool_low", 0.0), errors="coerce").fillna(0.0)
-    high = pd.to_numeric(df.get("pool_high", 0.0), errors="coerce").fillna(0.0)
-    mid = pd.to_numeric(df.get("pool_mid", 0.0), errors="coerce").fillna(0.0)
+    idx = df.index
+
+    def _series(col: str, default):
+        # df.get(col, default) yields a SCALAR when the column is missing, which breaks the
+        # downstream .astype/.dt/.fillna calls. Always return an index-aligned Series.
+        return df[col] if col in df.columns else pd.Series(default, index=idx)
+
+    def _num(col: str) -> pd.Series:
+        return pd.to_numeric(_series(col, 0.0), errors="coerce").fillna(0.0)
+
+    out = pd.DataFrame(index=idx)
+    out["score"] = _num("score")
+    out["tf_count"] = _num("tf_count")
+    out["side_high"] = (_series("side", "") == "sell").astype(float)
+    out["direction_sign"] = _num("direction_sign")
+    low = _num("pool_low")
+    high = _num("pool_high")
+    mid = _num("pool_mid")
     width = (high - low).clip(lower=0.0)
     out["pool_width"] = width
     out["pool_width_pct"] = width / mid.replace(0.0, np.nan).abs()
     out["pool_width_pct"] = out["pool_width_pct"].replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
-    available = pd.to_datetime(df.get("available_at"), errors="coerce")
-    formed = pd.to_datetime(df.get("formed_at"), errors="coerce")
+    available = pd.to_datetime(_series("available_at", pd.NaT), errors="coerce")
+    formed = pd.to_datetime(_series("formed_at", pd.NaT), errors="coerce")
     lag_hours = (available - formed).dt.total_seconds() / 3600.0
     out["formation_lag_hours"] = lag_hours.replace([np.inf, -np.inf], 0.0).fillna(0.0)
     out["available_hour"] = available.dt.hour.fillna(0).astype(float)
@@ -109,6 +117,7 @@ class PolicyModeMetrics:
     train_base_win: float = 0.0
     val_base_win: float = 0.0
     oos_base_win: float = 0.0
+    has_calibration_holdout: bool = True
     val_brier: float = 0.0
     val_logloss: float = 0.0
     val_auc: Optional[float] = None
@@ -170,7 +179,23 @@ class PolicyOutcomeModel:
         X = policy_feature_frame(frame)
         self.feature_names = list(X.columns)
         X_tr = X.loc[tr_idx].values
-        X_val = X.loc[val_idx].values
+
+        # Split the chronological validation tail in time: the earlier half is used for early
+        # stopping + isotonic calibration, the LATER (most recent) half is a pure holdout that
+        # all reported val_* metrics come from. Fitting isotonic on the early-stopping rows and
+        # then scoring those same rows is optimistic; the time-ordered holdout fixes that and
+        # also mirrors live use (you face the most recent data). Falls back if a half loses a class.
+        cut = len(val_idx) // 2
+        es_idx, hold_idx = val_idx[:cut], val_idx[cut:]
+        y_es = frame.loc[es_idx, "policy_target_win"].astype(int).to_numpy() if len(es_idx) else np.array([])
+        y_hold = frame.loc[hold_idx, "policy_target_win"].astype(int).to_numpy() if len(hold_idx) else np.array([])
+        has_holdout = (len(es_idx) > 0 and len(hold_idx) > 0
+                       and len(np.unique(y_es)) == 2 and len(np.unique(y_hold)) == 2)
+        if not has_holdout:
+            es_idx, hold_idx = val_idx, val_idx
+            y_es = y_hold = y_val
+        X_es = X.loc[es_idx].values
+        X_hold = X.loc[hold_idx].values
 
         params = dict(
             objective="binary",
@@ -189,26 +214,28 @@ class PolicyOutcomeModel:
             seed=seed,
         )
         dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
-        dval = lgb.Dataset(X_val, label=y_val, reference=dtr,
-                           feature_name=self.feature_names)
+        des = lgb.Dataset(X_es, label=y_es, reference=dtr,
+                          feature_name=self.feature_names)
         self._gbm = lgb.train(
-            params, dtr, num_boost_round=300, valid_sets=[dval],
+            params, dtr, num_boost_round=300, valid_sets=[des],
             valid_names=["val"],
             callbacks=[
                 lgb.early_stopping(stopping_rounds=30, verbose=False),
                 lgb.log_evaluation(0),
             ],
         )
-        raw_val = self._gbm.predict(X_val, num_iteration=self._gbm.best_iteration)
+        raw_es = self._gbm.predict(X_es, num_iteration=self._gbm.best_iteration)
         self._iso = IsotonicRegression(out_of_bounds="clip")
-        self._iso.fit(raw_val, y_val)
-        val_pred = self._iso.transform(raw_val)
-        mt = _binary_metrics(y_val, val_pred)
+        self._iso.fit(raw_es, y_es)
+        hold_pred = self._iso.transform(
+            self._gbm.predict(X_hold, num_iteration=self._gbm.best_iteration))
+        mt = _binary_metrics(y_hold, hold_pred)
         self.metrics.status = "trained"
         self.metrics.train_n = int(len(tr_idx))
-        self.metrics.val_n = int(len(val_idx))
+        self.metrics.val_n = int(len(hold_idx))
+        self.metrics.has_calibration_holdout = bool(has_holdout)
         self.metrics.train_base_win = float(y_tr.mean())
-        self.metrics.val_base_win = float(y_val.mean())
+        self.metrics.val_base_win = float(y_hold.mean())
         self.metrics.val_brier = mt["brier"]
         self.metrics.val_logloss = mt["logloss"]
         self.metrics.val_auc = mt["auc"]

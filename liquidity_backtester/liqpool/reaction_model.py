@@ -45,15 +45,18 @@ def reaction_feature_frame(events: pd.DataFrame,
         return pd.DataFrame(columns=feature_names or [])
 
     df = events.copy()
+
+    def _num(col: str) -> pd.Series:
+        # df.get(col, default) returns a SCALAR default when the column is missing, and
+        # pd.to_numeric(scalar).fillna(...) raises. Always work with an index-aligned Series.
+        s = df[col] if col in df.columns else pd.Series(0.0, index=df.index)
+        return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
     out = pd.DataFrame(index=df.index)
-    out["score"] = pd.to_numeric(df.get("score", 0.0), errors="coerce").fillna(0.0)
-    out["width"] = pd.to_numeric(df.get("width", 0.0), errors="coerce").fillna(0.0)
-    out["n_contributors"] = pd.to_numeric(
-        df.get("n_contributors", 0.0), errors="coerce",
-    ).fillna(0.0)
-    out["bars_to_touch_log1p"] = np.log1p(pd.to_numeric(
-        df.get("bars_to_touch", 0.0), errors="coerce",
-    ).fillna(0.0).clip(lower=0.0))
+    out["score"] = _num("score")
+    out["width"] = _num("width")
+    out["n_contributors"] = _num("n_contributors")
+    out["bars_to_touch_log1p"] = np.log1p(_num("bars_to_touch").clip(lower=0.0))
     out["side_high"] = (df.get("side", "") == "high").astype(float)
     out["tf_count"] = df.apply(_tf_count_from_row, axis=1)
 
@@ -88,6 +91,7 @@ class ReactionTargetMetrics:
     oos_auc: Optional[float] = None
     oos_top_decile_rate: float = 0.0
     oos_mean_prediction: float = 0.0
+    has_calibration_holdout: bool = True
 
     def to_dict(self) -> Dict:
         return {
@@ -96,6 +100,7 @@ class ReactionTargetMetrics:
             "val_n": self.val_n,
             "oos_n": self.oos_n,
             "base_rate": self.base_rate,
+            "has_calibration_holdout": self.has_calibration_holdout,
             "val_brier": self.val_brier,
             "val_logloss": self.val_logloss,
             "val_auc": self.val_auc,
@@ -146,6 +151,29 @@ def _stratified_split(y: np.ndarray, val_frac: float, seed: int) -> tuple[np.nda
     return tr_idx, val_idx
 
 
+def _stratified_halves(idx: np.ndarray, y: np.ndarray, seed: int
+                       ) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Split `idx` into class-stratified (early_stop, holdout, ok) halves. Returns
+    (idx, idx, False) when a clean both-classes split isn't possible (caller then calibrates
+    and reports on the same rows)."""
+    rng = np.random.default_rng(seed)
+    idx = np.asarray(idx)
+    yv = y[idx]
+    pos, neg = idx[yv == 1], idx[yv == 0]
+    if len(pos) < 2 or len(neg) < 2:
+        return idx, idx, False
+    rng.shuffle(pos)
+    rng.shuffle(neg)
+    ep, en = max(1, len(pos) // 2), max(1, len(neg) // 2)
+    es = np.concatenate([pos[:ep], neg[:en]])
+    hold = np.concatenate([pos[ep:], neg[en:]])
+    if len(hold) == 0 or len(np.unique(y[hold])) < 2 or len(np.unique(y[es])) < 2:
+        return idx, idx, False
+    rng.shuffle(es)
+    rng.shuffle(hold)
+    return es, hold, True
+
+
 @dataclass
 class ReactionBinaryModel:
     target: str
@@ -176,8 +204,12 @@ class ReactionBinaryModel:
         X = reaction_feature_frame(frame)
         self.feature_names = list(X.columns)
         tr_idx, val_idx = _stratified_split(y, val_frac=val_frac, seed=seed)
+        # Hold out half of the validation fold: early stopping + isotonic are fit on the es half;
+        # reported metrics come from the disjoint holdout half (honest calibration metrics).
+        es_idx, hold_idx, has_holdout = _stratified_halves(val_idx, y, seed=seed + 1)
         X_tr, y_tr = X.iloc[tr_idx].values, y[tr_idx]
-        X_val, y_val = X.iloc[val_idx].values, y[val_idx]
+        X_es, y_es = X.iloc[es_idx].values, y[es_idx]
+        X_hold, y_hold = X.iloc[hold_idx].values, y[hold_idx]
 
         params = dict(
             objective="binary",
@@ -196,24 +228,26 @@ class ReactionBinaryModel:
             seed=seed,
         )
         dtr = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
-        dval = lgb.Dataset(X_val, label=y_val, reference=dtr,
-                           feature_name=self.feature_names)
+        des = lgb.Dataset(X_es, label=y_es, reference=dtr,
+                          feature_name=self.feature_names)
         self._gbm = lgb.train(
-            params, dtr, num_boost_round=350, valid_sets=[dval],
+            params, dtr, num_boost_round=350, valid_sets=[des],
             valid_names=["val"],
             callbacks=[
                 lgb.early_stopping(stopping_rounds=35, verbose=False),
                 lgb.log_evaluation(0),
             ],
         )
-        raw_val = self._gbm.predict(X_val, num_iteration=self._gbm.best_iteration)
+        raw_es = self._gbm.predict(X_es, num_iteration=self._gbm.best_iteration)
         self._iso = IsotonicRegression(out_of_bounds="clip")
-        self._iso.fit(raw_val, y_val)
-        val_pred = self._iso.transform(raw_val)
-        mt = _binary_metrics(self.target, y_val, val_pred)
+        self._iso.fit(raw_es, y_es)
+        hold_pred = self._iso.transform(
+            self._gbm.predict(X_hold, num_iteration=self._gbm.best_iteration))
+        mt = _binary_metrics(self.target, y_hold, hold_pred)
         self.metrics.train_n = int(len(tr_idx))
-        self.metrics.val_n = int(len(val_idx))
+        self.metrics.val_n = int(len(hold_idx))
         self.metrics.base_rate = float(y.mean())
+        self.metrics.has_calibration_holdout = bool(has_holdout)
         self.metrics.val_brier = mt["brier"]
         self.metrics.val_logloss = mt["logloss"]
         self.metrics.val_auc = mt["auc"]

@@ -161,6 +161,34 @@ def _purged_embargoed_splits(start_times: Sequence[pd.Timestamp],
     return splits, stats
 
 
+def _stratified_halves(idx: np.ndarray, y: np.ndarray, rng: np.random.Generator
+                       ) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Split `idx` into two disjoint, class-stratified halves: (early_stop, holdout, ok).
+
+    The first half is used for early stopping + isotonic calibration (tuning); the second is a
+    pure holdout for honest metric reporting. If a clean split keeping both classes on each side
+    isn't possible (too few of either class), returns (idx, idx, False) so the caller falls back
+    to the pre-holdout behaviour (calibrate and report on the same rows)."""
+    idx = np.asarray(idx)
+    yv = y[idx]
+    pos = idx[yv == 1]
+    neg = idx[yv == 0]
+    if len(pos) < 2 or len(neg) < 2:
+        return idx, idx, False
+    rng.shuffle(pos)
+    rng.shuffle(neg)
+    ep = max(1, len(pos) // 2)
+    en = max(1, len(neg) // 2)
+    es = np.concatenate([pos[:ep], neg[:en]])
+    holdout = np.concatenate([pos[ep:], neg[en:]])
+    if (len(holdout) == 0 or len(np.unique(y[holdout])) < 2
+            or len(np.unique(y[es])) < 2):
+        return idx, idx, False
+    rng.shuffle(es)
+    rng.shuffle(holdout)
+    return es, holdout, True
+
+
 @dataclass
 class PoolRespectModel:
     """LightGBM + isotonic calibration + bucket shrinkage. predict() returns calibrated P(respect)."""
@@ -175,6 +203,7 @@ class PoolRespectModel:
     train_logloss: float = 0.0
     train_auc: float = 0.0
     base_rate: float = 0.0
+    has_calibration_holdout: bool = True
     validation_method: str = "random_stratified"
     regularization_preset: str = "default"
     hyperparameters: Dict = field(default_factory=dict)
@@ -234,38 +263,50 @@ class PoolRespectModel:
             rng.shuffle(val_idx); rng.shuffle(train_idx)
 
         X_tr, y_tr = X.iloc[train_idx].values, y[train_idx]
-        X_val, y_val = X.iloc[val_idx].values, y[val_idx]
+        # Split the validation fold so the booster's best_iteration AND the isotonic map are fit
+        # on one half (early-stop/calibration), and ALL reported val_* metrics come from the other
+        # (a pure holdout). Fitting isotonic on the early-stopping rows and then scoring those same
+        # rows is optimistic; the holdout makes the reported calibration metrics honest.
+        es_idx, holdout_idx, has_holdout = _stratified_halves(val_idx, y, rng)
+        self.has_calibration_holdout = bool(has_holdout)
+
+        X_es, y_es = X.iloc[es_idx].values, y[es_idx]
+        X_hold, y_hold = X.iloc[holdout_idx].values, y[holdout_idx]
 
         params = _lgb_params(seed, regularization_preset)
         self.hyperparameters = dict(params)
         dtrain = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
-        dval = lgb.Dataset(X_val, label=y_val, reference=dtrain, feature_name=self.feature_names)
+        des = lgb.Dataset(X_es, label=y_es, reference=dtrain, feature_name=self.feature_names)
 
         self._gbm = lgb.train(
-            params, dtrain, num_boost_round=400, valid_sets=[dval], valid_names=["val"],
+            params, dtrain, num_boost_round=400, valid_sets=[des], valid_names=["val"],
             callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False),
                        lgb.log_evaluation(0)],
         )
 
-        # Isotonic calibration on validation predictions
-        val_raw = self._gbm.predict(X_val, num_iteration=self._gbm.best_iteration)
+        # Isotonic calibration on the early-stop set (a monotone map — a tuning step).
+        es_raw = self._gbm.predict(X_es, num_iteration=self._gbm.best_iteration)
         self._iso = IsotonicRegression(out_of_bounds="clip")
-        self._iso.fit(val_raw, y_val)
-        val_calib = self._iso.transform(val_raw)
-        train_raw = self._gbm.predict(X_tr, num_iteration=self._gbm.best_iteration)
-        train_calib = self._iso.transform(train_raw)
+        self._iso.fit(es_raw, y_es)
+
+        # Honest calibrated metrics on the holdout rows (never used for booster fit, early
+        # stopping, or isotonic). If no clean holdout existed, these fall back to the es rows.
+        hold_calib = self._iso.transform(
+            self._gbm.predict(X_hold, num_iteration=self._gbm.best_iteration))
+        train_calib = self._iso.transform(
+            self._gbm.predict(X_tr, num_iteration=self._gbm.best_iteration))
 
         self.train_n = int(len(train_idx))
-        self.val_n = int(len(val_idx))
-        self.validation_indices = [int(i) for i in val_idx]
+        self.val_n = int(len(holdout_idx))
+        self.validation_indices = [int(i) for i in holdout_idx]
         self.train_brier = float(brier_score_loss(y_tr, train_calib))
         self.train_logloss = float(log_loss(y_tr, np.clip(train_calib, 1e-6, 1 - 1e-6)))
         self.train_auc = float(roc_auc_score(y_tr, train_calib)) if len(set(y_tr)) > 1 else 0.0
-        self.val_brier = float(brier_score_loss(y_val, val_calib))
-        self.val_logloss = float(log_loss(y_val, np.clip(val_calib, 1e-6, 1 - 1e-6)))
+        self.val_brier = float(brier_score_loss(y_hold, hold_calib))
+        self.val_logloss = float(log_loss(y_hold, np.clip(hold_calib, 1e-6, 1 - 1e-6)))
         # AUC needs both classes present. The stratified split guarantees this, but the
         # purged/embargoed walk-forward split does not, so guard it (mirrors train_auc above).
-        self.val_auc = float(roc_auc_score(y_val, val_calib)) if len(set(y_val)) > 1 else 0.0
+        self.val_auc = float(roc_auc_score(y_hold, hold_calib)) if len(set(y_hold)) > 1 else 0.0
 
         # Bucket recalibration is fit by the caller (walkforward) after predict on the full OOS set
         # since it needs (bucket, predicted, actual) — see fit_bucket_calib below.
