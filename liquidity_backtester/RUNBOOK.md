@@ -1,8 +1,14 @@
 # End-to-End Runbook
 
 Full pipeline: setup → train → predict → SaaS feed → distribute. Run everything
-from the `liquidity_backtester/` directory. `PYTHONPATH=.` is required so the
-`liqpool`/`service` packages import.
+from the `liquidity_backtester/` directory (it is a subfolder of the repo, so
+`cd` into the repo first). `PYTHONPATH=.` is required so the `liqpool`/`service`
+packages import.
+
+> macOS note: use `python3` to create the venv (macOS has no bare `python`).
+> After that, every command below calls the venv's interpreter explicitly as
+> `.venv/bin/python`, so you do NOT need to `source .venv/bin/activate` — it
+> works the same in zsh, bash, and non-interactive shells.
 
 > NOTE: Steps 2–4 need the Indian market parquet data and produce a real model.
 > If you just want to see the SaaS feed work end-to-end with NO data/model, jump
@@ -13,16 +19,21 @@ from the `liquidity_backtester/` directory. `PYTHONPATH=.` is required so the
 ## 0. One-time setup
 
 ```bash
-cd liquidity_backtester
+# go to the liquidity_backtester folder inside the cloned repo, e.g. on Mac:
+#   cd ~/Projects/Project-freedom/liquidity_backtester
+# if unsure where it is:  find ~ -type d -name liquidity_backtester 2>/dev/null
+cd /path/to/Project-freedom/liquidity_backtester
 
-# virtualenv + core deps (model engine)
-python -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+# virtualenv with python3 (macOS/Linux)
+python3 -m venv .venv
+
+# install deps via the venv's own pip (no activation needed)
+.venv/bin/pip install -r requirements.txt
 
 # extra deps only needed to serve the HTTP API (not for file export)
-pip install -r service/requirements.txt
+.venv/bin/pip install -r service/requirements.txt
 ```
+
 
 ---
 
@@ -51,12 +62,17 @@ PYTHONPATH=. .venv/bin/python examples/multi_asset_run.py \
   --data-source parquet \
   --data-dir "$RESAMPLED_DIR" \
   --mode train \
+  --asset-workers 4 \
   --model-dir output_models/core25_latest \
   --out output_core25_train
 ```
 
-Produces `output_models/core25_latest/multi_asset_report.pkl` (+ `metadata.json`).
-This pickle is the IP — it stays server-side and is NEVER distributed.
+`--asset-workers` controls how many symbols train in parallel (default 4; 4–5 is
+the sweet spot on a 16GB machine, use 5 if you have more RAM/cores, 1 to
+disable). Each worker is pinned to 1 BLAS/LightGBM thread to avoid
+oversubscription. Produces `output_models/core25_latest/multi_asset_report.pkl`
+(+ `metadata.json`). This pickle is the IP — it stays server-side and is NEVER
+distributed.
 
 ---
 
@@ -85,7 +101,7 @@ Converts the raw predict outputs into the opaque, watermarked feed. Touches no
 model code. Run once per customer (watermark = customer id + date).
 
 ```bash
-PYTHONPATH=. python scripts/export_saas_feed.py \
+PYTHONPATH=. .venv/bin/python scripts/export_saas_feed.py \
   --raw output_core25_predict_latest \
   --customer acme-capital \
   --date 2026-05-29 \
@@ -135,7 +151,7 @@ prints a watermark + leak-guard proof. Use to demo the feed or hand a sample to
 a reviewer.
 
 ```bash
-PYTHONPATH=. python scripts/synthetic_smoke.py \
+PYTHONPATH=. .venv/bin/python scripts/synthetic_smoke.py \
   --out-dir /tmp/saas_smoke --customer reviewer --date 2026-05-29
 # -> /tmp/saas_smoke/saas_feed_reviewer_2026-05-29.{json,csv}
 ```
@@ -145,7 +161,7 @@ PYTHONPATH=. python scripts/synthetic_smoke.py \
 ## 8. Quality gates (run before committing / deploying)
 
 ```bash
-PYTHONPATH=. python -m pytest -q                              # full test suite
-python scripts/compliance_lint.py                            # CI gate (exit!=0 on hard hits)
-python scripts/compliance_lint.py --report docs/compliance_audit_report.md  # full audit
+PYTHONPATH=. .venv/bin/python -m pytest -q                   # full test suite
+.venv/bin/python scripts/compliance_lint.py                  # CI gate (exit!=0 on hard hits)
+.venv/bin/python scripts/compliance_lint.py --report docs/compliance_audit_report.md  # full audit
 ```
