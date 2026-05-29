@@ -130,17 +130,13 @@ def size_setup(setup: Dict, cfg: SizingConfig, account: AccountState,
                               block_reason=f"already {len(account.open_positions)} positions "
                                             f"open (cap {cfg.max_concurrent_positions})")
 
-    # 3. Sector concentration cap
-    sector_notional = sum(p["notional_inr"] for p in account.open_positions
-                           if p.get("sector") == sector)
-
-    # 4. Confidence multiplier
+    # 3. Confidence multiplier
     cmult = _confidence_multiplier(cfg, verdict, dir_tag)
     if cmult <= 0:
         return SizingDecision(0, 0.0, 0.0, 0.0, 0.0, blocked=True,
                               block_reason=f"verdict {verdict!r} not tradeable")
 
-    # 5. Compute risk-budget shares (NO cmult yet — applied at the end so it consistently
+    # 4. Compute risk-budget shares (NO cmult yet — applied at the end so it consistently
     # reduces size even when a hard cap is binding)
     shares = compute_shares(account.capital_inr, cfg.risk_per_trade_pct, stop_dist)
     if shares <= 0:
@@ -151,7 +147,7 @@ def size_setup(setup: Dict, cfg: SizingConfig, account: AccountState,
     leverage = max(cfg.leverage, 1.0)
     margin = notional / leverage
 
-    # 6. Sector concentration post-trade check — capped on MARGIN, not raw notional. With 5x
+    # 5. Sector concentration post-trade check — capped on MARGIN, not raw notional. With 5x
     # leverage, 40% margin cap = 200% notional exposure per sector, which is what users
     # actually want when they say "40% per sector".
     sector_margin = sum(p["notional_inr"] / leverage for p in account.open_positions
@@ -171,7 +167,7 @@ def size_setup(setup: Dict, cfg: SizingConfig, account: AccountState,
         notional = shares * entry
         margin = notional / leverage
 
-    # 7. Total-margin check — don't blow through the account's free margin.
+    # 6. Total-margin check — don't blow through the account's free margin.
     total_margin = sum(p["notional_inr"] / leverage for p in account.open_positions)
     total_margin_cap = account.capital_inr * (cfg.max_total_margin_pct / 100.0)
     if total_margin + margin > total_margin_cap:
@@ -188,7 +184,7 @@ def size_setup(setup: Dict, cfg: SizingConfig, account: AccountState,
         notional = shares * entry
         margin = notional / leverage
 
-    # 8. Apply confidence multiplier at the END — guarantees DIR_FIGHT / TRADE_CAUTIOUS trades
+    # 7. Apply confidence multiplier at the END — guarantees DIR_FIGHT / TRADE_CAUTIOUS trades
     # are smaller even when a hard cap was binding before this point.
     if cmult < 1.0:
         shares = max(0, int(shares * cmult))

@@ -126,7 +126,8 @@ class PoolState:
 
     # Tracking through touch window
     max_close_through_atr_since_touch: float = 0.0
-    first_strong_break_idx: Optional[int] = None     # bar idx (in window) of first strong break
+    first_strong_break_idx: Optional[int] = None     # bars_since_touch at first strong break
+    sweep_extreme_price: Optional[float] = None      # most extreme close-through price seen
     confirmed_strong_break_bars: int = 0
     close_through_streak: int = 0
 
@@ -144,18 +145,20 @@ class PoolState:
 
 
 def make_pool_state(pool: Pool, symbol: str, sector: str, q: float, t_today: float,
-                     ev: float, dir_tag: str, current_price: float, atr_proxy: float
-                     ) -> PoolState:
+                     ev: float, dir_tag: str, current_price: float, atr_proxy: float,
+                     stop_buffer_atr: float = 0.7) -> PoolState:
     """Build a PoolState from a Pool + the trade-plan inputs used in live_run.py.
-    The entry/stop/target follow the same rules used in live_run.py for consistency."""
+    The entry/stop/target follow the same rules used in live_run.py for consistency.
+    `stop_buffer_atr` parks the stop beyond the decisive-break distance so a swept-and-reclaimed
+    pool isn't stopped out during the sweep — keep it equal to live_run's STOP_BUFFER_ATR."""
     side = "buy" if pool.price_high < current_price else "sell"
     if side == "buy":
         entry = pool.price_high
-        stop = pool.price_low - 0.5 * atr_proxy
+        stop = pool.price_low - stop_buffer_atr * atr_proxy
         target = pool.price_high + 2 * atr_proxy
     else:
         entry = pool.price_low
-        stop = pool.price_high + 0.5 * atr_proxy
+        stop = pool.price_high + stop_buffer_atr * atr_proxy
         target = pool.price_low - 2 * atr_proxy
     return PoolState(
         pool_id=f"{symbol}@{pool.formed_at}",
@@ -211,12 +214,19 @@ def _rejection_wick_atr(side: str, bar_low: float, bar_high: float, bar_close: f
             return 0.0
         if bar_close <= pool_high:               # closed back inside or below — not rejection
             return 0.0
+        # Body must close back NEAR the zone edge, not run away above it. A bar that closes
+        # far above pool_high is a breakout, not a rejection-off-support — and entering at
+        # pool_high would mean chasing far below the close.
+        if (bar_close - pool_high) > max_close_through_atr * a:
+            return 0.0
         wick = pool_high - bar_low
         return wick / a if wick > 0 else 0.0
     else:
         if bar_high < pool_low:
             return 0.0
         if bar_close >= pool_low:
+            return 0.0
+        if (pool_low - bar_close) > max_close_through_atr * a:
             return 0.0
         wick = bar_high - pool_low
         return wick / a if wick > 0 else 0.0
@@ -273,28 +283,49 @@ def advance_one_bar(state: PoolState, bar_ts: pd.Timestamp, bar_o: float, bar_h:
             state.close_through_streak = 0
         if ct > state.max_close_through_atr_since_touch:
             state.max_close_through_atr_since_touch = ct
+        # Record the FIRST strong close-through bar and the most extreme close-through price,
+        # so the reclaim window is measured from the break (not from the touch) and a reclaim
+        # entry can be protected with a stop beyond the actual sweep extreme.
+        if ct >= cfg.failure_close_through_atr:
+            if state.first_strong_break_idx is None:
+                state.first_strong_break_idx = state.bars_since_touch
+            if state.side == "buy":
+                state.sweep_extreme_price = (bar_c if state.sweep_extreme_price is None
+                                             else min(state.sweep_extreme_price, bar_c))
+            else:
+                state.sweep_extreme_price = (bar_c if state.sweep_extreme_price is None
+                                             else max(state.sweep_extreme_price, bar_c))
 
         # Check 2: SWEEP + RECLAIM
-        # First a close-through occurred (max_close_through >= failure threshold), then a
-        # bar's close is back INSIDE the pool zone.
-        if state.max_close_through_atr_since_touch >= cfg.failure_close_through_atr:
+        # A strong close-through occurred, then a bar closes back INSIDE the zone within
+        # reclaim_within_bars OF THE BREAK (measured from the recorded first-break bar).
+        if state.first_strong_break_idx is not None:
             inside = state.pool_low <= bar_c <= state.pool_high
-            if inside:
-                bars_since_first_break = state.bars_since_touch  # approximate
-                if bars_since_first_break <= cfg.reclaim_within_bars + 5:
-                    ev = TriggerEvent(
-                        timestamp=str(bar_ts), symbol=state.symbol, pool_id=state.pool_id,
-                        trigger_type="sweep_and_reclaim", side=state.side,
-                        entry_price=bar_c,    # enter at the reclaim close
-                        stop=state.stop_price, target=state.target_price,
-                        q=state.q, t_today=state.t_today, ev=state.ev,
-                        reaction_atr=state.max_close_through_atr_since_touch,
-                        reaction_bars=state.bars_since_touch,
-                        extras={"max_through_atr": float(state.max_close_through_atr_since_touch)},
-                    )
-                    state.state = "TRIGGERED"
-                    state.trigger = asdict(ev)
-                    return ev
+            bars_since_break = state.bars_since_touch - state.first_strong_break_idx
+            if inside and 0 < bars_since_break <= cfg.reclaim_within_bars:
+                # Protect the reclaim entry with a stop just beyond the sweep extreme.
+                if state.side == "buy":
+                    sweep_stop = (state.sweep_extreme_price - 0.25 * atr_val
+                                  if state.sweep_extreme_price is not None else state.stop_price)
+                    reclaim_stop = min(state.stop_price, sweep_stop)
+                else:
+                    sweep_stop = (state.sweep_extreme_price + 0.25 * atr_val
+                                  if state.sweep_extreme_price is not None else state.stop_price)
+                    reclaim_stop = max(state.stop_price, sweep_stop)
+                ev = TriggerEvent(
+                    timestamp=str(bar_ts), symbol=state.symbol, pool_id=state.pool_id,
+                    trigger_type="sweep_and_reclaim", side=state.side,
+                    entry_price=bar_c,    # enter at the reclaim close
+                    stop=float(reclaim_stop), target=state.target_price,
+                    q=state.q, t_today=state.t_today, ev=state.ev,
+                    reaction_atr=state.max_close_through_atr_since_touch,
+                    reaction_bars=state.bars_since_touch,
+                    extras={"max_through_atr": float(state.max_close_through_atr_since_touch),
+                            "bars_since_break": int(bars_since_break)},
+                )
+                state.state = "TRIGGERED"
+                state.trigger = asdict(ev)
+                return ev
 
         # Check 3: BREAKDOWN (failure)
         # Need failure_confirm_bars consecutive close-throughs at >= failure_close_through_atr
@@ -437,9 +468,9 @@ def run_live_loop(engine: EventDrivenEngine, fetcher: DataFetcher,
     `max_iterations`. `on_trigger` is called for each TriggerEvent fired.
 
     The fetcher is plug-and-play: yfinance, Kite Connect, or any source returning a DataFrame
-    of 5m bars with open/high/low/close columns. Each fetch returns ALL recent bars; the
-    engine de-duplicates by checking each state's `bars_since_touch` counter and processing
-    only bars after the last-seen timestamp."""
+    of 5m bars with open/high/low/close columns. Each fetch returns ALL recent bars; we drop
+    the final (still-forming) bar and only advance the state machine on CLOSED bars after the
+    last one already processed (tracked per symbol in `last_processed`)."""
     iteration = 0
     last_processed: Dict[str, pd.Timestamp] = {}
 
@@ -459,8 +490,13 @@ def run_live_loop(engine: EventDrivenEngine, fetcher: DataFetcher,
             df = fetcher(sym)
             if df is None or df.empty:
                 continue
+            # The most recent bar from an intraday feed is the in-progress candle. Acting on it
+            # would trigger on incomplete data, so process only fully-closed bars (drop the last).
+            closed = df.iloc[:-1] if len(df) > 1 else df.iloc[:0]
+            if closed.empty:
+                continue
             last_ts = last_processed.get(sym)
-            new_bars = df.loc[df.index > last_ts] if last_ts is not None else df
+            new_bars = closed.loc[closed.index > last_ts] if last_ts is not None else closed
             if new_bars.empty:
                 continue
             try:
@@ -470,7 +506,9 @@ def run_live_loop(engine: EventDrivenEngine, fetcher: DataFetcher,
             events = engine.process_bars(sym, new_bars, atr_series)
             for ev in events:
                 on_trigger(ev)
-            last_processed[sym] = df.index[-1]
+            # Advance to the last CLOSED bar processed (NOT the dropped forming bar, so it gets
+            # picked up once it closes on a later poll).
+            last_processed[sym] = new_bars.index[-1]
 
         iteration += 1
         time.sleep(engine.cfg.poll_interval_sec)

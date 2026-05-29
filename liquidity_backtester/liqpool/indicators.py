@@ -9,7 +9,12 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     prev_c = np.concatenate([[c[0]], c[:-1]])
     tr = np.maximum.reduce([h - l, np.abs(h - prev_c), np.abs(l - prev_c)])
     s = pd.Series(tr, index=df.index)
-    return s.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    wilder = s.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    # Warm-up (first `period-1` bars) is NaN under min_periods=period. Fill it with the CAUSAL
+    # expanding mean of TR rather than back-filling from the first formed value — back-filling
+    # would copy a future ATR into the earliest bars (a look-ahead leak). Callers that .bfill()
+    # this series then become no-ops, which is the intent.
+    return wilder.fillna(s.expanding(min_periods=1).mean())
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:

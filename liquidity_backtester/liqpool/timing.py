@@ -186,7 +186,9 @@ class Snapshot:
     n_future_bars: int = 0
 
     def direction_label(self, horizon: int) -> Optional[int]:
-        """1 if max_up_atr >= max_dn_atr over `horizon` future bars; None if not enough data."""
+        """1 if up-excursion exceeds down-excursion over `horizon` future bars, 0 if down wins.
+        None if not enough data OR the move is an exact tie (e.g. a flat window) — labelling a
+        tie as 'up' (the old behaviour) injected a systematic upward bias from flat snapshots."""
         h = min(horizon, self.n_future_bars)
         if h < 5:
             return None
@@ -194,7 +196,9 @@ class Snapshot:
         min_l = self.future_min_low[h - 1]
         max_up = max_h - self.close
         max_dn = self.close - min_l
-        return 1 if max_up >= max_dn else 0
+        if max_up == max_dn:
+            return None
+        return 1 if max_up > max_dn else 0
 
     def max_up_atr(self, horizon: int) -> float:
         h = min(horizon, self.n_future_bars)
@@ -221,11 +225,17 @@ class Snapshot:
 def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[PoolResult],
                        featurizer: StateFeaturizer,
                        window_start: pd.Timestamp, window_end: pd.Timestamp,
-                       sample_every: int, max_horizon: int) -> List[Snapshot]:
+                       sample_every: int, max_horizon: int,
+                       clip_future_to_window: bool = True) -> List[Snapshot]:
     """Build snapshots at every `sample_every` bar in [window_start, window_end].
 
-    Each snapshot stores the full future trajectory (up to max_horizon bars) AND the per-pool
+    Each snapshot stores the future trajectory (up to max_horizon bars) AND the per-pool
     bars-to-touch, so we can derive labels for any horizon h <= max_horizon downstream.
+
+    With `clip_future_to_window=True` (default), a snapshot's future trajectory is capped at
+    `window_end`. This is what keeps the walk-forward honest: without it, a TRAIN snapshot near
+    the end of the train window would derive its label from bars that fall inside the OOS test
+    window, leaking test-period price action into training (and inflating OOS metrics).
     """
     idx = df_base.index
     n = len(idx)
@@ -234,8 +244,8 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
     c_arr = df_base["close"].values
 
     j_start = int(np.searchsorted(idx.values, np.datetime64(window_start), side="left"))
-    j_end = int(np.searchsorted(idx.values, np.datetime64(window_end), side="right")) - 1
-    j_end = min(j_end, n - 5)
+    we_pos = int(np.searchsorted(idx.values, np.datetime64(window_end), side="right")) - 1
+    j_end = min(we_pos, n - 5)
 
     snaps: List[Snapshot] = []
     for j in range(max(j_start, 80), j_end + 1, sample_every):
@@ -244,6 +254,8 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
         a_T = max(float(featurizer.atr_14.iloc[j]), 1e-9)
 
         n_future = min(max_horizon, n - 1 - j)
+        if clip_future_to_window:
+            n_future = min(n_future, we_pos - j)
         if n_future < 5:
             continue
 
@@ -467,8 +479,8 @@ _POOL_FEATURE_NAMES = ["distance_atr", "side_above",
 
 
 def _pool_features_for_snapshot(pool: Pool, dist_atr: float, side: str,
-                                 quality_pred: float, base_period_seconds: float = 300.0
-                                 ) -> Dict[str, float]:
+                                 quality_pred: float, base_period_seconds: float = 300.0,
+                                 atr_val: float = 1.0) -> Dict[str, float]:
     earliest = min((c.ts for c in pool.contributors), default=pool.formed_at)
     age_bars = (pool.available_at - earliest).total_seconds() / base_period_seconds \
                if pool.available_at >= earliest else 0.0
@@ -477,7 +489,9 @@ def _pool_features_for_snapshot(pool: Pool, dist_atr: float, side: str,
         "side_above": 1.0 if side == "above" else 0.0,
         "pool_quality": float(quality_pred),
         "pool_score": float(pool.score),
-        "pool_width_atr": float(pool.width),
+        # ATR-normalised so width is comparable across assets of different price levels
+        # (a raw price width confounds the feature with the stock's price scale).
+        "pool_width_atr": float(pool.width / max(atr_val, 1e-9)),
         "pool_n_tfs": float(len(set(pool.tfs))),
         "pool_n_contributors": float(len(pool.contributors)),
         "pool_age_at_avail_bars": float(age_bars),
@@ -512,7 +526,7 @@ class ProximityModel:
                 pool = pools[pi]
                 pool_feat = _pool_features_for_snapshot(
                     pool, dist, side, float(quality_preds[pi]),
-                    base_period_seconds=self.base_period_seconds,
+                    base_period_seconds=self.base_period_seconds, atr_val=s.atr_val,
                 )
                 rows.append({**s.state, **pool_feat})
                 labels.append(touched)
@@ -637,10 +651,11 @@ class ProximityModel:
         return np.clip(self._iso.transform(raw), 0.0, 1.0)
 
     def predict_one(self, pool: Pool, dist_atr: float, side: str,
-                    state: Dict[str, float], quality_pred: float) -> float:
+                    state: Dict[str, float], quality_pred: float,
+                    atr_val: float = 1.0) -> float:
         pool_feat = _pool_features_for_snapshot(
             pool, dist_atr, side, quality_pred,
-            base_period_seconds=self.base_period_seconds,
+            base_period_seconds=self.base_period_seconds, atr_val=atr_val,
         )
         merged = {**state, **pool_feat}
         X = pd.DataFrame([merged], columns=self.feature_names).fillna(0.0).values
@@ -734,7 +749,7 @@ def evaluate_timing(snapshots: List[Snapshot], pools: List[Pool], results: List[
                 pool = pools[pi]
                 pf = _pool_features_for_snapshot(
                     pool, dist, side, float(quality_preds[pi]),
-                    base_period_seconds=pm.base_period_seconds,
+                    base_period_seconds=pm.base_period_seconds, atr_val=s.atr_val,
                 )
                 rows.append({**s.state, **pf})
                 labels.append(touched)

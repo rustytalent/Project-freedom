@@ -31,6 +31,8 @@ import os
 from pathlib import Path
 import pandas as pd
 
+import pandas as pd
+
 from liqpool import Config
 from liqpool.multi_asset import run_multi_asset, print_multi_asset_summary
 from liqpool.featurize import MultiAssetFeaturizer
@@ -129,6 +131,10 @@ def cmd_morning(args):
     TRADEABLE_T_TODAY = args.min_t
     TRADEABLE_Q = args.min_q
     DIR_ALIGN_MARGIN = 0.10
+    # Stop must sit BEYOND the decisive-break distance the tester uses, otherwise a
+    # `swept_and_reclaimed` outcome (which the backtest counts as a respect/win) would actually
+    # stop us out during the sweep before the reclaim. Park it just past strong_break_atr.
+    STOP_BUFFER_ATR = cfg.strong_break_atr + 0.2
 
     # Interpretation inputs — precompute once for the whole run.
     asset_dfs_now = {s: ad.base_df for s, ad in report.assets.items()}
@@ -336,15 +342,17 @@ def cmd_morning(args):
         p = c["pool"]; a = c["atr_proxy"]
         if c["side"] == "below":      # BUY at pool high, stop below pool low, target above
             entry = p.price_high
-            stop = p.price_low - 0.5 * a
+            stop = p.price_low - STOP_BUFFER_ATR * a
             target = p.price_high + 2 * a
             order_side = "BUY"
         else:                           # SELL at pool low, stop above pool high, target below
             entry = p.price_low
-            stop = p.price_high + 0.5 * a
+            stop = p.price_high + STOP_BUFFER_ATR * a
             target = p.price_low - 2 * a
             order_side = "SELL"
 
+        # NOTE: c["ev"] is a unitless RANKING SCORE (a product of probabilities and multipliers),
+        # NOT an expected value. The genuine expectancy is `ev_r` below, in R units.
         verdict = "TRADE_HIGH_CONFIDENCE" if c["ev"] >= 0.20 else "TRADE_CAUTIOUS"
         setup_dict = {
             "symbol": c["symbol"], "side": c["side"], "entry": entry, "stop": stop,
@@ -352,17 +360,22 @@ def cmd_morning(args):
         }
         decision = size_setup(setup_dict, sizing_cfg, account, verdict=verdict)
 
+        # True expected value in R-multiples: win pays reward_R, a break loses 1R.
+        reward_r = abs(target - entry) / max(abs(entry - stop), 1e-9)
+        ev_r = c["q"] * reward_r - (1.0 - c["q"]) * 1.0
+
         print(f"\n  #{i} [{c['symbol']:<14}] {c['sector']:<9} {order_side}  pool "
               f"₹{p.price_low:.2f}-{p.price_high:.2f}  "
-              f"Q={c['q']:.0%} T_today={c['t_today']:.0%} EV={c['ev']:.0%} "
+              f"Q={c['q']:.0%} T_today={c['t_today']:.0%} SCORE={c['ev']:.0%} "
               f"({c['dir_tag']}, {verdict})")
         print(f"     entry=₹{entry:.2f}  stop=₹{stop:.2f}  target=₹{target:.2f}  "
-              f"R:R={(abs(target-entry)/abs(entry-stop)):.1f}:1")
+              f"R:R={reward_r:.1f}:1  EV≈{ev_r:+.2f}R  "
+              f"(Q×{reward_r:.1f}R − (1−Q)×1R)")
         print(format_sizing_line(setup_dict, decision))
 
         # ---- Interpretation card: WHY does the model say what it says? ----
-        # EV chain breakdown
-        print(f"     EV chain: Q={c['q']:.2f} × T={c['t_today']:.2f} × "
+        # Score chain breakdown (ranking score, not expected value — see EV≈..R above)
+        print(f"     Score chain: Q={c['q']:.2f} × T={c['t_today']:.2f} × "
               f"dir={c['dir_mult']:.2f} × reliab={c['reliability_mult']:.2f} "
               f"× sector={c['sector_mult']:.2f} = {c['ev']:.0%}")
         # Reliability badge
@@ -476,6 +489,7 @@ def cmd_morning(args):
             pool=c["pool"], symbol=c["symbol"], sector=c["sector"],
             q=c["q"], t_today=c["t_today"], ev=c["ev"], dir_tag=c["dir_tag"],
             current_price=c["current"], atr_proxy=c["atr_proxy"],
+            stop_buffer_atr=STOP_BUFFER_ATR,
         )
         engine.arm(st)
     engine.save(armed_path)

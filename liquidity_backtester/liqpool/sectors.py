@@ -30,13 +30,15 @@ SECTOR_MAP: Dict[str, str] = {
     "IDFCFIRSTB.NS": "BANKING",
 
     # ─── NBFC / financial services ───────────────────────────────────
+    # NBFCs and insurers are NOT banks — separating them keeps the sector-concentration cap and
+    # the sector-momentum signal meaningful (a basket of "banks" shouldn't silently include them).
     "BAJFINANCE.NS": "NBFC",
     "BAJAJFINSV.NS": "NBFC",
     "CHOLAFIN.NS":   "NBFC",
     "SHRIRAMFIN.NS": "NBFC",
     "SBICARD.NS":    "NBFC",
-    "SBILIFE.NS":    "BANKING",
-    "HDFCLIFE.NS":   "BANKING",
+    "SBILIFE.NS":    "INSURANCE",
+    "HDFCLIFE.NS":   "INSURANCE",
 
     # ─── IT / technology services ─────────────────────────────────────
     "TCS.NS":      "IT",
@@ -237,23 +239,32 @@ def detect_rotation(sector_metrics: Dict[str, Dict]) -> Dict:
 
     sectors = list(sector_metrics.keys())
     n = len(sectors)
+
+    # The "baseline" trend must EXCLUDE the recent 5d, otherwise it overlaps the recent window
+    # (ret_60d contains ret_5d) and the divergence signal is muddied. prior ≈ the 5d→60d segment.
+    def _prior_return(s: str) -> float:
+        r5 = sector_metrics[s].get("ret_5d", 0.0)
+        r60 = sector_metrics[s].get("ret_60d", 0.0)
+        return (1.0 + r60) / (1.0 + r5) - 1.0 if (1.0 + r5) != 0 else r60
+
     ranked_5d = sorted(sectors, key=lambda s: -sector_metrics[s]["ret_5d"])
     ranked_60d = sorted(sectors, key=lambda s: -sector_metrics[s]["ret_60d"])
+    ranked_prior = sorted(sectors, key=lambda s: -_prior_return(s))
 
     pos_5d = {s: i for i, s in enumerate(ranked_5d)}
-    pos_60d = {s: i for i, s in enumerate(ranked_60d)}
+    pos_prior = {s: i for i, s in enumerate(ranked_prior)}
 
-    # A sector "rotated in" if its 5d rank is meaningfully better than its 60d rank.
-    # Threshold: rank improvement of >= n/3 positions (e.g., went from 6th to 2nd of 6).
+    # A sector "rotated in" if its recent (5d) rank is meaningfully better than its prior-trend
+    # rank. Threshold: rank improvement of >= n/3 positions (e.g., went from 6th to 2nd of 6).
     threshold = max(1, n // 3)
     rotation_in = [s for s in sectors
-                    if pos_60d[s] - pos_5d[s] >= threshold]
+                    if pos_prior[s] - pos_5d[s] >= threshold]
     rotation_out = [s for s in sectors
-                     if pos_5d[s] - pos_60d[s] >= threshold]
+                     if pos_5d[s] - pos_prior[s] >= threshold]
 
     # Sort by magnitude of rotation
-    rotation_in.sort(key=lambda s: -(pos_60d[s] - pos_5d[s]))
-    rotation_out.sort(key=lambda s: -(pos_5d[s] - pos_60d[s]))
+    rotation_in.sort(key=lambda s: -(pos_prior[s] - pos_5d[s]))
+    rotation_out.sort(key=lambda s: -(pos_5d[s] - pos_prior[s]))
 
     # Narrative
     leader = ranked_5d[0]

@@ -797,24 +797,31 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                 global_quality.extend(a_quality)
 
                 state_feat = StateFeaturizer(ad.base_df)
+                # Train snapshots once over the largest (final) expanding train window — nested
+                # per-fold windows would duplicate early-history snapshots. Future is clipped at
+                # the train-window end so no label leaks into OOS. OOS test windows are
+                # non-overlapping, so we union them per fold.
+                first_train_start = min(fr.train_start for fr in wf.folds)
+                last_train_end = max(fr.train_end for fr in wf.folds)
+                tr = generate_snapshots(ad.base_df, a_pools, a_results, state_feat,
+                                         window_start=first_train_start,
+                                         window_end=last_train_end,
+                                         sample_every=sample_every,
+                                         max_horizon=MAX_HORIZON)
+                os_ = []
                 for fr in wf.folds:
-                    tr = generate_snapshots(ad.base_df, a_pools, a_results, state_feat,
-                                             window_start=fr.train_start,
-                                             window_end=fr.train_end,
-                                             sample_every=sample_every,
-                                             max_horizon=MAX_HORIZON)
-                    os_ = generate_snapshots(ad.base_df, a_pools, a_results, state_feat,
-                                              window_start=fr.test_start,
-                                              window_end=fr.test_end,
-                                              sample_every=sample_every,
-                                              max_horizon=MAX_HORIZON)
-                    # Remap pi → global index so all snapshots share one pool indexing.
-                    for snap_collection in (tr, os_):
-                        for snap in snap_collection:
-                            snap.pool_touches = [(pi + offset, bt, d, s)
-                                                  for (pi, bt, d, s) in snap.pool_touches]
-                    all_train_snaps.extend(tr)
-                    all_oos_snaps.extend(os_)
+                    os_.extend(generate_snapshots(ad.base_df, a_pools, a_results, state_feat,
+                                                   window_start=fr.test_start,
+                                                   window_end=fr.test_end,
+                                                   sample_every=sample_every,
+                                                   max_horizon=MAX_HORIZON))
+                # Remap pi → global index so all snapshots share one pool indexing.
+                for snap_collection in (tr, os_):
+                    for snap in snap_collection:
+                        snap.pool_touches = [(pi + offset, bt, d, s)
+                                              for (pi, bt, d, s) in snap.pool_touches]
+                all_train_snaps.extend(tr)
+                all_oos_snaps.extend(os_)
 
             global_quality_arr = np.asarray(global_quality)
 
@@ -868,7 +875,7 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
     print(f"  Pooled OOS broad:       {report.pooled_oos_respect:.1%}   "
           f"Wilson CI {report.pooled_oos_ci_wilson[0]:.1%}–"
           f"{report.pooled_oos_ci_wilson[1]:.1%}", file=file)
-    print(f"  Pooled OOS broad:       {report.pooled_oos_respect:.1%}   "
+    print(f"  {'':<22}  "
           f"Boot   CI {report.pooled_oos_ci_bootstrap[0]:.1%}–"
           f"{report.pooled_oos_ci_bootstrap[1]:.1%}", file=file)
     print(f"  Pooled OOS strict:      {report.pooled_oos_strict:.1%}", file=file)

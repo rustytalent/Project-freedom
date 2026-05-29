@@ -90,7 +90,10 @@ def _synthetic(symbol: str, interval: str, n_bars: int = 4000, seed: int = 42) -
     Starting price is picked by a tiny symbol→price heuristic so the chart looks plausible for
     that asset (e.g. HDFCBANK ≈ ₹1800). This is only used when no real data source is reachable.
     """
-    rng = np.random.default_rng(abs(hash(symbol)) % (2**32) ^ seed)
+    # Stable per-symbol seed via md5 — Python's builtin hash() is salted per process
+    # (PYTHONHASHSEED), so using it here would make "synthetic" data non-reproducible across runs.
+    sym_hash = int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng((sym_hash % (2**32)) ^ seed)
     freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "60m": "60min",
                 "1h": "60min", "1d": "1D", "1D": "1D"}
     freq = freq_map.get(interval, "5min")
@@ -148,9 +151,11 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
         if df is not None and not df.empty:
             print(f"[data] using {bo_symbol} (BSE) data in place of {symbol}")
 
+    used_synthetic = False
     if (df is None or df.empty) and allow_synthetic:
         print(f"[data] using synthetic data for {symbol} {interval} (yfinance unavailable or empty)")
         df = _synthetic(symbol, interval)
+        used_synthetic = True
 
     if df is None or df.empty:
         raise RuntimeError(f"No data for {symbol} @ {interval}")
@@ -158,7 +163,10 @@ def fetch(symbol: str, interval: str = "5m", period: str | None = "60d",
     # Data quality validation — log + drop bars with broken OHLC, mark short series.
     df = _validate_ohlcv(df, symbol, timeframe=interval)
 
-    df.to_parquet(fp)
+    # Never cache synthetic fallback data: it would shadow real data on the next run once the
+    # network is back, and silently feed random-walk prices into backtests.
+    if not used_synthetic:
+        df.to_parquet(fp)
     return df
 
 

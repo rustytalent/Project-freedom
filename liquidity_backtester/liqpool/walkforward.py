@@ -200,12 +200,16 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
         report.oos_pools.extend(p for p, _ in oos_pairs)
         report.oos_results.extend(r for _, r in oos_pairs)
 
-        # Also collect TRAIN-window pairs to use as ML training data later. These are pools whose
+        # Collect TRAIN-window pairs to use as ML training data later. These are pools whose
         # outcome was determined by data inside this fold's train window only (no leak into test).
+        # We keep ONLY the LAST fold's train set (the largest expanding window). Accumulating
+        # across folds would over-count early-history pools — they fall inside every fold's
+        # train window — biasing the model toward early regimes and putting near-duplicate rows
+        # on both sides of the ML model's internal train/val split.
         train_pairs = [(p, r) for p, r in zip(pools, results)
                         if _in_window(p, tr_s, tr_safe_end)]
-        report.train_pools_for_ml.extend(p for p, _ in train_pairs)
-        report.train_results_for_ml.extend(r for _, r in train_pairs)
+        report.train_pools_for_ml = [p for p, _ in train_pairs]
+        report.train_results_for_ml = [r for _, r in train_pairs]
 
         oos_outs = [1 if r.is_respect else 0 for r in oos_kept if r.is_tested]
         ci_lo, ci_hi = wilson_score_interval(sum(oos_outs), len(oos_outs), ci=0.90)
@@ -343,17 +347,22 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             if base_period_seconds <= 0:
                 base_period_seconds = 300.0
 
-            train_snaps: List = []
+            # Train snapshots: generate ONCE over the largest (final) expanding train window.
+            # Per-fold generation over nested windows would duplicate early-history snapshots in
+            # every fold. The future trajectory is clipped at the train-window end so no label
+            # leaks into the OOS slice. OOS test windows are non-overlapping, so we just union them.
+            first_train_start = min(fr.train_start for fr in report.folds)
+            last_train_end = max(fr.train_end for fr in report.folds)
+            train_snaps: List = generate_snapshots(
+                base, unified_pools, unified_results, state_feat,
+                window_start=first_train_start, window_end=last_train_end,
+                sample_every=sample_every, max_horizon=MAX_HORIZON)
             oos_snaps: List = []
             for fr in report.folds:
-                tr = generate_snapshots(base, unified_pools, unified_results, state_feat,
-                                         window_start=fr.train_start, window_end=fr.train_end,
-                                         sample_every=sample_every, max_horizon=MAX_HORIZON)
-                os_ = generate_snapshots(base, unified_pools, unified_results, state_feat,
-                                          window_start=fr.test_start, window_end=fr.test_end,
-                                          sample_every=sample_every, max_horizon=MAX_HORIZON)
-                train_snaps.extend(tr)
-                oos_snaps.extend(os_)
+                oos_snaps.extend(generate_snapshots(
+                    base, unified_pools, unified_results, state_feat,
+                    window_start=fr.test_start, window_end=fr.test_end,
+                    sample_every=sample_every, max_horizon=MAX_HORIZON))
 
             if len(train_snaps) >= 30:
                 try:
@@ -414,7 +423,7 @@ def print_report(report: WalkForwardReport, file=None) -> None:
     print(f"  Respect (broad):         {report.oos_respect_pooled:.1%}  "
           f"  Wilson 90% CI: {report.oos_respect_ci_wilson[0]:.1%} – "
           f"{report.oos_respect_ci_wilson[1]:.1%}", file=file)
-    print(f"  Respect (broad):         {report.oos_respect_pooled:.1%}  "
+    print(f"  {'':<24}"
           f"  Boot   90% CI: {report.oos_respect_ci_bootstrap[0]:.1%} – "
           f"{report.oos_respect_ci_bootstrap[1]:.1%}", file=file)
     print(f"  Respect (strict):        {report.oos_respect_strict:.1%}  "

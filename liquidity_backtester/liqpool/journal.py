@@ -184,12 +184,13 @@ class TradeJournal:
     # ------------------------------------------------------------------
 
     def calibration_summary(self) -> Dict:
-        """Walk through alerts → fills → exits and compute:
+        """Walk through alerts → fills → exits and compute headline calibration stats:
           - n alerts, n trades taken, take-rate
-          - actual win rate by Q decile
-          - actual win rate by EV bucket
-          - average R-multiple
-        Returns a dict; empty if no trades yet.
+          - actual win rate + average R-multiple (over trades that HAVE an r_multiple)
+
+        Per-Q-decile calibration is intentionally omitted until exits carry the originating
+        alert_id: matching by timestamp proximity is unreliable and would produce misleading
+        calibration numbers. Returns a dict; partial info if there are no completed trades yet.
         """
         alerts = self.alerts_df()
         trades = self.trades_df()
@@ -197,20 +198,21 @@ class TradeJournal:
             return {"n_alerts": len(alerts), "n_trades": len(trades),
                     "summary": "not enough data yet"}
 
-        win_rate = float((trades["r_multiple"] > 0).mean()) if "r_multiple" in trades else None
-        avg_r = float(trades["r_multiple"].mean()) if "r_multiple" in trades else None
-
-        # Q-decile calibration (if alerts have q values)
-        q_calib = []
-        if "q" in alerts.columns:
-            # We need to match alerts to trades; for now use timestamp proximity per symbol.
-            # Lightweight join: take most-recent alert per symbol before each trade's entry.
-            # (This is approximate — full implementation could use explicit alert_id linkage.)
-            pass    # extend when we have real trade history
+        # Only score trades that actually have an r_multiple — a missing (None/NaN) value means
+        # the exit wasn't logged with one, NOT a loss, so it must be excluded from the win rate.
+        win_rate = avg_r = None
+        n_scored = 0
+        if "r_multiple" in trades.columns:
+            r = pd.to_numeric(trades["r_multiple"], errors="coerce").dropna()
+            n_scored = int(len(r))
+            if n_scored:
+                win_rate = float((r > 0).mean())
+                avg_r = float(r.mean())
 
         return {
             "n_alerts": int(len(alerts)),
             "n_trades": int(len(trades)),
+            "n_trades_scored": n_scored,
             "take_rate": float(len(trades) / len(alerts)) if len(alerts) else 0.0,
             "win_rate_actual": win_rate,
             "avg_r_multiple": avg_r,

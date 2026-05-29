@@ -160,9 +160,11 @@ class ZerodhaBroker:
             return OrderResult(sim_id, "simulated", dry_run=True,
                                 raw_response=order_summary)
 
-        # LIVE PLACEMENT — we use REGULAR order + auto-attach SL-M and LIMIT-target via
-        # two follow-up orders. (Kite removed CO/BO for most segments in 2020; this is the
-        # supported pattern now.)
+        # LIVE PLACEMENT — REGULAR entry order, then IMMEDIATELY attach a protective SL-M leg.
+        # A "bracket" must never leave a naked, unprotected position: if the stop leg can't be
+        # placed we cancel the entry and report a rejection. (Kite removed CO/BO for most
+        # segments in 2020; entry + follow-up SL-M is the supported pattern now.)
+        exit_side = "SELL" if side == "BUY" else "BUY"
         try:
             kite = self._conn()
 
@@ -179,18 +181,41 @@ class ZerodhaBroker:
             )
             entry_order_id = entry_resp if isinstance(entry_resp, str) else \
                               entry_resp.get("order_id") or ""
-
-            # NOTE: Stop-loss + target legs are typically placed AFTER the entry fills,
-            # to avoid orphan SL/target orders. For now we return the entry order ID and
-            # leave SL/target placement to the caller's monitor loop.
-            # A safer alternative is to use GTT (Good Till Triggered) for SL once filled.
-            return OrderResult(
-                entry_order_id, "submitted", dry_run=False,
-                raw_response={"entry_order_id": entry_order_id, **order_summary},
-            )
         except Exception as e:
-            return OrderResult("", "rejected", dry_run=False, error=str(e),
+            return OrderResult("", "rejected", dry_run=False, error=f"entry failed: {e}",
                                 raw_response=order_summary)
+
+        # Protective stop-loss leg (SL-M at the stop trigger, exit side).
+        try:
+            sl_resp = kite.place_order(
+                variety=self.config.variety,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=exit_side,
+                quantity=int(quantity),
+                product=self.config.product,
+                order_type="SL-M",
+                trigger_price=float(stop),
+            )
+            sl_order_id = sl_resp if isinstance(sl_resp, str) else sl_resp.get("order_id") or ""
+        except Exception as e:
+            # Could not protect the position — undo the entry so we never sit naked.
+            try:
+                kite.cancel_order(variety=self.config.variety, order_id=entry_order_id)
+                undo = f"entry {entry_order_id} cancelled"
+            except Exception as ce:
+                undo = f"WARNING: entry {entry_order_id} could NOT be cancelled: {ce}"
+            return OrderResult(entry_order_id, "rejected", dry_run=False,
+                                error=f"stop-loss leg failed ({e}); {undo}",
+                                raw_response={"entry_order_id": entry_order_id, **order_summary})
+
+        # NOTE: target is left to the caller's monitor loop (or a GTT) — the SL leg is the
+        # non-negotiable protection; the target is an optimisation.
+        return OrderResult(
+            entry_order_id, "submitted", dry_run=False,
+            raw_response={"entry_order_id": entry_order_id, "sl_order_id": sl_order_id,
+                          **order_summary},
+        )
 
     def place_stop_loss(self, *, tradingsymbol: str, side: str, quantity: int,
                          trigger_price: float, exchange: Optional[str] = None,

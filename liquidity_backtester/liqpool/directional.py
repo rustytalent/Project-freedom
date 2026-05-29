@@ -88,8 +88,9 @@ def decile_lift(preds: np.ndarray, labels: np.ndarray) -> Tuple[float, float, fl
         return (float(labels.mean()) if len(labels) else 0.0, 0.0, 0.0)
     order = np.argsort(preds)
     n = len(preds)
-    bottom = order[: n // 10]
-    top = order[-n // 10:]
+    k = max(1, n // 10)            # symmetric decile size for both ends
+    bottom = order[:k]
+    top = order[-k:]
     bot_rate = float(labels[bottom].mean())
     top_rate = float(labels[top].mean())
     lift = (top_rate / bot_rate) if bot_rate > 0 else float("inf")
