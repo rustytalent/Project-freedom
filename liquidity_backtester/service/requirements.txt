@@ -1,0 +1,6 @@
+# Optional — only needed to run the HTTP analytics feed (service/app.py).
+# The scoring/ingestion engine (liqpool/scoring.py, serving.py, ingest.py) has
+# no web dependency and is covered by the core requirements.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+httpx>=0.27   # for TestClient / smoke tests
