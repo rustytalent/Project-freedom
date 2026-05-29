@@ -501,7 +501,7 @@ def main():
     ap.add_argument("--mode", default="train", choices=("train", "predict"),
                     help="train fits/saves models; predict loads saved models and reads latest parquet")
     ap.add_argument("--model-dir", default="output_models/latest")
-    ap.add_argument("--asset-workers", type=int, default=1,
+    ap.add_argument("--asset-workers", type=int, default=4,
                     help="Number of symbols to process in parallel during train mode")
     ap.add_argument("--checkpoint-dir", default="output_checkpoints",
                     help="Per-symbol checkpoint directory for train mode")
