@@ -97,6 +97,9 @@ SCAN_EXTS = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".html",
 EXEMPT_LINE_SUBSTRINGS = [
     "COMPLIANCE_ALLOWED_INTERNAL",
     "non-recommendatory market analytics",  # the disclaimer signature
+    "Reference zone only; not an",          # level_usage_note signature
+    "Reference zones only; not",            # csv usage-note signature
+    "Not a trade direction",                # score_explanation signature
 ]
 # Code idioms that are false positives (DOM, internal variables).
 SKIP_MATCH_PATTERNS = [

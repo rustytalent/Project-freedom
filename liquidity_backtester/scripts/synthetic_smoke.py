@@ -90,8 +90,8 @@ def main() -> int:
     # Watermark proof: a second customer gets different G values, same ordering.
     feed_b = build_feed(str(raw_dir), args.customer + "-2", args.date)
     sym0 = feed["instruments"][0]["instrument"]
-    g_a = [o["G"] for o in feed["instruments"][0]["observations"]]
-    g_b = [o["G"] for o in feed_b["instruments"][0]["observations"]]
+    g_a = [o["feature_intensity_score"] for o in feed["instruments"][0]["observations"]]
+    g_b = [o["feature_intensity_score"] for o in feed_b["instruments"][0]["observations"]]
 
     print(f"[smoke] feed instruments={feed['instrument_count']} "
           f"observations={feed['observation_count']}")

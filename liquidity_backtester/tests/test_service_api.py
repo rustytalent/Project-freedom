@@ -33,10 +33,11 @@ def test_valid_key_returns_opaque_feed():
     assert r.status_code == 200
     body = r.json()
     assert body["instrument"] == "X.NS"
-    assert "not investment advice" in body["interpretation_note"].lower()
+    assert "not investment advice" in body["compliance_notice"]["notice"].lower()
     for rec in body["observations"]:
         assert set(rec.keys()) == set(PUBLIC_KEYS)
-        assert isinstance(rec["G"], int) and 0 <= rec["G"] <= 100
+        score = rec["feature_intensity_score"]
+        assert isinstance(score, int) and 0 <= score <= 100
 
 
 def test_rate_limit():

@@ -24,11 +24,11 @@ from typing import Protocol, Sequence
 
 from liqpool.ingest import RawFeedScorer  # noqa: F401  (re-exported for callers)
 from liqpool.scoring import (
-    ANALYTICS_TYPE,
+    FEED_ANALYTICS_TYPE,
     FEED_VERSION,
-    INTERPRETATION_NOTE,
     BlendWeights,
     InternalLevel,
+    compliance_notice,
     score_levels,
 )
 
@@ -56,13 +56,13 @@ def handle_levels_request(scorer: Scorer, *, symbol: str, date: str,
                                 weights=weights)
     as_of = levels[0].as_of if levels else date
     return {
-        "analytics_type": ANALYTICS_TYPE,
+        "analytics_type": FEED_ANALYTICS_TYPE,
         "instrument": symbol,
         "as_of": str(as_of),
         "feed_version": FEED_VERSION,
         "observation_count": len(observations),
         "observations": observations,
-        "interpretation_note": INTERPRETATION_NOTE,
+        "compliance_notice": compliance_notice(),
     }
 
 

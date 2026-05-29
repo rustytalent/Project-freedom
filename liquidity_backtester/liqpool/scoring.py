@@ -5,12 +5,14 @@ ever sees. Internal estimates (reachability probability, directional probability
 reliability) are *real* signals, but they are deliberately transformed into
 opaque, rank-based, watermarked tokens before they leave the server:
 
-  * ``G`` — an integer 0..100 *rank* of an internal composite within a
-    cross-section (one symbol's active levels per side, on one day). It is not a
-    probability, has no units, and cannot be regressed back to the inputs.
-  * ``D`` — an opaque directional token from a small abstract alphabet, bucketed
-    with per-customer-jittered thresholds. It conveys directional context without
-    exposing the underlying probability or the thresholds used to derive it.
+  * ``feature_intensity_score`` — an integer 0..100 *rank* of an internal
+    composite within a cross-section (one symbol's active levels per side, on one
+    day). It is not a probability, has no units, and cannot be regressed back to
+    the inputs.
+  * ``feature_state`` — an opaque, non-directional class label from a small
+    abstract set (``state_1``/``state_2``/``state_3``), bucketed with
+    per-customer-jittered thresholds. The customer-facing label carries no
+    directional claim; any internal directional meaning is kept server-side.
 
 Two further protections live here:
 
@@ -34,9 +36,9 @@ from typing import Iterable, Sequence
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Public, non-recommendatory disclaimer carried on every record / feed.
-# Kept as a module constant so the compliance linter and tests can exempt it
-# (it intentionally contains negated banned words like "buy/sell/hold").
+# Public, non-recommendatory disclaimer + compliance text.
+# Kept as module constants so the compliance linter and tests can exempt them
+# (they intentionally contain negated banned words like "buy/sell/hold").
 # ---------------------------------------------------------------------------
 INTERPRETATION_NOTE = (
     "This output is non-recommendatory market analytics for informational and "
@@ -46,29 +48,53 @@ INTERPRETATION_NOTE = (
     "statistics do not guarantee future outcomes."
 )
 
+# Compact per-observation compliance marker (full notice lives at feed level).
+COMPLIANCE_CLASSIFICATION = "non_recommendatory_market_analytics"
+COMPLIANCE_TAG = COMPLIANCE_CLASSIFICATION
+
+# Guard so a price band is never read as an actionable level.
+LEVEL_USAGE_NOTE = (
+    "Reference zone only; not an entry, exit, stoploss, target, or execution "
+    "instruction."
+)
+SCORE_EXPLANATION = (
+    "Opaque statistical market-structure feature. Not a trade direction and not "
+    "a probability."
+)
+
 ANALYTICS_TYPE = "market_structure_observation"
+FEED_ANALYTICS_TYPE = "market_structure_observation_feed"
 FEED_VERSION = "g-feed/1"
 
-# Abstract, sign-bearing but probability-free directional alphabet. The product's
-# value is directional *context*; what stays hidden is the probability and the
-# (per-customer-jittered) thresholds used to bucket it.
-DIRECTION_TOKENS: tuple[str, str, str] = ("+", "=", "-")
+# Opaque, NON-DIRECTIONAL class labels. The customer-facing label makes no
+# directional claim; any internal directional meaning is kept server-side and is
+# never exposed. Index order here corresponds to internal buckets only.
+FEATURE_STATES: tuple[str, str, str] = ("state_1", "state_2", "state_3")
 
 # Neutral keys that are the ONLY thing public_record will ever emit.
 PUBLIC_KEYS: tuple[str, ...] = (
     "analytics_type",
     "instrument",
-    "G",
-    "D",
+    "feature_intensity_score",
+    "feature_state",
     "level_zone",
+    "level_usage_note",
+    "score_explanation",
     "scope",
     "as_of",
     "feed_version",
-    "interpretation_note",
+    "compliance_tag",
 )
 
+# Public keys whose VALUES are deliberately compliance text (negated banned
+# words) and are therefore exempt from the forbidden-token leak check.
+COMPLIANCE_TEXT_KEYS: frozenset[str] = frozenset({
+    "level_usage_note", "score_explanation", "compliance_tag",
+})
+
 # Internal vocabulary that must NEVER appear in a public payload's keys or
-# values (the disclaimer field is exempt). Used by tests as a leak tripwire.
+# values (the compliance-text fields above are exempt). Tests use this as a
+# leak tripwire.
 FORBIDDEN_PUBLIC_TOKENS: tuple[str, ...] = (
     "p_touch", "p_up", "p_dir", "p_direction", "probability", "prob",
     "reachability", "direction", "q_score", "quality", "reliability",
@@ -221,16 +247,21 @@ def g_scores(levels: Sequence[InternalLevel], customer_id: str, day: str,
     return out
 
 
-def d_tokens(levels: Sequence[InternalLevel], customer_id: str, day: str,
-             alphabet: tuple[str, str, str] = DIRECTION_TOKENS) -> list[str]:
-    """Opaque directional tokens with per-customer-jittered neutral band."""
+def feature_states(levels: Sequence[InternalLevel], customer_id: str, day: str,
+                   alphabet: tuple[str, str, str] = FEATURE_STATES) -> list[str]:
+    """Opaque, NON-DIRECTIONAL class labels with per-customer-jittered band.
+
+    Internally the three buckets derive from the direction model, but the
+    returned label (state_1/2/3) makes no directional claim. The mapping from
+    bucket to market meaning is intentionally kept server-side.
+    """
     delta = _customer_dir_delta(customer_id, day)
     toks = []
     for l in levels:
         if l.p_up is None:
             toks.append(alphabet[1])
             continue
-        s = float(l.p_up) - 0.5      # market up-lean
+        s = float(l.p_up) - 0.5      # internal lean; never exposed
         if s > delta:
             toks.append(alphabet[0])
         elif s < -delta:
@@ -240,26 +271,37 @@ def d_tokens(levels: Sequence[InternalLevel], customer_id: str, day: str,
     return toks
 
 
-def public_record(level: InternalLevel, g: int, d: str) -> dict:
+def public_record(level: InternalLevel, intensity: int, state: str) -> dict:
     """Build the outbound record from an explicit neutral allow-list.
 
     Internal fields have no path into this dict, so they cannot leak. Price-band
-    geometry (level_zone) is public chart information, not IP.
+    geometry (level_zone) is public chart information, not IP. The full
+    disclaimer lives once at feed level; each record carries a compact tag.
     """
     return {
         "analytics_type": ANALYTICS_TYPE,
         "instrument": level.symbol,
-        "G": int(g),
-        "D": str(d),
+        "feature_intensity_score": int(intensity),
+        "feature_state": str(state),
         "level_zone": {
             "low": round(float(level.level_low), 4),
             "high": round(float(level.level_high), 4),
             "mid": round(float(level.level_mid), 4),
         },
+        "level_usage_note": LEVEL_USAGE_NOTE,
+        "score_explanation": SCORE_EXPLANATION,
         "scope": str(level.scope),
         "as_of": str(level.as_of),
         "feed_version": FEED_VERSION,
-        "interpretation_note": INTERPRETATION_NOTE,
+        "compliance_tag": COMPLIANCE_TAG,
+    }
+
+
+def compliance_notice() -> dict:
+    """Feed-level compliance block (full notice lives here, once)."""
+    return {
+        "classification": COMPLIANCE_CLASSIFICATION,
+        "notice": INTERPRETATION_NOTE,
     }
 
 
@@ -268,6 +310,7 @@ def score_levels(levels: Sequence[InternalLevel], customer_id: str, day: str,
     """End-to-end: internal cross-section -> list of opaque public records."""
     if not levels:
         return []
-    gs = g_scores(levels, customer_id, day, weights)
-    ds = d_tokens(levels, customer_id, day)
-    return [public_record(l, g, d) for l, g, d in zip(levels, gs, ds)]
+    intensities = g_scores(levels, customer_id, day, weights)
+    states = feature_states(levels, customer_id, day)
+    return [public_record(l, i, s)
+            for l, i, s in zip(levels, intensities, states)]

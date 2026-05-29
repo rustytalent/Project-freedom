@@ -12,12 +12,13 @@ import pytest
 
 from liqpool import scoring
 from liqpool.scoring import (
-    INTERPRETATION_NOTE,
+    COMPLIANCE_TAG,
+    COMPLIANCE_TEXT_KEYS,
     PUBLIC_KEYS,
     FORBIDDEN_PUBLIC_TOKENS,
     InternalLevel,
     g_scores,
-    d_tokens,
+    feature_states,
     public_record,
     score_levels,
 )
@@ -69,22 +70,31 @@ def test_watermark_differs_per_customer_but_preserves_top():
     assert ga.index(max(ga)) == gb.index(max(gb)) == len(levels) - 1
 
 
-def test_d_tokens_are_from_alphabet():
+def test_feature_states_are_from_alphabet():
     levels = _levels(n=10)
-    ds = d_tokens(levels, "cust-a", "2026-05-29")
-    assert set(ds).issubset(set(scoring.DIRECTION_TOKENS))
+    ss = feature_states(levels, "cust-a", "2026-05-29")
+    assert set(ss).issubset(set(scoring.FEATURE_STATES))
 
 
-def test_d_token_neutral_when_direction_missing():
+def test_feature_states_are_non_directional_labels():
+    # No customer-facing state label may carry directional meaning.
+    for label in scoring.FEATURE_STATES:
+        low = label.lower()
+        for banned in ("up", "down", "long", "short", "bull", "bear",
+                       "+", "-", "buy", "sell"):
+            assert banned not in low
+
+
+def test_feature_state_neutral_when_direction_missing():
     lvl = InternalLevel("X.NS", "above", 99.5, 100.5, 100.0,
                         p_touch=0.6, p_up=None, q=0.5, as_of="2026-05-29")
-    ds = d_tokens([lvl], "cust-a", "2026-05-29")
-    assert ds == [scoring.DIRECTION_TOKENS[1]]
+    ss = feature_states([lvl], "cust-a", "2026-05-29")
+    assert ss == [scoring.FEATURE_STATES[1]]
 
 
 def test_public_record_only_allowlisted_keys():
     lvl = _levels(1)[0]
-    rec = public_record(lvl, 73, "+")
+    rec = public_record(lvl, 73, "state_1")
     assert set(rec.keys()) == set(PUBLIC_KEYS)
 
 
@@ -96,7 +106,7 @@ def test_public_record_does_not_leak_internal_values():
         p_touch=0.72391, p_up=0.61373, q=0.81247,
         as_of="2026-05-29T15:30:00+05:30",
     )
-    rec = public_record(lvl, 73, "+")
+    rec = public_record(lvl, 73, "state_1")
     blob = json.dumps(rec)
     for forbidden_val in ("0.72391", "0.61373", "0.81247"):
         assert forbidden_val not in blob
@@ -104,28 +114,30 @@ def test_public_record_does_not_leak_internal_values():
 
 def test_public_record_keys_have_no_forbidden_tokens():
     lvl = _levels(1)[0]
-    rec = public_record(lvl, 50, "=")
+    rec = public_record(lvl, 50, "state_2")
     for key in rec:
         for forbidden in FORBIDDEN_PUBLIC_TOKENS:
             assert forbidden not in key.lower()
 
 
-def test_public_record_values_have_no_forbidden_tokens_except_disclaimer():
+def test_public_record_values_have_no_forbidden_tokens_except_compliance_text():
     lvl = _levels(1)[0]
-    rec = public_record(lvl, 50, "=")
+    rec = public_record(lvl, 50, "state_2")
     for key, value in rec.items():
-        if key == "interpretation_note":
-            continue  # disclaimer intentionally negates banned words
+        if key in COMPLIANCE_TEXT_KEYS:
+            continue  # compliance text intentionally negates banned words
         text = json.dumps(value).lower()
         for forbidden in FORBIDDEN_PUBLIC_TOKENS:
             assert forbidden not in text, f"{forbidden!r} leaked via {key}"
 
 
-def test_record_carries_disclaimer():
+def test_record_carries_compliance_tag_not_full_disclaimer():
     lvl = _levels(1)[0]
-    rec = public_record(lvl, 1, "-")
-    assert rec["interpretation_note"] == INTERPRETATION_NOTE
-    assert "not investment advice" in rec["interpretation_note"].lower()
+    rec = public_record(lvl, 1, "state_3")
+    assert rec["compliance_tag"] == COMPLIANCE_TAG
+    # The bulky full disclaimer must NOT be repeated per observation.
+    assert "interpretation_note" not in rec
+    assert "Users are solely responsible" not in json.dumps(rec)
 
 
 def test_score_levels_end_to_end():

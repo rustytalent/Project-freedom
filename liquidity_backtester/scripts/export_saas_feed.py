@@ -29,10 +29,11 @@ from pathlib import Path
 
 from liqpool.ingest import RawFeedScorer, read_raw_levels, _first, _SYMBOL_ALIASES
 from liqpool.scoring import (
-    ANALYTICS_TYPE,
+    FEED_ANALYTICS_TYPE,
     FEED_VERSION,
     INTERPRETATION_NOTE,
     PUBLIC_KEYS,
+    compliance_notice,
 )
 from liqpool.serving import handle_levels_request
 
@@ -63,32 +64,37 @@ def build_feed(raw: str, customer: str, date: str, scope: str = "s0") -> dict:
         })
         total += env["observation_count"]
     return {
-        "analytics_type": ANALYTICS_TYPE,
+        "analytics_type": FEED_ANALYTICS_TYPE,
         "feed_version": FEED_VERSION,
         "feed_date": date,
         "customer_id": customer,
+        "customer_type": "developer_research_reviewer",
+        "intended_use": "independent_strategy_research_and_risk_model_enhancement",
         "instrument_count": len(instruments),
         "observation_count": total,
+        "compliance_notice": compliance_notice(),
         "instruments": instruments,
-        "interpretation_note": INTERPRETATION_NOTE,
     }
 
 
 def write_csv(feed: dict, path: Path) -> None:
     import csv
-    cols = ["instrument", "G", "D", "zone_low", "zone_high", "zone_mid",
-            "scope", "as_of", "feed_version"]
+    cols = ["instrument", "feature_intensity_score", "feature_state",
+            "zone_low", "zone_high", "zone_mid", "scope", "as_of", "feed_version"]
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for inst in feed["instruments"]:
             for o in inst["observations"]:
                 z = o["level_zone"]
-                w.writerow([o["instrument"], o["G"], o["D"], z["low"], z["high"],
-                            z["mid"], o["scope"], o["as_of"], o["feed_version"]])
-        # Carry the disclaimer as a trailing comment row.
+                w.writerow([o["instrument"], o["feature_intensity_score"],
+                            o["feature_state"], z["low"], z["high"], z["mid"],
+                            o["scope"], o["as_of"], o["feed_version"]])
+        # Carry the disclaimer + usage note as trailing comment rows.
         w.writerow([])
         w.writerow(["# " + INTERPRETATION_NOTE])
+        w.writerow(["# Reference zones only; not entry/exit/stoploss/target or "
+                    "execution instructions."])
 
 
 def _assert_no_leak(feed: dict) -> None:

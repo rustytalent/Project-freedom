@@ -22,7 +22,8 @@ def test_handle_request_envelope_and_records():
                                 date="2026-05-29", customer_id="cust-a")
     assert out["instrument"] == "HDFCBANK.NS"
     assert out["observation_count"] == len(out["observations"])
-    assert "not investment advice" in out["interpretation_note"].lower()
+    assert "not investment advice" in out["compliance_notice"]["notice"].lower()
+    assert out["compliance_notice"]["classification"] == "non_recommendatory_market_analytics"
     assert out["observations"], "expected some observations"
     for rec in out["observations"]:
         assert set(rec.keys()) == set(PUBLIC_KEYS)
