@@ -37,20 +37,44 @@ python3 -m venv .venv
 
 ---
 
-## 1. (If needed) Prepare market data
+## 1. Market data (lives in your Google Drive)
 
-You need resampled parquet under a directory, e.g. `$RESAMPLED_DIR`, with
-per-timeframe files (5m/15m/...). If you pull from Kite/Zerodha:
+The pipeline does **not** download data itself. The market-data warehouse
+(`kite_indian_market_data`, originally sourced from Zerodha/Kite) lives in your
+**Google Drive**. The Google Drive desktop app — signed in with your gmail —
+syncs that folder onto the Mac under a `CloudStorage` path, and the runbook
+reads the parquet straight from there.
+
+Prerequisites:
+- Google Drive **desktop app installed and signed in with your gmail**, with
+  `My Drive/kite_indian_market_data` synced / available (not online-only).
+- **Do not quit Google Drive while training/predicting** — the parquet is read
+  live from that synced folder.
+
+Point the pipeline at the synced Drive folder (this is the real default path
+used on the Mac; swap in your own gmail if different):
 
 ```bash
-export DATA_ROOT="/path/to/kite_indian_market_data"
+export DATA_ROOT="/Users/abc/Library/CloudStorage/GoogleDrive-garvitkatyal312@gmail.com/My Drive/kite_indian_market_data"
 export RESAMPLED_DIR="$DATA_ROOT/resampled"
 
-# (optional) authenticate + resample raw kite parquet -> resampled timeframes
-PYTHONPATH=. .venv/bin/python examples/zerodha_login.py
-PYTHONPATH=. .venv/bin/python examples/resample_kite_parquet.py \
-  --in "$DATA_ROOT/raw" --out "$RESAMPLED_DIR"
+# sanity check the folder is actually synced and visible:
+ls "$RESAMPLED_DIR"     # expect all_5m.parquet, all_15m.parquet, ... etc
 ```
+
+The training/predict steps read the already-resampled timeframe files in
+`$RESAMPLED_DIR`. You only need the step below if you have raw 1-minute parquet
+and want to (re)build those timeframe files:
+
+```bash
+# raw 1-minute Kite parquet -> all_5m/all_15m/all_60m/... in $RESAMPLED_DIR
+PYTHONPATH=. .venv/bin/python examples/resample_kite_parquet.py \
+  --in "$DATA_ROOT/raw_1m" --out "$RESAMPLED_DIR"
+```
+
+> The Zerodha Kite login (`examples/zerodha_login.py`, needs `KITE_API_KEY` /
+> `KITE_API_SECRET`) is only for the **live trading loop** (`examples/live_run.py`),
+> NOT for historical training/predict. Skip it for the train→predict→feed flow.
 
 ---
 
