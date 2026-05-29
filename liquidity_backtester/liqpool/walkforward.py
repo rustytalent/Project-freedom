@@ -356,9 +356,12 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
             train_snaps: List = generate_snapshots(
                 base, unified_pools, unified_results, state_feat,
                 window_start=first_train_start, window_end=last_train_end,
-                sample_every=sample_every, max_horizon=MAX_HORIZON)
+                sample_every=sample_every, max_horizon=MAX_HORIZON,
+                clip_future_to_window=True)   # TRAIN labels must not see past train_end
             oos_snaps: List = []
             for fr in report.folds:
+                # OOS evaluation: future outcome is genuinely observable after the decision, so
+                # we do NOT clip — a test snapshot may use its full horizon of real future bars.
                 oos_snaps.extend(generate_snapshots(
                     base, unified_pools, unified_results, state_feat,
                     window_start=fr.test_start, window_end=fr.test_end,

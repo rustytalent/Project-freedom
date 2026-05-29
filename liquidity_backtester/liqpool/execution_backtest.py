@@ -188,18 +188,21 @@ def _exit_trade(
         row = df.iloc[j]
         low = float(row["low"])
         high = float(row["high"])
+        open_ = float(row["open"])
         if pool.side == "low":
             stop_hit = low <= stop
             target_hit = high >= target
             if stop_hit:
-                return j, float(stop), "stop"
+                # A stop is a market order: if the bar gapped open below the stop, it fills at
+                # the (worse) open, not the exact stop. Targets are limit fills → capped at target.
+                return j, float(min(open_, stop)), "stop"
             if target_hit:
                 return j, float(target), "target"
         else:
             stop_hit = high >= stop
             target_hit = low <= target
             if stop_hit:
-                return j, float(stop), "stop"
+                return j, float(max(open_, stop)), "stop"
             if target_hit:
                 return j, float(target), "target"
     return last_idx, float(df["close"].iloc[last_idx]), "time_exit"
@@ -278,7 +281,16 @@ def simulate_pool_trade(
     entry = _entry_for_mode(mode, pool, df_base, atr_values, start, end, cfg)
     if entry is None:
         return None
-    entry_idx, entry_price, _entry_reason = entry
+    signal_idx, entry_price, _entry_reason = entry
+    # A confirmation signal is only known at the signal bar's CLOSE, so we cannot fill at that
+    # same close (look-ahead). Enter at the NEXT bar's open instead. blind_limit is a resting
+    # limit order that fills intrabar at its limit price on the touch bar, so it keeps signal_idx.
+    entry_idx = signal_idx
+    if mode != "blind_limit":
+        entry_idx = signal_idx + 1
+        if entry_idx >= end:
+            return None
+        entry_price = float(df_base["open"].iloc[entry_idx])
     stop, target = _levels(pool, float(atr_values.iloc[entry_idx]))
     exit_idx, exit_price, exit_reason = _exit_trade(
         pool, df_base, entry_idx, end, stop, target,
@@ -299,7 +311,11 @@ def simulate_pool_trade(
         direction = "DOWN"
         direction_sign = -1
     gross = gross_per_share * qty
-    charges = estimate_round_trip_charges(entry_price, exit_price, qty, cost_cfg)
+    # side matters for STT (sell-leg) vs stamp (buy-leg): a short sells at entry, buys at exit.
+    charges = estimate_round_trip_charges(
+        entry_price, exit_price, qty, cost_cfg,
+        side="short" if pool.side == "high" else "long",
+    )
     total_cost = float(charges["total_cost"])
     net = gross - total_cost
     risk = risk_per_share * qty

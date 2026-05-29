@@ -263,8 +263,9 @@ class PoolRespectModel:
         self.train_auc = float(roc_auc_score(y_tr, train_calib)) if len(set(y_tr)) > 1 else 0.0
         self.val_brier = float(brier_score_loss(y_val, val_calib))
         self.val_logloss = float(log_loss(y_val, np.clip(val_calib, 1e-6, 1 - 1e-6)))
-        # AUC needs both classes present (which our stratified split guarantees by construction).
-        self.val_auc = float(roc_auc_score(y_val, val_calib))
+        # AUC needs both classes present. The stratified split guarantees this, but the
+        # purged/embargoed walk-forward split does not, so guard it (mirrors train_auc above).
+        self.val_auc = float(roc_auc_score(y_val, val_calib)) if len(set(y_val)) > 1 else 0.0
 
         # Bucket recalibration is fit by the caller (walkforward) after predict on the full OOS set
         # since it needs (bucket, predicted, actual) — see fit_bucket_calib below.

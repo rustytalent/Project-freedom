@@ -48,17 +48,31 @@ def estimate_round_trip_charges(
     exit_price: float,
     quantity: int = 1,
     cfg: ZerodhaEquityCostConfig | None = None,
+    side: str = "long",
 ) -> Dict[str, float]:
     """Estimate all-in round-trip charges for one equity trade.
 
-    The function is direction-agnostic. For intraday, STT is charged on the sell
-    leg; for delivery, STT is charged on both legs and DP is charged once on sell.
+    `side` decides which leg is the buy and which is the sell — this matters because
+    intraday STT is charged on the SELL leg and stamp duty on the BUY leg:
+      - "long"  (default): buy at entry, sell at exit  → STT on exit, stamp on entry.
+      - "short"/"sell"/"down": sell at entry (open), buy at exit (cover)
+                               → STT on entry, stamp on exit.
+    Charging both legs symmetrically (brokerage, exchange, SEBI, GST, slippage) is
+    unaffected by side; only the STT/stamp leg assignment changes.
+
+    For delivery, STT is charged on both legs and DP is charged once on sell.
     Slippage is modelled separately as a bps cost on both entry and exit turnover.
     """
     cfg = cfg or ZerodhaEquityCostConfig()
     quantity = max(int(quantity), 1)
-    buy_turnover = abs(float(entry_price)) * quantity
-    sell_turnover = abs(float(exit_price)) * quantity
+    entry_turnover = abs(float(entry_price)) * quantity
+    exit_turnover = abs(float(exit_price)) * quantity
+    if str(side).lower() in ("short", "sell", "down"):
+        buy_turnover = exit_turnover    # cover (buy to close)
+        sell_turnover = entry_turnover  # short-open (sell to open)
+    else:
+        buy_turnover = entry_turnover
+        sell_turnover = exit_turnover
     turnover = buy_turnover + sell_turnover
 
     brokerage = _brokerage(buy_turnover, cfg) + _brokerage(sell_turnover, cfg)
@@ -148,8 +162,9 @@ def expected_trade_value(
         win_exit = target
         loss_exit = stop
 
-    win_costs = estimate_round_trip_charges(entry, win_exit, quantity, cfg)
-    loss_costs = estimate_round_trip_charges(entry, loss_exit, quantity, cfg)
+    cost_side = "long" if side == "below" else "short"
+    win_costs = estimate_round_trip_charges(entry, win_exit, quantity, cfg, side=cost_side)
+    loss_costs = estimate_round_trip_charges(entry, loss_exit, quantity, cfg, side=cost_side)
     expected_cost_per_share = (
         p_reaction * win_costs["cost_per_share"]
         + (1.0 - p_reaction) * loss_costs["cost_per_share"]

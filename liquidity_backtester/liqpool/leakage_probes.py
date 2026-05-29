@@ -53,12 +53,22 @@ def label_shuffle_auc_probe(
     lower: float = 0.45,
     upper: float = 0.55,
 ) -> LabelShuffleProbeResult:
-    """Check that shuffling labels destroys score association.
+    """Integrity check on a persisted (score, label) pair.
 
-    This is the fast CI version of the heavier "retrain on shuffled labels"
-    probe. It proves that the persisted score/label pair is not trivially
-    separated after labels are randomized; model-retraining probes should be
-    added where feature matrices are available.
+    NOTE: this is NOT, by itself, a leakage detector. Permuting the labels of a
+    *fixed* score vector drives AUC to ~0.5 by construction regardless of whether
+    the score was computed with leakage, so the shuffled mean alone proves nothing
+    about leakage. True leakage detection requires RETRAINING on shuffled labels and
+    checking the retrained model still can't separate the holdout — that heavier
+    probe belongs in the nightly job where feature matrices are available.
+
+    What this fast probe DOES verify:
+      1. the score/label pair has genuine association (`observed_auc` sits clearly
+         above the shuffled band — catches a broken/misaligned pipeline that emits
+         scores uncorrelated with labels), and
+      2. the AUC estimator behaves (shuffled mean ≈ 0.5).
+    `passed` requires BOTH, so a degenerate score (observed ≈ shuffled) now fails
+    instead of silently passing.
     """
     y = np.asarray(y_true, dtype=int)
     score = np.asarray(y_score, dtype=float)
@@ -75,13 +85,17 @@ def label_shuffle_auc_probe(
         aucs.append(_auc(shuffled, score))
     arr = np.asarray(aucs, dtype=float)
     mean_auc = float(arr.mean())
+    shuffled_max = float(arr.max())
+    shuffle_neutral = bool(lower <= mean_auc <= upper)
+    # Guard against an AUC < 0.5 score (label sense flipped): use distance from 0.5.
+    observed_has_signal = bool(abs(observed - 0.5) > (shuffled_max - 0.5))
     return LabelShuffleProbeResult(
         observed_auc=observed,
         shuffled_mean_auc=mean_auc,
         shuffled_min_auc=float(arr.min()),
-        shuffled_max_auc=float(arr.max()),
+        shuffled_max_auc=shuffled_max,
         repeats=int(repeats),
-        passed=bool(lower <= mean_auc <= upper),
+        passed=bool(shuffle_neutral and observed_has_signal),
     )
 
 

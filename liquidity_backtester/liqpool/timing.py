@@ -226,16 +226,20 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
                        featurizer: StateFeaturizer,
                        window_start: pd.Timestamp, window_end: pd.Timestamp,
                        sample_every: int, max_horizon: int,
-                       clip_future_to_window: bool = True) -> List[Snapshot]:
+                       clip_future_to_window: bool = False) -> List[Snapshot]:
     """Build snapshots at every `sample_every` bar in [window_start, window_end].
 
-    Each snapshot stores the future trajectory (up to max_horizon bars) AND the per-pool
-    bars-to-touch, so we can derive labels for any horizon h <= max_horizon downstream.
+    `window_end` bounds WHERE we sample snapshots (the last decision bar). By default a
+    snapshot's future trajectory is allowed to extend past `window_end`, up to `max_horizon`
+    bars or the data end. This is the correct behaviour for OOS *evaluation* (the future
+    outcome is genuinely observable after the decision) and for single-bar causality probes.
 
-    With `clip_future_to_window=True` (default), a snapshot's future trajectory is capped at
-    `window_end`. This is what keeps the walk-forward honest: without it, a TRAIN snapshot near
-    the end of the train window would derive its label from bars that fall inside the OOS test
-    window, leaking test-period price action into training (and inflating OOS metrics).
+    Pass `clip_future_to_window=True` when generating TRAINING snapshots in a walk-forward:
+    it caps each snapshot's future trajectory at `window_end` so a train-window snapshot near
+    the boundary cannot derive its label from bars that fall inside the OOS test window
+    (which would leak test-period price action into training and inflate OOS metrics). Models
+    filter `n_future_bars >= horizon` at fit time, so boundary snapshots are purged rather
+    than trained on truncated labels.
     """
     idx = df_base.index
     n = len(idx)

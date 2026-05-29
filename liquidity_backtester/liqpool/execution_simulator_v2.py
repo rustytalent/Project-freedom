@@ -277,15 +277,23 @@ def resolve_intrabar_path(
         else:
             stop_hit = high >= float(stop_price)
             target_hit = low <= float(target_price)
-        if stop_hit and target_hit and conservative_same_bar:
-            return {"resolution": "stop_hit", "timestamp": ts, "price": float(stop_price),
-                    "intrabar_path": path, "symbol": symbol}
+        if stop_hit and target_hit:
+            # Both levels sit inside one 1-minute candle — the true touch order is unknown.
+            # conservative_same_bar=True (default) records the stop; False optimistically records
+            # the target. Either way we tag `ambiguous_same_bar` so summaries can measure how
+            # often outcomes hinge on this assumption. The `resolution` string stays canonical
+            # so downstream control flow is unchanged.
+            if conservative_same_bar:
+                return {"resolution": "stop_hit", "timestamp": ts, "price": float(stop_price),
+                        "intrabar_path": path, "symbol": symbol, "ambiguous_same_bar": True}
+            return {"resolution": "target_hit", "timestamp": ts, "price": float(target_price),
+                    "intrabar_path": path, "symbol": symbol, "ambiguous_same_bar": True}
         if stop_hit:
             return {"resolution": "stop_hit", "timestamp": ts, "price": float(stop_price),
-                    "intrabar_path": path, "symbol": symbol}
+                    "intrabar_path": path, "symbol": symbol, "ambiguous_same_bar": False}
         if target_hit:
             return {"resolution": "target_hit", "timestamp": ts, "price": float(target_price),
-                    "intrabar_path": path, "symbol": symbol}
+                    "intrabar_path": path, "symbol": symbol, "ambiguous_same_bar": False}
 
     return {
         "resolution": "no_hit",
@@ -369,14 +377,17 @@ def _exit_5m_fallback(
         row = df.iloc[j]
         low = float(row["low"])
         high = float(row["high"])
+        open_ = float(row["open"])
         if pool.side == "low":
             if low <= stop:
-                return j, float(stop), "stop"
+                # Gap-aware stop: a market stop fills at the worse of open/stop. Targets are
+                # limit fills, capped at the target price.
+                return j, float(min(open_, stop)), "stop"
             if high >= target:
                 return j, float(target), "target"
         else:
             if high >= stop:
-                return j, float(stop), "stop"
+                return j, float(max(open_, stop)), "stop"
             if low <= target:
                 return j, float(target), "target"
     return last_idx, float(df["close"].iloc[last_idx]), "time_exit"

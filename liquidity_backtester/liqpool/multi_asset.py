@@ -807,9 +807,11 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                                          window_start=first_train_start,
                                          window_end=last_train_end,
                                          sample_every=sample_every,
-                                         max_horizon=MAX_HORIZON)
+                                         max_horizon=MAX_HORIZON,
+                                         clip_future_to_window=True)  # no train→test label leak
                 os_ = []
                 for fr in wf.folds:
+                    # OOS eval: do NOT clip — the full future horizon is genuinely observable.
                     os_.extend(generate_snapshots(ad.base_df, a_pools, a_results, state_feat,
                                                    window_start=fr.test_start,
                                                    window_end=fr.test_end,
