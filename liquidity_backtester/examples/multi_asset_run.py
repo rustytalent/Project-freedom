@@ -45,7 +45,7 @@ from liqpool.policy_labels import (
     build_policy_labels_for_report,
     summarise_policy_labels,
 )
-from liqpool.policy_model import PolicyOutcomeModelSuite
+from liqpool.policy_model import PolicyOutcomeModelSuite, PolicyReturnModelSuite
 from liqpool.pools import build_pools, project_to_base
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
@@ -99,6 +99,10 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
         ("policy_model_report", []),
         ("policy_model_calibration", []),
         ("policy_model_feature_importance", []),
+        ("policy_return_model", None),
+        ("policy_return_model_report", []),
+        ("policy_return_model_calibration", []),
+        ("policy_return_model_feature_importance", []),
     ):
         if not hasattr(report, attr):
             setattr(report, attr, default)
@@ -574,6 +578,14 @@ def main():
                     help="Skip Phase 3D policy outcome model diagnostics")
     ap.add_argument("--policy-model-min-trades", type=int, default=80,
                     help="Minimum generated trades per execution mode to train a policy outcome model")
+    ap.add_argument("--skip-policy-return-model", action="store_true",
+                    help="Skip the R1 policy RETURN model (Huber regression on realized net R)")
+    ap.add_argument("--policy-return-min-trades", type=int, default=80,
+                    help="Minimum generated trades per mode to train a policy return regressor")
+    ap.add_argument("--r-policy-threshold", type=float, default=None,
+                    help="If set, in predict mode demote candidates with policy-return-model "
+                         "predicted R below this threshold from TRADEABLE to WATCH_ONLY. "
+                         "Default (None) = report only, no gating.")
     ap.add_argument("--reaction-feature-bars", type=int, default=6,
                     help="Bars after first touch used by Phase 3 reaction confirmation features")
     ap.add_argument("--reaction-alert-lookback-bars", type=int, default=78,
@@ -1457,6 +1469,31 @@ def main():
         except Exception as e:
             print(f"  [policy_labels] skipped: {e}")
 
+    # Shared between the binary policy model and the R1 return regressor so we
+    # don't rebuild policy labels twice.
+    train_policy_labels = None
+    oos_policy_labels = None
+
+    def _ensure_policy_labels() -> tuple[pd.DataFrame, pd.DataFrame]:
+        nonlocal train_policy_labels, oos_policy_labels
+        if train_policy_labels is None:
+            train_policy_labels = (
+                policy_labels if args.policy_label_split == "train" else
+                build_policy_labels_for_report(
+                    report, cfg, cost_cfg,
+                    quantity=args.cost_quantity, split="train",
+                )
+            )
+        if oos_policy_labels is None:
+            oos_policy_labels = (
+                policy_labels if args.policy_label_split == "oos" else
+                build_policy_labels_for_report(
+                    report, cfg, cost_cfg,
+                    quantity=args.cost_quantity, split="oos",
+                )
+            )
+        return train_policy_labels, oos_policy_labels
+
     policy_model_report = pd.DataFrame()
     policy_model_calibration = pd.DataFrame()
     policy_model_importance = pd.DataFrame()
@@ -1468,22 +1505,7 @@ def main():
     ):
         print("\n================ POLICY OUTCOME MODEL ================")
         try:
-            train_policy_labels = (
-                policy_labels if args.policy_label_split == "train" else
-                build_policy_labels_for_report(
-                    report, cfg, cost_cfg,
-                    quantity=args.cost_quantity,
-                    split="train",
-                )
-            )
-            oos_policy_labels = (
-                policy_labels if args.policy_label_split == "oos" else
-                build_policy_labels_for_report(
-                    report, cfg, cost_cfg,
-                    quantity=args.cost_quantity,
-                    split="oos",
-                )
-            )
+            train_policy_labels, oos_policy_labels = _ensure_policy_labels()
             suite = PolicyOutcomeModelSuite().fit(
                 train_policy_labels,
                 oos_policy_labels,
@@ -1525,11 +1547,77 @@ def main():
                           f"{row.get('oos_top_decile_return_r', 0.0):>+8.2f} "
                           f"{row.get('oos_mean_return_r', 0.0):>+7.2f}")
                 print("  Note: this is research-only; live gates do not use it yet.")
-            # The early model save happened before policy diagnostics; refresh the bundle so
-            # the suite and reports are available to future predict/shadow-live work.
-            _save_model_bundle(report, args.model_dir, args, cfg)
         except Exception as e:
             print(f"  [policy_model] skipped: {e}")
+
+    # R1 policy RETURN model: Huber regression on realized net R per generated trade.
+    # Sits alongside the binary classifier above; both predict on the same population
+    # so their outputs are directly comparable. Live gates do not consume this yet —
+    # surfaced via --r-policy-threshold (opt-in).
+    policy_return_model_report = pd.DataFrame()
+    policy_return_model_calibration = pd.DataFrame()
+    policy_return_model_importance = pd.DataFrame()
+    policy_return_model_predictions = pd.DataFrame()
+    if (
+        args.mode == "train"
+        and not args.skip_policy_labels
+        and not args.skip_policy_return_model
+    ):
+        print("\n================ POLICY RETURN MODEL (R1) ================")
+        try:
+            train_policy_labels_r, oos_policy_labels_r = _ensure_policy_labels()
+            r_suite = PolicyReturnModelSuite().fit(
+                train_policy_labels_r,
+                oos_policy_labels_r,
+                seed=cfg.opt_seed + 950,
+                min_trades=args.policy_return_min_trades,
+            )
+            report.policy_return_model = r_suite
+            policy_return_model_report = r_suite.report_frame()
+            policy_return_model_calibration = r_suite.calibration_table
+            policy_return_model_importance = r_suite.feature_importance_frame(top_k=40)
+            policy_return_model_predictions = r_suite.prediction_table
+            report.policy_return_model_report = (
+                policy_return_model_report.to_dict(orient="records")
+                if not policy_return_model_report.empty else []
+            )
+            report.policy_return_model_calibration = (
+                policy_return_model_calibration.to_dict(orient="records")
+                if not policy_return_model_calibration.empty else []
+            )
+            report.policy_return_model_feature_importance = (
+                policy_return_model_importance.to_dict(orient="records")
+                if not policy_return_model_importance.empty else []
+            )
+            if policy_return_model_report.empty:
+                print("  (no policy return regressors trained)")
+            else:
+                print(f"  Target: policy_target_return_r (winsorized for fit); "
+                      f"min trades/mode={args.policy_return_min_trades}")
+                print(f"  {'mode':<22} {'status':<8} {'tr':>6} {'oos':>6} "
+                      f"{'mean_real':>10} {'top10_R':>9} {'top25_R':>9} {'mae':>6} {'spearman':>8}")
+                for _, row in policy_return_model_report.iterrows():
+                    sp = row.get("oos_spearman")
+                    sp_s = "n/a" if pd.isna(sp) else f"{sp:+.3f}"
+                    print(f"  {row['mode']:<22} {row['status']:<8} "
+                          f"{int(row.get('train_n', 0)):>6} "
+                          f"{int(row.get('oos_n', 0)):>6} "
+                          f"{row.get('oos_mean_realized_r', 0.0):>+9.2f} "
+                          f"{row.get('oos_top_decile_realized_r', 0.0):>+8.2f} "
+                          f"{row.get('oos_top_quartile_realized_r', 0.0):>+8.2f} "
+                          f"{row.get('oos_mae', 0.0):>6.2f} {sp_s:>8}")
+                print("  Edge gate: at least one mode should show top10_R > 0 and spearman > 0.10.")
+                print("  Note: research-only; use --r-policy-threshold to gate live candidates.")
+        except Exception as e:
+            print(f"  [policy_return_model] skipped: {e}")
+
+    # The early model save happened before policy diagnostics; refresh the bundle once
+    # both classifier + return-regressor are attached so predict-mode can use them.
+    if args.mode == "train" and not args.skip_policy_labels:
+        try:
+            _save_model_bundle(report, args.model_dir, args, cfg)
+        except Exception as e:
+            print(f"  [bundle refresh] skipped: {e}")
 
     leakage_counts = leakage_summary.get("severity_counts", {}) if leakage_summary else {}
     leakage_error_count = int(leakage_counts.get("ERROR", 0))
@@ -1881,6 +1969,23 @@ def main():
     if not policy_model_predictions.empty:
         policy_model_predictions_path = out / "policy_model_oos_predictions.csv"
         policy_model_predictions.to_csv(policy_model_predictions_path, index=False)
+    # R1 policy return regressor outputs.
+    policy_return_report_path = None
+    policy_return_calibration_path = None
+    policy_return_importance_path = None
+    policy_return_predictions_path = None
+    if not policy_return_model_report.empty:
+        policy_return_report_path = out / "policy_return_model_report.csv"
+        policy_return_model_report.to_csv(policy_return_report_path, index=False)
+    if not policy_return_model_calibration.empty:
+        policy_return_calibration_path = out / "policy_return_model_calibration.csv"
+        policy_return_model_calibration.to_csv(policy_return_calibration_path, index=False)
+    if not policy_return_model_importance.empty:
+        policy_return_importance_path = out / "policy_return_model_feature_importance.csv"
+        policy_return_model_importance.to_csv(policy_return_importance_path, index=False)
+    if not policy_return_model_predictions.empty:
+        policy_return_predictions_path = out / "policy_return_model_oos_predictions.csv"
+        policy_return_model_predictions.to_csv(policy_return_predictions_path, index=False)
     execution_summary_path = None
     execution_trades_path = None
     execution_by_direction_path = None
@@ -1982,6 +2087,14 @@ def main():
         print(f"           {policy_model_importance_path}  ← Phase 3D policy model features")
     if policy_model_predictions_path is not None:
         print(f"           {policy_model_predictions_path}  ← Phase 3D top OOS policy predictions")
+    if policy_return_report_path is not None:
+        print(f"           {policy_return_report_path}  ← R1 policy return regressor metrics")
+    if policy_return_calibration_path is not None:
+        print(f"           {policy_return_calibration_path}  ← R1 policy return calibration")
+    if policy_return_importance_path is not None:
+        print(f"           {policy_return_importance_path}  ← R1 policy return features")
+    if policy_return_predictions_path is not None:
+        print(f"           {policy_return_predictions_path}  ← R1 top OOS predicted-R candidates")
     if reaction_report_path is not None:
         print(f"           {reaction_report_path}  ← Phase 3 post-touch model metrics")
     if reaction_calibration_path is not None:
