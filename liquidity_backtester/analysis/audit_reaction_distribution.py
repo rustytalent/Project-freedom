@@ -124,24 +124,36 @@ def _reliability_rows(target: str, p: np.ndarray, y: np.ndarray
 
 
 def _summary_row(target: str, model: ReactionBinaryModel,
-                 p: np.ndarray, y: Optional[np.ndarray]) -> Dict:
-    saturated_85 = float((p >= 0.85).mean()) if len(p) else 0.0
-    saturated_95 = float((p >= 0.95).mean()) if len(p) else 0.0
-    decisive_50 = float((p >= 0.50).mean()) if len(p) else 0.0
-    auc = None
-    if y is not None and len(np.unique(y)) == 2:
+                 p_all: np.ndarray,
+                 p_labelled: Optional[np.ndarray],
+                 y_labelled: Optional[np.ndarray]) -> Dict:
+    """Distribution stats from ALL predictions; AUC from labelled subset only.
+
+    Distribution stats and saturation shares describe the model's behaviour on
+    the full OOS population (including unlabelled rows — the audit's central
+    question is "is the *output* saturated"). AUC must pair predictions with
+    labels, so it uses ``(p_labelled, y_labelled)`` which is guaranteed equal-
+    length by construction in :func:`_predict_target`.
+    """
+    saturated_85 = float((p_all >= 0.85).mean()) if len(p_all) else 0.0
+    saturated_95 = float((p_all >= 0.95).mean()) if len(p_all) else 0.0
+    decisive_50 = float((p_all >= 0.50).mean()) if len(p_all) else 0.0
+    auc: Optional[float] = None
+    if (p_labelled is not None and y_labelled is not None
+            and len(p_labelled) == len(y_labelled) and len(p_labelled) > 0
+            and len(np.unique(y_labelled)) == 2):
         from sklearn.metrics import roc_auc_score
-        auc = float(roc_auc_score(y, p))
+        auc = float(roc_auc_score(y_labelled, p_labelled))
     return {
         "target": target,
-        "n_predictions": int(len(p)),
-        "n_labelled": int(len(y)) if y is not None else 0,
-        "mean": float(p.mean()) if len(p) else 0.0,
-        "median": float(np.median(p)) if len(p) else 0.0,
-        "p10": float(np.quantile(p, 0.10)) if len(p) else 0.0,
-        "p25": float(np.quantile(p, 0.25)) if len(p) else 0.0,
-        "p75": float(np.quantile(p, 0.75)) if len(p) else 0.0,
-        "p90": float(np.quantile(p, 0.90)) if len(p) else 0.0,
+        "n_predictions": int(len(p_all)),
+        "n_labelled": int(len(y_labelled)) if y_labelled is not None else 0,
+        "mean": float(p_all.mean()) if len(p_all) else 0.0,
+        "median": float(np.median(p_all)) if len(p_all) else 0.0,
+        "p10": float(np.quantile(p_all, 0.10)) if len(p_all) else 0.0,
+        "p25": float(np.quantile(p_all, 0.25)) if len(p_all) else 0.0,
+        "p75": float(np.quantile(p_all, 0.75)) if len(p_all) else 0.0,
+        "p90": float(np.quantile(p_all, 0.90)) if len(p_all) else 0.0,
         "share_ge_0.50": decisive_50,
         "share_ge_0.85": saturated_85,
         "share_ge_0.95": saturated_95,
@@ -152,18 +164,21 @@ def _summary_row(target: str, model: ReactionBinaryModel,
 
 
 def _predict_target(model: ReactionBinaryModel, events: pd.DataFrame
-                    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Run the calibrated predict over EVERY OOS event (not just labelled)."""
-    p = model.predict_frame(events)
-    if model.label_col in events.columns:
-        y_raw = events[model.label_col]
-        mask = y_raw.notna()
-        y = y_raw[mask].astype(int).to_numpy() if mask.any() else None
-    else:
-        mask = pd.Series(False, index=events.index)
-        y = None
-    p_lab = p[mask.to_numpy()] if y is not None else None
-    return p, (p_lab, y) if y is not None else (None, None)
+                    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Run the calibrated predict over EVERY OOS event (not just labelled).
+
+    Returns ``(p_all, p_labelled, y_labelled)``. The labelled pair shares
+    indices with the events frame after dropping NaN labels, so they're
+    guaranteed equal-length for downstream metrics.
+    """
+    p_all = model.predict_frame(events)
+    if model.label_col not in events.columns:
+        return p_all, None, None
+    y_raw = events[model.label_col]
+    mask = y_raw.notna().to_numpy()
+    if not mask.any():
+        return p_all, None, None
+    return p_all, p_all[mask], y_raw[mask.nonzero()[0]].astype(int).to_numpy()
 
 
 def _verdict(summary_rows: List[Dict]) -> str:
@@ -219,12 +234,11 @@ def main() -> int:
         if model is None:
             print(f"[audit] skip {target}: not present in bundle")
             continue
-        p_all, labelled = _predict_target(model, events)
-        sum_rows.append(_summary_row(target, model, p_all,
-                                     labelled[1] if labelled[1] is not None else None))
+        p_all, p_lab, y_lab = _predict_target(model, events)
+        sum_rows.append(_summary_row(target, model, p_all, p_lab, y_lab))
         hist_rows.extend(_histogram_rows(target, p_all))
-        if labelled[0] is not None and labelled[1] is not None:
-            rel_rows.extend(_reliability_rows(target, labelled[0], labelled[1]))
+        if p_lab is not None and y_lab is not None:
+            rel_rows.extend(_reliability_rows(target, p_lab, y_lab))
 
     hist_df = pd.DataFrame(hist_rows)
     rel_df = pd.DataFrame(rel_rows)
