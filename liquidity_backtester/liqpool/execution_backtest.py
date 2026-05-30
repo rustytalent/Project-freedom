@@ -298,15 +298,37 @@ def simulate_pool_trade(
     )
 
     qty = max(int(quantity), 1)
+    # Risk integrity: on confirmation modes the entry price is the NEXT bar's
+    # open. If that bar gaps PAST the protective stop, the trade would have
+    # been stopped out at open before it began — it is not a real trade
+    # outcome, it is a slippage event. Returning None here filters those
+    # degenerate setups out cleanly. (Blind_limit is immune because its
+    # entry is the pool boundary and `_levels()` anchors the stop to the
+    # same bar's ATR, so risk is always +0.5*ATR by construction.)
+    #
+    # Defense in depth: even when the geometry is technically positive, if
+    # the gap collapses risk to a tiny fraction of ATR (e.g. entry within
+    # 0.1 ATR of stop), the resulting net_r explodes — a few rupees divided
+    # by near-zero risk yields millions of R. Floor risk at 0.1*ATR so
+    # an edge case can never produce an absurd R again.
+    atr_at_entry = max(float(atr_values.iloc[entry_idx]), 1e-9)
+    MIN_RISK_FRACTION_OF_ATR = 0.10
+    min_risk_per_share = MIN_RISK_FRACTION_OF_ATR * atr_at_entry
     if pool.side == "low":
+        natural_risk_per_share = float(entry_price - stop)
+        if natural_risk_per_share <= 0:
+            return None    # gap-down past stop -> stopped at open, not a real trade
+        risk_per_share = max(natural_risk_per_share, min_risk_per_share, 1e-9)
         gross_per_share = float(exit_price - entry_price)
-        risk_per_share = max(float(entry_price - stop), 1e-9)
         side = "buy"
         direction = "UP"
         direction_sign = 1
     else:
+        natural_risk_per_share = float(stop - entry_price)
+        if natural_risk_per_share <= 0:
+            return None    # gap-up past stop -> stopped at open, not a real trade
+        risk_per_share = max(natural_risk_per_share, min_risk_per_share, 1e-9)
         gross_per_share = float(entry_price - exit_price)
-        risk_per_share = max(float(stop - entry_price), 1e-9)
         side = "sell"
         direction = "DOWN"
         direction_sign = -1
@@ -319,7 +341,7 @@ def simulate_pool_trade(
     total_cost = float(charges["total_cost"])
     net = gross - total_cost
     risk = risk_per_share * qty
-    net_r = float(net / max(risk, 1e-9))
+    net_r = float(net / risk)
 
     return ExecutionTrade(
         mode=mode,
