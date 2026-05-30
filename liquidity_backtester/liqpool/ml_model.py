@@ -28,6 +28,7 @@ import pandas as pd
 from .pools import Pool
 from .tester import PoolResult
 from .stratified import _tf_bucket, _headline_factor
+from .distance_calibration import DistanceCalibrator
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +318,36 @@ class PoolRespectModel:
                                 num_iteration=self._gbm.best_iteration)
         return self._iso.transform(raw)
 
+    def fit_distance_calib(self, p_predicted: np.ndarray, distance_atr: np.ndarray,
+                           y_true: np.ndarray,
+                           min_bucket_n: int = 300) -> Optional[DistanceCalibrator]:
+        """Stage-C: per-distance-bucket isotonic on top of (global iso × bucket shrinkage).
+
+        ``p_predicted`` is the model's already-calibrated output (post-isotonic;
+        callers usually pass the value of ``predict(...)`` on the OOS rows so the
+        layer composes correctly). Buckets below ``min_bucket_n`` fall back to
+        identity, so a sparse bucket can never make calibration worse.
+
+        Not auto-applied in ``predict``: that path has no ``distance_atr``. The
+        joint Q × proximity evaluation site supplies distance and should call
+        :meth:`apply_distance_calibration` explicitly.
+        """
+        calib = DistanceCalibrator(min_bucket_n=min_bucket_n).fit(
+            raw_p=np.asarray(p_predicted, dtype=float),
+            distance_atr=np.asarray(distance_atr, dtype=float),
+            y_true=np.asarray(y_true, dtype=int),
+        )
+        self._distance_calib = calib
+        return calib
+
+    def apply_distance_calibration(self, p: np.ndarray,
+                                   distance_atr: np.ndarray) -> np.ndarray:
+        """Apply the Stage-C layer if fitted, else return ``p`` unchanged."""
+        calib = getattr(self, "_distance_calib", None)
+        if calib is None or not calib.is_fitted:
+            return np.asarray(p, dtype=float)
+        return np.clip(calib.transform(p, distance_atr), 0.02, 0.98)
+
     def fit_bucket_calib(self, pools: List[Pool], y_true: np.ndarray, p_predicted: np.ndarray,
                          min_bucket_n: int = 10) -> None:
         """Build per-bucket pull weights from observed (pred, actual) on the OOS set.
@@ -430,6 +461,21 @@ class SectorMoERespectModel:
     @property
     def bucket_calib(self) -> Dict[Tuple[str, str], BucketCalib]:
         return self.global_model.bucket_calib if self.global_model is not None else {}
+
+    def fit_distance_calib(self, p_predicted: np.ndarray,
+                           distance_atr: np.ndarray, y_true: np.ndarray,
+                           min_bucket_n: int = 300) -> Optional[DistanceCalibrator]:
+        """Delegates Stage-C distance calibration to the global model."""
+        if self.global_model is None:
+            return None
+        return self.global_model.fit_distance_calib(
+            p_predicted, distance_atr, y_true, min_bucket_n=min_bucket_n)
+
+    def apply_distance_calibration(self, p: np.ndarray,
+                                   distance_atr: np.ndarray) -> np.ndarray:
+        if self.global_model is None:
+            return np.asarray(p, dtype=float)
+        return self.global_model.apply_distance_calibration(p, distance_atr)
 
     def _copy_global_metrics(self) -> None:
         if self.global_model is None:

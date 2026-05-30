@@ -1159,12 +1159,32 @@ def main():
                   f"score={row['pocket_score']:+.2f}")
         print("  Note: not live-approved; this pocket still needs CPCV/null baselines.")
 
+    # Display block — show the highest-confidence subset, but make the selection
+    # explicit so a reader cannot mistake the top-10 truncation for "every
+    # alert is ~98%". The list is sorted descending by reaction probability
+    # upstream; printing only [:10] without context implied saturation.
     print("\n--- POST-TOUCH REACTION CONFIRMATIONS  "
           f"(last {args.reaction_alert_lookback_bars} bars) ---")
     if not reaction_alerts:
         print(f"  ({reaction_alert_note or 'none'})")
     else:
-        for a in reaction_alerts[:10]:
+        confirm_thr = float(args.reaction_confirm_threshold)
+        strict_p = [a.get("p_strict_reaction") for a in reaction_alerts
+                    if a.get("p_strict_reaction") is not None]
+        n_total = len(reaction_alerts)
+        n_below = sum(1 for a in reaction_alerts
+                      if (a.get("p_strict_reaction") or 0.0) < confirm_thr)
+        shown = reaction_alerts[:10]
+        n_more = max(0, n_total - len(shown))
+        if strict_p:
+            arr = np.asarray(strict_p, dtype=float)
+            print(f"  full pool: {n_total} alerts  strict p median={arr.mean():.2f} "
+                  f"p25={float(np.quantile(arr, 0.25)):.2f} "
+                  f"p75={float(np.quantile(arr, 0.75)):.2f}  "
+                  f"{n_below} below confirm threshold {confirm_thr:.0%}")
+        print(f"  showing top {len(shown)} by reaction probability "
+              f"(highest-confidence subset — sort is descending by design):")
+        for a in shown:
             side_lbl = "BELOW" if a["side"] == "below" else "ABOVE"
             price_zone = f"{_fmt_price(a['pool_low'])}-{_fmt_price(a['pool_high'])}"
             print(f"  [{a['symbol']:<14}] {price_zone} "
@@ -1173,6 +1193,9 @@ def main():
                   f"reclaim={_fmt_pct(a.get('p_reclaim_success'))} "
                   f"break={_fmt_pct(a.get('p_break_continuation'))} "
                   f"→ {a['action']}: {a['reason']}")
+        if n_more:
+            print(f"  ... {n_more} additional alerts not shown "
+                  f"(see reaction_alerts.csv for the full set)")
         print("  Note: these are post-touch confirmation alerts, not automatic entries.")
 
     print(f"\n--- QUALITY WATCH  (top 10 by Q, T_today below tradeable threshold) ---")

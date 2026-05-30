@@ -26,6 +26,7 @@ from .pools import Pool
 from .tester import PoolResult
 from .regime import compute_regime_series, nse_session, SESSION_LABELS
 from .indicators import atr
+from .distance_calibration import DistanceCalibrator
 
 
 def distance_bucket(distance_atr: float) -> str:
@@ -655,10 +656,43 @@ class ProximityModel:
             self.val_decile_lift = (tr / br) if br > 0 else float("inf")
         return self
 
+    def fit_distance_calib(self, frame: pd.DataFrame,
+                           min_bucket_n: int = 300) -> Optional[DistanceCalibrator]:
+        """Stage-C: fit a per-distance-bucket isotonic layer on labelled OOS rows.
+
+        Uses the post-global-iso predictions as input, so this layer composes
+        on top of the existing calibration rather than replacing it. Buckets
+        with fewer than ``min_bucket_n`` rows fall back to identity and can
+        never make calibration worse than the global model.
+        """
+        if frame is None or frame.empty:
+            return None
+        if "touch_label" not in frame.columns or "distance_atr" not in frame.columns:
+            return None
+        sub = frame[frame["touch_label"].notna()]
+        if sub.empty:
+            return None
+        X = sub.reindex(columns=self.feature_names).fillna(0.0).values
+        raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
+        raw_global = self._iso.transform(raw)
+        calib = DistanceCalibrator(min_bucket_n=min_bucket_n).fit(
+            raw_p=raw_global,
+            distance_atr=sub["distance_atr"].astype(float).to_numpy(),
+            y_true=sub["touch_label"].astype(int).to_numpy(),
+        )
+        self._distance_calib = calib
+        return calib
+
     def predict_frame(self, frame: pd.DataFrame) -> np.ndarray:
         X = frame.reindex(columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
-        return np.clip(self._iso.transform(raw), 0.0, 1.0)
+        cal = self._iso.transform(raw)
+        dist_calib = getattr(self, "_distance_calib", None)
+        if (dist_calib is not None and dist_calib.is_fitted
+                and "distance_atr" in frame.columns):
+            cal = dist_calib.transform(
+                cal, frame["distance_atr"].astype(float).to_numpy())
+        return np.clip(cal, 0.0, 1.0)
 
     def predict_one(self, pool: Pool, dist_atr: float, side: str,
                     state: Dict[str, float], quality_pred: float,
@@ -670,7 +704,12 @@ class ProximityModel:
         merged = {**state, **pool_feat}
         X = pd.DataFrame([merged], columns=self.feature_names).fillna(0.0).values
         raw = self._gbm.predict(X, num_iteration=self._gbm.best_iteration)
-        return float(np.clip(self._iso.transform(raw)[0], 0.0, 1.0))
+        cal = float(self._iso.transform(raw)[0])
+        dist_calib = getattr(self, "_distance_calib", None)
+        if dist_calib is not None and dist_calib.is_fitted:
+            cal = float(dist_calib.transform(
+                np.array([cal]), np.array([float(dist_atr)]))[0])
+        return float(np.clip(cal, 0.0, 1.0))
 
     def feature_importance(self, top_k: int = 10) -> List[Tuple[str, int]]:
         if not hasattr(self, "_gbm"):
