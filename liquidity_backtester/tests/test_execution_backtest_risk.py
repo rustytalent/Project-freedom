@@ -30,8 +30,22 @@ from liqpool.pools import Pool
 from liqpool.tester import PoolResult
 
 
-def _five_min_bars(rows):
-    idx = pd.date_range("2026-05-26 09:15", periods=len(rows), freq="5min")
+def _five_min_bars(rows, start_ist: str = "10:00"):
+    """Build a 5-min bar frame whose IST time-of-day starts at `start_ist`.
+
+    The production data path stores tz-naive UTC; nse_session() / the new MIS
+    enforcement convert that to IST by adding +5:30. To make a test bar
+    actually live at HH:MM IST we offset the UTC clock back by 5h30m.
+    e.g. 10:00 IST -> 04:30 UTC.
+    """
+    h, m = start_ist.split(":")
+    ist_min = int(h) * 60 + int(m)
+    utc_min = ist_min - (5 * 60 + 30)
+    if utc_min < 0:
+        utc_min += 24 * 60
+    utc_h, utc_m = divmod(utc_min, 60)
+    start_utc = f"2026-05-26 {utc_h:02d}:{utc_m:02d}"
+    idx = pd.date_range(start_utc, periods=len(rows), freq="5min")
     return pd.DataFrame(rows, index=idx)
 
 
@@ -170,6 +184,120 @@ class V1RiskDenominatorTests(unittest.TestCase):
         self.assertIsNotNone(trade)
         self.assertLess(abs(trade.net_r), 10.0,
             f"blind_limit net_r must remain O(1), got {trade.net_r}")
+
+
+class V1IntradayMISTests(unittest.TestCase):
+    """MIS enforcement: no new entries after 14:30 IST, time-exit by 15:15 IST,
+    do not iterate across session boundaries. These pin the user-flagged bug
+    that the old simulator silently used overnight bars as intraday continuation."""
+
+    def _common_cfg(self) -> tuple[Config, ZerodhaEquityCostConfig]:
+        # respect_within_bars=60 so a same-day intraday time stop is the binding
+        # constraint, not the natural bar count.
+        return Config(test_horizon_bars=60, respect_within_bars=60), ZerodhaEquityCostConfig()
+
+    def _long_pool(self, price_low: float, price_high: float,
+                   formed_at: pd.Timestamp, available_at: pd.Timestamp) -> Pool:
+        return Pool(
+            side="low", price_low=price_low, price_high=price_high,
+            formed_at=formed_at, available_at=available_at,
+            contributors=[], score=1.0, tfs=["base"], asset="TEST",
+        )
+
+    def _result(self, pool: Pool, outcome: str = "respected_strong") -> PoolResult:
+        return PoolResult(
+            pool_idx=0, side=pool.side, formed_at=pool.formed_at,
+            price_low=pool.price_low, price_high=pool.price_high,
+            score=pool.score, outcome=outcome,
+        )
+
+    def test_blocks_entry_after_1430_ist(self) -> None:
+        # Bars from 14:00 IST forward. Pool touch at bar 5 -> entry next bar at
+        # 14:25 IST (still allowed). Then build a SECOND scenario with touch at
+        # bar 7 -> entry bar 14:35 IST which is past the 14:30 cutoff.
+        rows = _flat_bars(105.0, 22)
+        # Plant a long-side rejection so touch_confirmed triggers at bar 7
+        rows[7] = {"open": 102.0, "high": 105.0, "low": 100.8,
+                   "close": 103.0, "volume": 1000.0}
+        df = _five_min_bars(rows, start_ist="14:00")    # bar i is at 14:00 + i*5min IST
+        # Touch bar 7 -> signal at 14:35 IST -> entry bar 8 at 14:40 IST (post-cutoff).
+        pool = self._long_pool(100.0, 101.0, df.index[2], df.index[3])
+        result = self._result(pool)
+        cfg, cost_cfg = self._common_cfg()
+        trade = simulate_pool_trade(
+            mode="touch_confirmed", symbol="TEST", sector="TEST",
+            df_base=df, pool=pool, result=result, cfg=cfg, cost_cfg=cost_cfg,
+        )
+        self.assertIsNone(trade,
+            "entries past 14:30 IST must be refused (no room to reach target before EOD)")
+
+    def test_eod_squareoff_caps_holding_window(self) -> None:
+        # Pool touches at 14:00 IST -> entry at 14:05 IST. With
+        # respect_within_bars=60 the natural time stop would be 60*5min = 5h
+        # spanning into next morning. The MIS cap should force exit by 15:15 IST,
+        # which is bar (15:15 - 14:05)/5 = 14 bars after entry at most.
+        rows = _flat_bars(105.0, 28)                    # 28 bars from 13:30 IST = 13:30 -> 15:45 IST
+        # Plant a rejection at bar 6 (13:30 + 30min = 14:00 IST)
+        rows[6] = {"open": 102.0, "high": 105.0, "low": 100.8,
+                   "close": 103.0, "volume": 1000.0}
+        df = _five_min_bars(rows, start_ist="13:30")
+        pool = self._long_pool(100.0, 101.0, df.index[1], df.index[2])
+        result = self._result(pool)
+        cfg, cost_cfg = self._common_cfg()
+        trade = simulate_pool_trade(
+            mode="touch_confirmed", symbol="TEST", sector="TEST",
+            df_base=df, pool=pool, result=result, cfg=cfg, cost_cfg=cost_cfg,
+        )
+        # Entry is at bar 7 = 14:05 IST. EOD square-off at 15:15 IST = 70 min later
+        # = 14 bars. Exit bar should be <= 14 bars after entry, not 60.
+        self.assertIsNotNone(trade)
+        self.assertLessEqual(trade.bars_held, 14,
+            f"MIS cap should force exit by 15:15 IST; bars_held={trade.bars_held}")
+
+    def test_does_not_iterate_across_session_boundary(self) -> None:
+        # Build bars that include the END of one session and the START of the next.
+        # Friday 14:50 IST -> 15:30 IST (8 bars same day),
+        # then Monday 09:15 IST -> 09:40 IST (5 bars next session).
+        # A confirmation rejection at bar 0 (14:50 IST) -> entry bar 1 at 14:55 IST.
+        # WITHOUT the same-day cap, exit_trade would happily iterate into Monday
+        # and report bars_held ~= however far stop/target hit. With the cap, max
+        # bars_held = (15:15 - 14:55) / 5 = 4.
+        friday_open_min = 14 * 60 + 50          # 14:50 IST
+        utc_min = friday_open_min - (5 * 60 + 30)
+        utc_h, utc_m = divmod(utc_min, 60)
+        # 8 Friday bars (14:50 -> 15:25 IST, last one one-past 15:15 cap)
+        fri = pd.date_range(f"2026-05-22 {utc_h:02d}:{utc_m:02d}",
+                            periods=8, freq="5min")
+        # 5 Monday bars at 09:15 IST = 03:45 UTC
+        mon = pd.date_range("2026-05-25 03:45", periods=5, freq="5min")
+        idx = fri.append(mon)
+        rows = []
+        for k in range(len(idx)):
+            rows.append({"open": 105.0, "high": 106.0, "low": 104.0,
+                         "close": 105.0, "volume": 1000.0})
+        rows[0] = {"open": 102.0, "high": 105.0, "low": 100.8,
+                   "close": 103.0, "volume": 1000.0}    # rejection at bar 0
+        df = pd.DataFrame(rows, index=idx)
+        pool = self._long_pool(100.0, 101.0, df.index[0], df.index[0])
+        result = self._result(pool)
+        cfg, cost_cfg = self._common_cfg()
+        trade = simulate_pool_trade(
+            mode="touch_confirmed", symbol="TEST", sector="TEST",
+            df_base=df, pool=pool, result=result, cfg=cfg, cost_cfg=cost_cfg,
+        )
+        # Entry at bar 1 (14:55 IST). EOD at 15:15 IST = bar 5. Max bars_held = 4.
+        # If the old simulator was still in effect, bars_held would touch Monday
+        # bars and could be much higher.
+        if trade is None:
+            return  # natural skip is also acceptable; the bug is iterating into Monday
+        self.assertLessEqual(trade.bars_held, 4,
+            f"MIS must not iterate into next session; bars_held={trade.bars_held}")
+        # And the exit timestamp must NOT be on a different IST date than entry.
+        entry_ts = pd.Timestamp(trade.entry_at)
+        exit_ts = pd.Timestamp(trade.exit_at)
+        from liqpool.execution_backtest import _ist_date
+        self.assertEqual(_ist_date(entry_ts), _ist_date(exit_ts),
+            "exit must be same IST trading day as entry")
 
 
 if __name__ == "__main__":
