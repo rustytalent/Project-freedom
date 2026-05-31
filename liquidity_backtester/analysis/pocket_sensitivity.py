@@ -36,7 +36,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
+import multiprocessing as mp
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +58,12 @@ from liqpool.pools import Pool
 from liqpool.regime import nse_session
 from liqpool.sectors import sector_of
 from liqpool.tester import PoolResult
+
+
+_WORKER_REPORT = None
+_WORKER_CFG = None
+_WORKER_COST_CFG = None
+_WORKER_SPLIT = "oos"
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +271,86 @@ def summarise_rows_to_frame(rows: List[PocketRow]) -> pd.DataFrame:
     return pd.DataFrame([r.__dict__ for r in rows])
 
 
+def _init_worker(report, cfg: Config, cost_cfg: ZerodhaEquityCostConfig, split: str) -> None:
+    """Initialise forked workers with the already-loaded bundle."""
+    global _WORKER_REPORT, _WORKER_CFG, _WORKER_COST_CFG, _WORKER_SPLIT
+    _WORKER_REPORT = report
+    _WORKER_CFG = cfg
+    _WORKER_COST_CFG = cost_cfg
+    _WORKER_SPLIT = split
+
+
+def _mp_context():
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return mp.get_context()
+
+
+def _pocket_sizing_task(task) -> Tuple[str, List[PocketRow]]:
+    pocket_name, pocket_def, label, notional = task
+    trades = simulate_pocket(
+        _WORKER_REPORT, _WORKER_CFG, _WORKER_COST_CFG,
+        pocket_def, notional=notional, split=_WORKER_SPLIT,
+    )
+    return pocket_name, _summarise_trades(pocket_name, label, trades)
+
+
+def _run_pocket_grid(
+    report,
+    cfg: Config,
+    cost_cfg: ZerodhaEquityCostConfig,
+    split: str,
+    notionals: List[Optional[float]],
+    workers: int,
+) -> Dict[str, List[PocketRow]]:
+    tasks = []
+    sizing_order: Dict[str, int] = {}
+    for pocket_name, pocket_def in DEFAULT_POCKETS.items():
+        for notional in notionals:
+            label = "qty=1" if notional is None else f"₹{int(notional):,}"
+            sizing_order.setdefault(label, len(sizing_order))
+            tasks.append((pocket_name, pocket_def, label, notional))
+
+    rows_by_pocket: Dict[str, List[PocketRow]] = {name: [] for name in DEFAULT_POCKETS}
+    if workers <= 1:
+        for task in tasks:
+            pocket_name, rows = _pocket_sizing_task_serial(
+                report, cfg, cost_cfg, split, task
+            )
+            rows_by_pocket[pocket_name].extend(rows)
+        return rows_by_pocket
+
+    max_workers = max(1, min(int(workers), len(tasks)))
+    print(f"[pockets] parallel pocket/sizing tasks: {len(tasks)}  workers={max_workers}")
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=_mp_context(),
+        initializer=_init_worker,
+        initargs=(report, cfg, cost_cfg, split),
+    ) as ex:
+        futures = [ex.submit(_pocket_sizing_task, task) for task in tasks]
+        for fut in as_completed(futures):
+            pocket_name, rows = fut.result()
+            rows_by_pocket[pocket_name].extend(rows)
+    for pocket_name, rows in rows_by_pocket.items():
+        rows.sort(key=lambda r: (sizing_order.get(r.sizing, 999), r.mode))
+    return rows_by_pocket
+
+
+def _pocket_sizing_task_serial(
+    report,
+    cfg: Config,
+    cost_cfg: ZerodhaEquityCostConfig,
+    split: str,
+    task,
+) -> Tuple[str, List[PocketRow]]:
+    pocket_name, pocket_def, label, notional = task
+    trades = simulate_pocket(report, cfg, cost_cfg, pocket_def,
+                             notional=notional, split=split)
+    return pocket_name, _summarise_trades(pocket_name, label, trades)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -325,6 +413,8 @@ def main() -> int:
     ap.add_argument("--min-trades", type=int, default=50,
                     help="ignore cells with fewer trades than this in the verdict")
     ap.add_argument("--out", default="output_audit")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes for pocket/sizing replay; use 8-12 on a 16-core VPS")
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir).expanduser()
@@ -339,15 +429,13 @@ def main() -> int:
 
     all_rows: List[PocketRow] = []
     print(f"[pockets] bundle: {model_dir/'multi_asset_report.pkl'}  split={args.split}")
-    for pocket_name, pocket_def in DEFAULT_POCKETS.items():
-        for notional in notionals:
-            label = "qty=1" if notional is None else f"₹{int(notional):,}"
-            trades = simulate_pocket(report, cfg, cost_cfg, pocket_def,
-                                      notional=notional, split=args.split)
-            rows = _summarise_trades(pocket_name, label, trades)
-            all_rows.extend(rows)
+    rows_by_pocket = _run_pocket_grid(
+        report, cfg, cost_cfg, args.split, notionals, workers=args.workers
+    )
+    for pocket_name in DEFAULT_POCKETS:
+        all_rows.extend(rows_by_pocket[pocket_name])
         # Per-pocket print, aggregated across all sizings for compactness.
-        pocket_rows = [r for r in all_rows if r.pocket == pocket_name]
+        pocket_rows = rows_by_pocket[pocket_name]
         _print_pocket_block(pocket_name, pocket_rows)
 
     out_df = summarise_rows_to_frame(all_rows)

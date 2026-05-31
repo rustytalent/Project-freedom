@@ -30,10 +30,12 @@ Usage (on the Mac where the bundle lives):
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
+import multiprocessing as mp
 import pickle
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -42,6 +44,12 @@ from liqpool.config import Config
 from liqpool.costs import ZerodhaEquityCostConfig
 from liqpool.execution_backtest import EXECUTION_MODES, simulate_execution_modes
 from liqpool.sectors import sector_of
+
+
+_WORKER_REPORT = None
+_WORKER_CFG = None
+_WORKER_COST_CFG = None
+_WORKER_SPLIT = "oos"
 
 
 def _load_bundle(model_dir: Path):
@@ -87,6 +95,95 @@ def _trades_for_sizing(report, cfg: Config, cost_cfg: ZerodhaEquityCostConfig,
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _init_worker(report, cfg: Config, cost_cfg: ZerodhaEquityCostConfig, split: str) -> None:
+    """Initialise forked workers with the already-loaded bundle.
+
+    On Linux this uses copy-on-write memory, so the 600MB+ bundle is not
+    physically copied into every worker unless a worker mutates it.
+    """
+    global _WORKER_REPORT, _WORKER_CFG, _WORKER_COST_CFG, _WORKER_SPLIT
+    _WORKER_REPORT = report
+    _WORKER_CFG = cfg
+    _WORKER_COST_CFG = cost_cfg
+    _WORKER_SPLIT = split
+
+
+def _asset_sizing_task(task: Tuple[str, Optional[float], str]) -> Tuple[str, pd.DataFrame]:
+    label, notional, symbol = task
+    report = _WORKER_REPORT
+    ad = report.assets[symbol]
+    if _WORKER_SPLIT == "train":
+        pools = ad.walkforward.train_pools_for_ml
+        results = ad.walkforward.train_results_for_ml
+    else:
+        pools = ad.walkforward.oos_pools
+        results = ad.walkforward.oos_results
+    asset_cfg = getattr(ad, "final_cfg", None) or _WORKER_CFG
+    if notional is None:
+        qty = 1
+    else:
+        price = _representative_price(ad)
+        qty = max(1, int(math.floor(notional / price))) if price > 0 else 1
+    trades = simulate_execution_modes(
+        df_base=ad.base_df, pools=pools, results=results,
+        symbol=symbol, sector=sector_of(symbol),
+        cfg=asset_cfg, cost_cfg=_WORKER_COST_CFG,
+        modes=EXECUTION_MODES, quantity=qty,
+    )
+    return label, trades
+
+
+def _mp_context():
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return mp.get_context()
+
+
+def _trades_for_schemes_parallel(
+    report,
+    cfg: Config,
+    cost_cfg: ZerodhaEquityCostConfig,
+    split: str,
+    schemes: List[Tuple[str, Optional[float]]],
+    workers: int,
+) -> Dict[str, pd.DataFrame]:
+    if workers <= 1:
+        return {
+            label: _trades_for_sizing(report, cfg, cost_cfg, split, notional)
+            for label, notional in schemes
+        }
+
+    labels = [label for label, _ in schemes]
+    frames_by_label: Dict[str, List[pd.DataFrame]] = {label: [] for label in labels}
+    tasks = [
+        (label, notional, symbol)
+        for label, notional in schemes
+        for symbol in report.assets.keys()
+    ]
+    max_workers = max(1, min(int(workers), len(tasks)))
+    print(f"[cost-sens] parallel asset/sizing tasks: {len(tasks)}  workers={max_workers}")
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        mp_context=_mp_context(),
+        initializer=_init_worker,
+        initargs=(report, cfg, cost_cfg, split),
+    ) as ex:
+        futures = [ex.submit(_asset_sizing_task, task) for task in tasks]
+        for fut in as_completed(futures):
+            label, trades = fut.result()
+            if not trades.empty:
+                frames_by_label[label].append(trades)
+    return {
+        label: (
+            pd.concat(frames_by_label[label], ignore_index=True)
+            if frames_by_label[label]
+            else pd.DataFrame()
+        )
+        for label in labels
+    }
+
+
 def _summarise(trades: pd.DataFrame) -> pd.DataFrame:
     """Per-mode gross_R / net_R / cost_R / win / PF / avg cost."""
     if trades.empty:
@@ -119,6 +216,8 @@ def main() -> int:
     ap.add_argument("--notionals", default="50000,100000,200000",
                     help="comma-separated rupee notionals to test (plus qty=1 baseline)")
     ap.add_argument("--out", default="output_audit")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes for asset/sizing replay; use 8-12 on a 16-core VPS")
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir).expanduser()
@@ -135,8 +234,11 @@ def main() -> int:
 
     all_rows = []
     print(f"[cost-sens] bundle: {model_dir/'multi_asset_report.pkl'}  split={args.split}")
-    for label, notional in schemes:
-        trades = _trades_for_sizing(report, cfg, cost_cfg, args.split, notional)
+    trades_by_label = _trades_for_schemes_parallel(
+        report, cfg, cost_cfg, args.split, schemes, workers=args.workers
+    )
+    for label, _notional in schemes:
+        trades = trades_by_label[label]
         summ = _summarise(trades)
         if summ.empty:
             print(f"\n[{label}] (no trades)")
