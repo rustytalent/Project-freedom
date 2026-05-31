@@ -1165,18 +1165,10 @@ later full-V2 replay proves otherwise.
 ### Next exact order
 
 1. Pull latest code on VPS.
-2. Re-run the Track A synthetic-null preflight on VPS with 12 workers and 2000
-   trials to confirm the local 1000-trial result.
-3. If the result remains `CORE_PASS_DIRECTION_WEAK`, implement the heavier
-   full pool-level null suite:
-   - random pools at matched spatial density
-   - ATR-offset pools at k=1,2,3,5
-   - sector-neutral random pools
-   - full V2 shuffled-direction replay
-4. Run full pool-level nulls on both:
+2. Run the heavier pool-level null replay:
    - direction-hard winning combo
    - same core pocket with direction softened/removed
-5. Do not paper trade or live trade before full synthetic nulls pass.
+3. Do not paper trade or live trade before full synthetic nulls pass.
 
 ### VPS command to confirm preflight
 
@@ -1195,3 +1187,40 @@ PYTHONPATH=. .venv/bin/python -u analysis/run_phase4_track_a_synthetic_nulls.py 
 ```
 
 **End of Codex handoff. Next move: confirm synthetic-null preflight on VPS, then build full pool-level nulls.**
+
+### Codex Update — pool-level null runner added
+
+After the VPS confirmed `SYNTHETIC_PREFLIGHT_CORE_PASS_DIRECTION_WEAK`, Codex
+added:
+
+- `analysis/run_phase4_track_a_pool_level_nulls.py`
+- `tests/test_track_a_pool_level_nulls.py`
+
+This runner mutates pool locations and replays them through the Track A v2
+execution path. It tests:
+
+- `random_pool_matched`
+- `atr_offset_1`, `atr_offset_2`, `atr_offset_3`, `atr_offset_5`
+- `sector_neutral_random`
+- `shuffled_direction_replay`
+
+It tests both `direction_hard` and `direction_soft` pockets. Use 5m fallback
+first on VPS for speed; rerun with `--use-1m-resolution --raw-1m-dir ...` only
+if raw 1m data is copied to the VPS.
+
+```bash
+cd /root/Project-freedom/liquidity_backtester
+git pull origin claude/liquidity-pool-backtester-1uskb
+mkdir -p logs output_audit/track_a_pool_level_nulls
+
+PYTHONPATH=. .venv/bin/python -u analysis/run_phase4_track_a_pool_level_nulls.py \
+  --model-report output_models/core25_latest/multi_asset_report.pkl \
+  --candidates output_phase4_track_a_pretouch_sweep/pretouch_candidates.parquet \
+  --trials 100 \
+  --workers 12 \
+  --out-dir output_audit/track_a_pool_level_nulls \
+  --report-out reports/phase4_track_a_pool_level_nulls.md \
+  2>&1 | tee logs/track_a_pool_level_nulls.log
+```
+
+**End of Codex handoff. Next move: run pool-level null replay on VPS and interpret the result.**

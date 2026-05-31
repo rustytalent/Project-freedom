@@ -3328,11 +3328,37 @@ Plain-English read: the journey-to-liquidity pocket is still alive, but the hard
 ### Next Order
 
 1. Pull latest code on VPS.
-2. Confirm the Track A synthetic-null preflight on VPS with `--workers 12 --trials 2000`.
-3. Then build full pool-level null replay:
+2. Run the new pool-level null replay:
    - random pools
    - ATR-offset pools
    - sector-neutral random pools
    - full V2 shuffled-direction replay
-4. Test both the direction-hard pocket and a direction-soft/no-hard-direction variant.
-5. No paper trading or live trading until full synthetic nulls pass.
+3. Test both the direction-hard pocket and a direction-soft/no-hard-direction variant.
+4. No paper trading or live trading until full synthetic nulls pass.
+
+### New Pool-Level Null Runner
+
+Codex added:
+
+- `analysis/run_phase4_track_a_pool_level_nulls.py`
+- `tests/test_track_a_pool_level_nulls.py`
+
+VPS command:
+
+```bash
+cd /root/Project-freedom/liquidity_backtester
+git pull origin claude/liquidity-pool-backtester-1uskb
+mkdir -p logs output_audit/track_a_pool_level_nulls
+
+PYTHONPATH=. .venv/bin/python -u analysis/run_phase4_track_a_pool_level_nulls.py \
+  --model-report output_models/core25_latest/multi_asset_report.pkl \
+  --candidates output_phase4_track_a_pretouch_sweep/pretouch_candidates.parquet \
+  --trials 100 \
+  --workers 12 \
+  --out-dir output_audit/track_a_pool_level_nulls \
+  --report-out reports/phase4_track_a_pool_level_nulls.md \
+  2>&1 | tee logs/track_a_pool_level_nulls.log
+```
+
+First run uses 5m fallback for speed. If raw 1m data is later copied to VPS,
+rerun with `--use-1m-resolution --raw-1m-dir /path/to/raw_1m`.
