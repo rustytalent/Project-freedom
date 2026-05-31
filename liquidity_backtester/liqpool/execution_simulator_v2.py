@@ -24,8 +24,13 @@ from .config import Config
 from .data import _normalise_parquet_ohlcv, _normalise_symbol_key
 from .execution_backtest import (
     EXECUTION_MODES,
+    NO_NEW_ENTRY_AFTER_IST_MIN,
+    SESSION_CLOSE_IST_MIN,
+    SESSION_OPEN_IST_MIN,
     _entry_for_mode,
     _headline_factor,
+    _ist_minute_of_day,
+    _last_intraday_bar_idx,
     _levels,
     _reaction_label,
     summarise_execution_trades,
@@ -373,6 +378,9 @@ def _exit_5m_fallback(
     time_stop_bars: int,
 ) -> Tuple[int, float, str]:
     last_idx = min(end - 1, entry_idx + max(1, int(time_stop_bars)))
+    idx = pd.DatetimeIndex(df.index)
+    if len(idx) and 0 <= entry_idx < len(idx):
+        last_idx = min(last_idx, _last_intraday_bar_idx(idx, entry_idx, last_idx))
     for j in range(entry_idx + 1, last_idx + 1):
         row = df.iloc[j]
         low = float(row["low"])
@@ -429,6 +437,23 @@ def simulate_pool_trade_v2(
         if entry_idx >= end:
             return None
         entry_reference = float(df_base["open"].iloc[entry_idx])
+
+    # MIS (intraday-square-off) enforcement, matching execution_backtest.py:
+    # refuse late/out-of-session entries and cap exits to the same IST trading
+    # day before broker square-off. This keeps V2's richer 1m/slippage mechanics
+    # from silently using overnight bars.
+    entry_min = _ist_minute_of_day(idx[entry_idx])
+    if not (SESSION_OPEN_IST_MIN <= entry_min <= SESSION_CLOSE_IST_MIN):
+        return None
+    if entry_min > NO_NEW_ENTRY_AFTER_IST_MIN:
+        return None
+    natural_time_stop = int(time_stop_bars or cfg.respect_within_bars)
+    eod_bar_idx = _last_intraday_bar_idx(idx, entry_idx, end - 1)
+    intraday_bars_available = eod_bar_idx - entry_idx
+    if intraday_bars_available <= 0:
+        return None
+    effective_time_stop = min(natural_time_stop, intraday_bars_available)
+
     atr_at_entry = float(atr_values.iloc[entry_idx])
     fill = _entry_with_fill_policy(
         mode, pool, df_base, entry_idx, float(entry_reference), atr_at_entry, v2_cfg.fill_policy,
@@ -440,8 +465,8 @@ def simulate_pool_trade_v2(
         fill_reason = f"{entry_reason}:{fill_reason}"
 
     stop, target = _levels(pool, atr_at_entry)
-    max_hold = time_stop_bars or cfg.respect_within_bars
-    last_idx = min(end - 1, entry_idx + max(1, int(max_hold)))
+    max_hold = effective_time_stop
+    last_idx = min(eod_bar_idx, entry_idx + max(1, int(max_hold)))
     direction = "UP" if pool.side == "low" else "DOWN"
     direction_sign = 1 if direction == "UP" else -1
     if direction == "UP" and not (stop < entry_price_ref < target):
