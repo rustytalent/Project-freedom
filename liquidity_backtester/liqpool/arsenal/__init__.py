@@ -26,6 +26,7 @@ from .evaluator import (
     ArsenalEvaluator,
     EvaluatorConfig,
 )
+from .meta import MetaANDAlpha, MetaORAlpha, MetaWeightedAlpha
 from .null_tests import (
     NullResult,
     collect_signals_per_asset,
@@ -40,6 +41,9 @@ __all__ = [
     "AlphaRegistry",
     "ArsenalEvaluator",
     "EvaluatorConfig",
+    "MetaANDAlpha",
+    "MetaORAlpha",
+    "MetaWeightedAlpha",
     "NullResult",
     "TRADE_COLUMNS",
     "collect_signals_per_asset",

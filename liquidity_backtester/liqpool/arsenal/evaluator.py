@@ -214,6 +214,8 @@ class ArsenalEvaluator:
             asset_extras = {
                 "asset_data": ad,                    # for alphas that need pools/results
                 "sector": sec,
+                "report": report,                    # for wrapped-model alphas that need
+                                                     # access to report.unified_ml, etc.
             }
             for alpha in self.alphas:
                 extra = {**asset_extras, **(extras_by_alpha.get(alpha.name, {}))}

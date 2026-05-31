@@ -103,10 +103,14 @@ class StateFeaturizer:
                 return 0.0
             return float(np.log(c[j] / c[i0]))
 
-        # Momentum over last 12 bars
-        i0 = max(0, j - 11)
-        oa = (c[i0:j + 1] - c[max(0, i0 - 1):j])[:j - i0 + 1]
-        mom_12 = float(np.sum(oa) / a) if len(oa) else 0.0
+        # Momentum over last 12 bars: sum of bar-over-bar moves.
+        # np.diff handles boundary cases cleanly (n-1 moves over n bars). The
+        # old form `(c[i0:j+1] - c[max(0, i0-1):j])` had a shape mismatch when
+        # i0 = 0 (early bars), because both slices ended up length j+1 and
+        # length j respectively. np.diff sidesteps that entirely.
+        slice_start = max(0, j - 11)
+        moves = np.diff(c[slice_start:j + 1])
+        mom_12 = float(np.sum(moves) / a) if len(moves) else 0.0
 
         mean50 = self.roll_mean_50[j]
         std50 = self.roll_std_50[j]
