@@ -5,6 +5,15 @@
 **Date:** 2026-05-31
 **Test suite:** 219 passing, 0 failing, enforced compliance lint clean.
 
+> **2026-05-31 UPDATE — Track A pool-level null came back `POOL_LEVEL_FAIL`.**
+> Opus's full interpretation + the decisive next test are in
+> **`docs/track_a_null_decision.md`**. TL;DR: pool *geometry as target* is dead
+> (clean null); the surviving signal is sector+time+~5ATR distance and it is
+> **sub-cost** (1.5× cost stress = −0.03 to −0.04R). The user's
+> "pools-as-intent-detector" counter-hypothesis is **partially right and
+> untested** — the **moment null** (task R-MOMENT-NULL below) is the experiment
+> that resolves it. This now supersedes R-NULLS as the top strategic task.
+
 ---
 
 ## 0. READ THIS FIRST — One-screen TL;DR
@@ -744,6 +753,37 @@ R-explosion + no-MIS bugs. We need a clean baseline before any further work.
   status under MIS = Y; next implied step = Z."
 
 **Estimated effort:** 2-4 hours (mostly waiting for sweep regen if needed).
+
+### TASK R-MOMENT-NULL: Moment null + pocket-conditional geometry null **[TOP STRATEGIC]**
+
+**Why:** The pool-level null returned `POOL_LEVEL_FAIL` (2026-05-31). Pool
+*geometry as target* is dead (clean null, p≈0.5). The user's counter-hypothesis
+— pools may be *intent/state detectors* even if not precise targets — is
+partially right and **untested**. The moment null is the one experiment that
+resolves whether model-selected moments carry intent-timing signal. Full
+interpretation and spec: **`docs/track_a_null_decision.md`**.
+
+**Inputs:**
+- `output_phase4_track_a_pretouch_sweep/pretouch_candidates.parquet`
+- The pool-level null replay harness Codex already wrote (same simulator).
+- Saved bundle.
+
+**What to do:** Implement per `docs/track_a_null_decision.md` §7 —
+(a) `moment_null`: replay candidates at random timestamps matched on
+(distance_bucket × sector × time_bucket) that the model did NOT select;
+(b) pocket-conditional geometry null: re-run the existing `random_pool_matched`
+null restricted to the strong pockets (midday/5-8ATR, morning/5-8ATR).
+Report both in `reports/track_a_moment_and_pocket_null.md` with per-cell mean R
++ CI95, target-hit rate, MFE/MAE, tail R, and **gross R vs 1.5× cost-stressed R**.
+
+**Acceptance (the two-hurdle gate):** the report explicitly answers, per pocket:
+is there a cell where the real signal both (i) clears 1.5× cost AND (ii) beats
+its matched null at p<0.05? If yes → build the final-stage state model (option C)
+on that cell. If no → pivot to options-data foundation or shelve Track A.
+**Do NOT build the final-stage model before this test passes** — that risks
+fitting noise.
+
+**Estimated effort:** 1-2 days.
 
 ### TASK R-NULLS: Full synthetic-null suite (4 tests)
 
