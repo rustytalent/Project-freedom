@@ -3291,3 +3291,48 @@ If Q is compressed AND Track A works, the system suddenly has clear edge it coul
 If neither works, the answer is options (Phase 5). But we have to know first.
 
 Start with Workstream 0. Single markdown report. Then check in before any code changes.
+
+---
+
+## Current Codex Update — 2026-06-01
+
+This update reflects work completed after the long Phase 4 context above.
+
+### Completed Now
+
+- Post-MIS baseline was run and documented in `reports/post_mis_baseline.md`.
+- Track B/post-touch is deprioritized: every post-touch mode remains negative after MIS/cost fixes.
+- V2 simulator now enforces MIS boundaries:
+  - no out-of-session entries
+  - no new entries after the MIS cutoff
+  - same-day square-off cap
+- Fast Track A synthetic-null preflight was added:
+  - `analysis/run_phase4_track_a_synthetic_nulls.py`
+  - `tests/test_track_a_synthetic_nulls.py`
+  - `reports/phase4_track_a_synthetic_nulls.md`
+
+### Latest Track A Null Result
+
+Decision: `SYNTHETIC_PREFLIGHT_CORE_PASS_DIRECTION_WEAK`
+
+The winning combo pocket beats:
+
+- matched-random rows
+- time-bucket shuffle
+- sector shuffle
+
+But it does **not** beat direction-label shuffle.
+
+Plain-English read: the journey-to-liquidity pocket is still alive, but the hard direction gate is probably not the source of edge. Direction should become a soft feature for the final-stage model, not a sacred hard gate.
+
+### Next Order
+
+1. Pull latest code on VPS.
+2. Confirm the Track A synthetic-null preflight on VPS with `--workers 12 --trials 2000`.
+3. Then build full pool-level null replay:
+   - random pools
+   - ATR-offset pools
+   - sector-neutral random pools
+   - full V2 shuffled-direction replay
+4. Test both the direction-hard pocket and a direction-soft/no-hard-direction variant.
+5. No paper trading or live trading until full synthetic nulls pass.

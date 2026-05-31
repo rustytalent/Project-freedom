@@ -1120,4 +1120,78 @@ fcab4cd  Add Q percentile policy research
 
 ---
 
-**End of Codex handoff. Next move: §10 R-MEASURE.**
+---
+
+## Codex Update — 2026-06-01 after post-MIS baseline
+
+This section supersedes the old "Next move: R-MEASURE" line above.
+
+### Completed after Opus handoff
+
+1. **R-MEASURE completed and reported**
+   - Report: `reports/post_mis_baseline.md`
+   - Track B/post-touch remains dead under corrected MIS/cost arithmetic.
+   - Cost scaling helps but does not rescue Track B. Best post-touch mode at
+     Rs200k notional is still negative (`displacement_confirmed` about -0.29R).
+   - Track A/pre-touch remains the only credible equity path.
+
+2. **V2 MIS enforcement completed**
+   - File: `liqpool/execution_simulator_v2.py`
+   - V2 now refuses out-of-session/late MIS entries and caps same-day exits.
+   - Tests: `tests/test_execution_simulator_v2.py`
+
+3. **Fast Track A synthetic-null preflight added**
+   - Script: `analysis/run_phase4_track_a_synthetic_nulls.py`
+   - Test: `tests/test_track_a_synthetic_nulls.py`
+   - Report: `reports/phase4_track_a_synthetic_nulls.md`
+
+### Latest synthetic-null preflight read
+
+Primary pocket: `winning_combo` = morning/midday + AUTO/FMCG/PHARMA + UP.
+
+Result: `SYNTHETIC_PREFLIGHT_CORE_PASS_DIRECTION_WEAK`
+
+- Matched-random rows: PASS, p~=0.001
+- Time-bucket shuffle: PASS, p~=0.001
+- Sector shuffle: PASS, p~=0.001
+- Direction-label shuffle: FAIL, p~=0.512
+
+Interpretation: the core journey pocket is not explained by random matched
+rows, time labels, or sector labels. But the hard UP direction gate does not
+add distinguishable edge over shuffled direction labels. Direction should be a
+soft feature in the final-stage model, not a hard production gate, unless a
+later full-V2 replay proves otherwise.
+
+### Next exact order
+
+1. Pull latest code on VPS.
+2. Re-run the Track A synthetic-null preflight on VPS with 12 workers and 2000
+   trials to confirm the local 1000-trial result.
+3. If the result remains `CORE_PASS_DIRECTION_WEAK`, implement the heavier
+   full pool-level null suite:
+   - random pools at matched spatial density
+   - ATR-offset pools at k=1,2,3,5
+   - sector-neutral random pools
+   - full V2 shuffled-direction replay
+4. Run full pool-level nulls on both:
+   - direction-hard winning combo
+   - same core pocket with direction softened/removed
+5. Do not paper trade or live trade before full synthetic nulls pass.
+
+### VPS command to confirm preflight
+
+```bash
+cd /root/Project-freedom/liquidity_backtester
+git pull origin claude/liquidity-pool-backtester-1uskb
+mkdir -p logs output_audit/track_a_synthetic_nulls
+
+PYTHONPATH=. .venv/bin/python -u analysis/run_phase4_track_a_synthetic_nulls.py \
+  --trades output_phase4_track_a_pretouch_sweep/pretouch_sweep_trades.parquet \
+  --trials 2000 \
+  --workers 12 \
+  --out-dir output_audit/track_a_synthetic_nulls \
+  --report-out reports/phase4_track_a_synthetic_nulls.md \
+  2>&1 | tee logs/track_a_synthetic_nulls.log
+```
+
+**End of Codex handoff. Next move: confirm synthetic-null preflight on VPS, then build full pool-level nulls.**
