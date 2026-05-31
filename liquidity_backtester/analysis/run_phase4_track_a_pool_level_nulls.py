@@ -366,19 +366,95 @@ def simulate_candidate_frame(
     return pd.concat(frames, ignore_index=True)
 
 
-def _task_payload(
-    *,
-    pocket: str,
-    null_test: str,
-    trial: int,
-    candidates: pd.DataFrame,
-    args: argparse.Namespace,
-) -> Dict:
-    return {
+def _simulate_and_summarize(command: Dict, candidates: pd.DataFrame, config: Mapping) -> Dict:
+    report = _worker_report(str(config["model_report"]))
+    raw_dir = Path(str(config["raw_1m_dir"])).expanduser() if config.get("raw_1m_dir") else None
+    rng = np.random.default_rng(int(command.get("seed", 0)))
+    pocket = str(command["pocket"])
+    null_test = str(command["null_test"])
+
+    if null_test == "actual_replay":
+        frame = pocket_candidates(candidates, pocket)
+    elif null_test.startswith("atr_offset_"):
+        frame = make_atr_offset_candidates(
+            pocket_candidates(candidates, pocket),
+            float(command["atr_k"]),
+        )
+    elif null_test == "random_pool_matched":
+        frame = make_random_pool_candidates(pocket_candidates(candidates, pocket), rng)
+    elif null_test == "sector_neutral_random":
+        frame = make_sector_neutral_candidates(candidates, pocket, rng)
+    elif null_test == "shuffled_direction_replay":
+        frame = make_direction_shuffle_candidates(candidates, rng)
+    else:
+        raise ValueError(f"unknown null command: {null_test}")
+
+    max_candidates = config.get("max_candidates")
+    if max_candidates is not None:
+        frame = frame.head(int(max_candidates)).copy()
+
+    trades = simulate_candidate_frame(
+        frame,
+        report=report,
+        raw_1m_dir=raw_dir,
+        geometries=config["geometries"],
+        data_timestamps_utc=bool(config["data_timestamps_utc"]),
+        session_exit_time=str(config["session_exit_time"]),
+        use_1m_resolution=bool(config["use_1m_resolution"]),
+        slippage_model=str(config["slippage_model"]),
+        base_slippage_bps=float(config["base_slippage_bps"]),
+        exchange=str(config["exchange"]),
+        quantity=int(config["quantity"]),
+    )
+    row = summarize_trades(trades)
+    row.update({
         "pocket": pocket,
         "null_test": null_test,
-        "trial": int(trial),
-        "candidates": candidates,
+        "trial": int(command["trial"]),
+        "candidate_rows": int(len(frame)),
+    })
+    return row
+
+
+def _run_batch(payload: Dict) -> List[Dict]:
+    candidates = payload["candidates"]
+    config = payload["config"]
+    return [
+        _simulate_and_summarize(command, candidates, config)
+        for command in payload["commands"]
+    ]
+
+
+def _split_evenly(items: Sequence[Dict], chunks: int) -> List[List[Dict]]:
+    chunks = max(1, min(int(chunks), len(items)))
+    out = [[] for _ in range(chunks)]
+    for i, item in enumerate(items):
+        out[i % chunks].append(item)
+    return [chunk for chunk in out if chunk]
+
+
+def _run_batches(payloads: Sequence[Dict], workers: int) -> List[Dict]:
+    if not payloads:
+        return []
+    workers = max(1, min(int(workers), len(payloads)))
+    if workers == 1:
+        rows: List[Dict] = []
+        for payload in payloads:
+            rows.extend(_run_batch(payload))
+        return rows
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            parts = list(pool.map(_run_batch, payloads))
+    except (OSError, PermissionError):
+        parts = [_run_batch(payload) for payload in payloads]
+    rows = []
+    for part in parts:
+        rows.extend(part)
+    return rows
+
+
+def _config_from_args(args: argparse.Namespace) -> Dict:
+    return {
         "model_report": str(args.model_report),
         "raw_1m_dir": str(args.raw_1m_dir) if args.raw_1m_dir else "",
         "geometries": args._geometries,
@@ -389,107 +465,63 @@ def _task_payload(
         "base_slippage_bps": float(args.base_slippage_bps),
         "exchange": args.exchange,
         "quantity": int(args.quantity),
+        "max_candidates": args.max_candidates,
     }
 
 
-def _run_task(payload: Dict) -> Dict:
-    report = _worker_report(payload["model_report"])
-    raw_dir = Path(payload["raw_1m_dir"]).expanduser() if payload["raw_1m_dir"] else None
-    trades = simulate_candidate_frame(
-        payload["candidates"],
-        report=report,
-        raw_1m_dir=raw_dir,
-        geometries=payload["geometries"],
-        data_timestamps_utc=payload["data_timestamps_utc"],
-        session_exit_time=payload["session_exit_time"],
-        use_1m_resolution=payload["use_1m_resolution"],
-        slippage_model=payload["slippage_model"],
-        base_slippage_bps=payload["base_slippage_bps"],
-        exchange=payload["exchange"],
-        quantity=payload["quantity"],
-    )
-    row = summarize_trades(trades)
-    row.update({
-        "pocket": payload["pocket"],
-        "null_test": payload["null_test"],
-        "trial": int(payload["trial"]),
-        "candidate_rows": int(len(payload["candidates"])),
-    })
-    return row
-
-
-def _run_tasks(tasks: Sequence[Dict], workers: int) -> List[Dict]:
-    if not tasks:
-        return []
-    workers = max(1, min(int(workers), len(tasks)))
-    if workers == 1:
-        return [_run_task(task) for task in tasks]
-    try:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(_run_task, tasks))
-    except (OSError, PermissionError):
-        return [_run_task(task) for task in tasks]
-
-
-def build_tasks(candidates: pd.DataFrame, args: argparse.Namespace) -> List[Dict]:
+def build_commands(args: argparse.Namespace) -> List[Dict]:
     rng = np.random.default_rng(args.seed)
-    tasks: List[Dict] = []
+    commands: List[Dict] = []
     pockets = [p.strip() for p in args.pockets.split(",") if p.strip()]
     for pocket in pockets:
-        actual = pocket_candidates(candidates, pocket)
-        if args.max_candidates is not None:
-            actual = actual.head(args.max_candidates).copy()
-        tasks.append(_task_payload(
-            pocket=pocket,
-            null_test="actual_replay",
-            trial=0,
-            candidates=actual,
-            args=args,
-        ))
-
+        commands.append({
+            "pocket": pocket,
+            "null_test": "actual_replay",
+            "trial": 0,
+        })
         for k in ATR_OFFSETS:
-            tasks.append(_task_payload(
-                pocket=pocket,
-                null_test=f"atr_offset_{k:g}",
-                trial=0,
-                candidates=make_atr_offset_candidates(actual, k),
-                args=args,
-            ))
-
+            commands.append({
+                "pocket": pocket,
+                "null_test": f"atr_offset_{k:g}",
+                "trial": 0,
+                "atr_k": float(k),
+            })
         for trial in range(1, args.trials + 1):
             trial_seed = int(rng.integers(0, 2**31 - 1))
-            trial_rng = np.random.default_rng(trial_seed)
-            tasks.append(_task_payload(
-                pocket=pocket,
-                null_test="random_pool_matched",
-                trial=trial,
-                candidates=make_random_pool_candidates(actual, trial_rng),
-                args=args,
-            ))
-            trial_rng = np.random.default_rng(trial_seed + 17)
-            sector_neutral = make_sector_neutral_candidates(candidates, pocket, trial_rng)
-            if args.max_candidates is not None:
-                sector_neutral = sector_neutral.head(args.max_candidates).copy()
-            tasks.append(_task_payload(
-                pocket=pocket,
-                null_test="sector_neutral_random",
-                trial=trial,
-                candidates=sector_neutral,
-                args=args,
-            ))
+            commands.append({
+                "pocket": pocket,
+                "null_test": "random_pool_matched",
+                "trial": trial,
+                "seed": trial_seed,
+            })
+            commands.append({
+                "pocket": pocket,
+                "null_test": "sector_neutral_random",
+                "trial": trial,
+                "seed": trial_seed + 17,
+            })
             if pocket == "direction_hard":
-                trial_rng = np.random.default_rng(trial_seed + 31)
-                shuffled = make_direction_shuffle_candidates(candidates, trial_rng)
-                if args.max_candidates is not None:
-                    shuffled = shuffled.head(args.max_candidates).copy()
-                tasks.append(_task_payload(
-                    pocket=pocket,
-                    null_test="shuffled_direction_replay",
-                    trial=trial,
-                    candidates=shuffled,
-                    args=args,
-                ))
-    return tasks
+                commands.append({
+                    "pocket": pocket,
+                    "null_test": "shuffled_direction_replay",
+                    "trial": trial,
+                    "seed": trial_seed + 31,
+                })
+    return commands
+
+
+def build_batch_payloads(candidates: pd.DataFrame, args: argparse.Namespace) -> List[Dict]:
+    commands = build_commands(args)
+    chunks = _split_evenly(commands, args.workers)
+    config = _config_from_args(args)
+    return [
+        {
+            "candidates": candidates,
+            "config": config,
+            "commands": chunk,
+        }
+        for chunk in chunks
+    ]
 
 
 def aggregate_results(rows: pd.DataFrame) -> pd.DataFrame:
@@ -655,23 +687,33 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global _WORKER_REPORT, _WORKER_REPORT_PATH
     args = parse_args()
     if args.trials < 1:
         raise SystemExit("--trials must be >= 1")
     if args.workers < 1:
         raise SystemExit("--workers must be >= 1")
-    print(f"[pool-nulls] loading model report: {args.model_report}")
+    print(f"[pool-nulls] loading model report: {args.model_report}", flush=True)
     report = _load_report(args.model_report)
+    _WORKER_REPORT = report
+    _WORKER_REPORT_PATH = str(args.model_report)
     candidates = enrich_execution_refs(load_candidates(args.candidates), report)
     if candidates.empty:
         raise SystemExit("no executable candidates after enrichment")
     print(
         f"[pool-nulls] candidates={len(candidates):,} trials={args.trials} "
-        f"workers={args.workers} geometries={len(args._geometries)}"
+        f"workers={args.workers} geometries={len(args._geometries)}",
+        flush=True,
     )
-    tasks = build_tasks(candidates, args)
-    print(f"[pool-nulls] replay tasks={len(tasks):,}")
-    rows = pd.DataFrame(_run_tasks(tasks, args.workers))
+    commands = build_commands(args)
+    batches = build_batch_payloads(candidates, args)
+    print(
+        f"[pool-nulls] replay commands={len(commands):,} batches={len(batches):,} "
+        f"batch_size~={math.ceil(len(commands) / max(len(batches), 1))}",
+        flush=True,
+    )
+    rows = pd.DataFrame(_run_batches(batches, args.workers))
+    print(f"[pool-nulls] completed replay rows={len(rows):,}", flush=True)
     summary = aggregate_results(rows)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
