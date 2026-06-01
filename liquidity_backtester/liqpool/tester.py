@@ -36,6 +36,7 @@ import pandas as pd
 
 from .config import Config
 from .indicators import atr
+from .intraday import last_intraday_bar_idx
 from .pools import Pool
 
 
@@ -117,12 +118,29 @@ def test_pools(df_base: pd.DataFrame, pools: List[Pool], cfg: Config) -> List[Po
     results: List[PoolResult] = []
     min_horizon = max(cfg.respect_within_bars + 1, 10)
 
+    # MIS-aware label generation:
+    # If cfg.intraday_session_only is True (default), the per-pool label window
+    # is capped at the LAST same-IST-day bar with minute-of-day <= 15:15 IST.
+    # This makes labels (touched_at, broken_at, max_excursion, reaction_atr,
+    # outcome) reflect what an intraday-MIS trader could actually realise — no
+    # overnight gaps treated as continuation, no multi-day "respect" credited
+    # to a same-session trade. Set the flag to False to recover legacy
+    # swing-style labels.
+    intraday_only = getattr(cfg, "intraday_session_only", True)
+
     for k, p in enumerate(pools):
         # `known_at` is bar-aligned by construction (close-of-confirmation-bar = open-of-next).
         # side="left" lands on that next bar — the first one a real-time trader can actually act
         # on. side="right" would skip it and cost us one valid bar of forward data.
         start = int(np.searchsorted(idx.values, np.datetime64(p.available_at), side="left"))
         end = min(start + cfg.test_horizon_bars, len(df_base))
+        if intraday_only and start < len(df_base):
+            # Cap end at the same-session EOD. last_intraday_bar_idx returns
+            # the largest bar j in [start, end-1] on the same IST trading day
+            # whose minute-of-day <= 15:15 IST. +1 because the loop below uses
+            # range(start, end) (end-exclusive).
+            session_end = last_intraday_bar_idx(idx, start, end - 1) + 1
+            end = min(end, max(start, session_end))
         forward_bars = max(0, end - start)
 
         if forward_bars < min_horizon:

@@ -27,6 +27,7 @@ from .tester import PoolResult
 from .regime import compute_regime_series, nse_session, SESSION_LABELS
 from .indicators import atr
 from .distance_calibration import DistanceCalibrator
+from .intraday import last_intraday_bar_idx
 
 
 def distance_bucket(distance_atr: float) -> str:
@@ -231,7 +232,8 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
                        featurizer: StateFeaturizer,
                        window_start: pd.Timestamp, window_end: pd.Timestamp,
                        sample_every: int, max_horizon: int,
-                       clip_future_to_window: bool = False) -> List[Snapshot]:
+                       clip_future_to_window: bool = False,
+                       intraday_session_only: bool = True) -> List[Snapshot]:
     """Build snapshots at every `sample_every` bar in [window_start, window_end].
 
     `window_end` bounds WHERE we sample snapshots (the last decision bar). By default a
@@ -265,6 +267,13 @@ def generate_snapshots(df_base: pd.DataFrame, pools: List[Pool], results: List[P
         n_future = min(max_horizon, n - 1 - j)
         if clip_future_to_window:
             n_future = min(n_future, we_pos - j)
+        if intraday_session_only:
+            # Same-session cap: the future window cannot extend past 15:15 IST
+            # of the snapshot's own trading day. Without this, direction_label
+            # and pool_touch_labels read across overnight gaps, training the
+            # models on multi-day moves we cannot actually capture under MIS.
+            session_end_idx = last_intraday_bar_idx(idx, j, j + n_future)
+            n_future = min(n_future, max(0, session_end_idx - j))
         if n_future < 5:
             continue
 

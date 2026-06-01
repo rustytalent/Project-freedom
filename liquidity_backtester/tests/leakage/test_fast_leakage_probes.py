@@ -134,6 +134,7 @@ class FastLeakageProbeTests(unittest.TestCase):
             window_end=df.index[80],
             sample_every=1,
             max_horizon=10,
+            intraday_session_only=False,    # leakage probe — not an MIS test
         )[0]
         assert_snapshot_distance_causal(snap, [pool])
         distance_before = snap.pool_touches[0][2]
@@ -148,6 +149,7 @@ class FastLeakageProbeTests(unittest.TestCase):
             window_end=mutated.index[80],
             sample_every=1,
             max_horizon=10,
+            intraday_session_only=False,    # leakage probe — not an MIS test
         )[0]
         assert_snapshot_distance_causal(mutated_snap, [pool])
         self.assertAlmostEqual(distance_before, mutated_snap.pool_touches[0][2], places=12)

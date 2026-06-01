@@ -26,72 +26,24 @@ import pandas as pd
 from .config import Config
 from .costs import ZerodhaEquityCostConfig, estimate_round_trip_charges
 from .indicators import atr
+from .intraday import (
+    EOD_SQUAREOFF_IST_MIN,
+    NO_NEW_ENTRY_AFTER_IST_MIN,
+    SESSION_CLOSE_IST_MIN,
+    SESSION_OPEN_IST_MIN,
+    ist_date as _ist_date,
+    ist_minute_of_day as _ist_minute_of_day,
+    last_intraday_bar_idx as _last_intraday_bar_idx,
+)
 from .pools import Pool
 from .sectors import sector_of
 from .tester import PoolResult
 
 
-# ---------------------------------------------------------------------------
-# Intraday MIS (margin-intraday-square-off) enforcement.
-#
-# NSE session: 09:15-15:30 IST. Real broker MIS rules require positions to be
-# squared off before ~15:20 IST or the broker auto-squares (usually with a
-# penalty). The old simulator iterated bar indices blindly with no day or
-# session boundary, so a trade entered Friday at 15:00 IST could "exit"
-# Monday morning -- silently wearing overnight gaps as if they were normal
-# intraday continuation, and inflating R numbers vs. actual MIS reality.
-#
-# Two hard rules now enforced:
-#   1. No new entries after NO_NEW_ENTRY_AFTER_IST_MIN (14:30 IST). After
-#      this point, even a perfect 0.5-ATR-stop / 2.0-ATR-target setup has
-#      ~60 minutes to reach target, which is unrealistic.
-#   2. Time exit at EOD_SQUAREOFF_IST_MIN (15:15 IST) if neither stop nor
-#      target hit. We use 15:15 (not 15:30) to leave a 15-minute buffer for
-#      a market-order square-off at realistic slippage.
-#
-# Convention: liqpool.regime.nse_session and the parquet data loader
-# (liqpool.data) both treat tz-naive timestamps as UTC and convert to IST by
-# adding +5:30. We follow the same convention here so production data and
-# the regime feature path agree.
-# ---------------------------------------------------------------------------
-SESSION_OPEN_IST_MIN = 9 * 60 + 15           # 09:15 IST
-SESSION_CLOSE_IST_MIN = 15 * 60 + 30         # 15:30 IST (NSE close)
-EOD_SQUAREOFF_IST_MIN = 15 * 60 + 15         # 15:15 IST — exit hard before broker auto-squares
-NO_NEW_ENTRY_AFTER_IST_MIN = 14 * 60 + 30    # 14:30 IST — too late to give a trade room
-
-
-def _ist_minute_of_day(ts: pd.Timestamp) -> int:
-    """IST minute-of-day. Treats tz-naive as UTC (production data convention)."""
-    if ts.tz is not None:
-        ts = ts.tz_convert("UTC").tz_localize(None)
-    ist = ts + pd.Timedelta(hours=5, minutes=30)
-    return int(ist.hour * 60 + ist.minute)
-
-
-def _ist_date(ts: pd.Timestamp) -> pd.Timestamp:
-    """IST calendar date as a midnight Timestamp. Same TZ convention as above."""
-    if ts.tz is not None:
-        ts = ts.tz_convert("UTC").tz_localize(None)
-    return (ts + pd.Timedelta(hours=5, minutes=30)).normalize()
-
-
-def _last_intraday_bar_idx(idx: pd.DatetimeIndex, entry_idx: int,
-                           hard_max_idx: int) -> int:
-    """Largest bar index j in [entry_idx, hard_max_idx] such that bar j's
-    timestamp is on the SAME IST trading day as entry_idx AND its IST
-    minute-of-day is <= EOD_SQUAREOFF_IST_MIN. Returns entry_idx if none of
-    the following bars qualify (the caller treats that as "no room to trade").
-    """
-    entry_date = _ist_date(idx[entry_idx])
-    last = entry_idx
-    for j in range(entry_idx + 1, hard_max_idx + 1):
-        ts = idx[j]
-        if _ist_date(ts) != entry_date:
-            break                                          # crossed to next session
-        if _ist_minute_of_day(ts) > EOD_SQUAREOFF_IST_MIN:
-            break                                          # past hard square-off
-        last = j
-    return last
+# Intraday MIS primitives now live in liqpool.intraday so they can be imported
+# by tester.py / timing.py too (which previously could not, due to the
+# tester -> execution_backtest -> tester circular dependency). The aliases
+# above keep the existing internal usage in this file intact.
 
 
 EXECUTION_MODES = (

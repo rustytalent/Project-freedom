@@ -79,6 +79,14 @@ class Config:
     # tiers via two symmetric thresholds.
     test_horizon_bars: int = 200
 
+    # MIS-aware label generation. When True (default), tester.test_pools and
+    # timing.generate_snapshots cap each label's forward window at the
+    # same-IST-trading-day EOD bar (minute <= 15:15 IST). This makes the
+    # respect/break/direction/proximity LABELS match what an intraday-MIS
+    # trader could actually realise. Set False to revert to legacy
+    # swing-style multi-day labels (e.g. for research on swing strategies).
+    intraday_session_only: bool = True
+
     # Two-tier reaction / break thresholds (in ATR units).
     #   weak_reaction_atr  : enough reverse move post-touch to count as a 'mild' respect.
     #   strong_reaction_atr: definitive rejection.

@@ -31,8 +31,15 @@ from .timing import (
 )
 
 
-PROXIMITY_HORIZONS = (78, 156, 312)
-DEFAULT_DIRECTION_HORIZON = 78
+# Intraday-only horizons. On 5m bars these are 1h / 3h / 5h ahead — all
+# strictly within a single NSE session. The pre-MIS defaults were
+# (78, 156, 312) = 1 / 2 / 4 calendar days, which silently trained the
+# proximity/direction models on multi-day moves that an intraday-MIS trader
+# cannot capture. See docs/CODEX_HANDOFF.md and the retrain-everything-MIS
+# plan for why these changed. Legacy swing research can still override at the
+# call site.
+PROXIMITY_HORIZONS = (12, 36, 60)
+DEFAULT_DIRECTION_HORIZON = 60
 
 
 @dataclass
