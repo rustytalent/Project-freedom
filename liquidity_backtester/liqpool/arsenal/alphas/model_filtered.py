@@ -376,3 +376,238 @@ class PolicyReturnAlpha(Alpha):
             "moderate_predicted_r" if pr >= 0.10 else "low_predicted_r"
         )
         return tags
+
+
+# ---------------------------------------------------------------------------
+# ProximityFilteredPoolAlpha — pre-touch journey-to-destination
+# ---------------------------------------------------------------------------
+
+class ProximityFilteredPoolAlpha(Alpha):
+    """Pre-touch journey alpha: ride to the predicted pool touch.
+
+    For every Nth bar with at least one active OOS pool in range, ask the
+    proximity model "is this pool likely to be touched within H bars?". When
+    yes (probability >= ``min_p_touch``), emit a signal NOW (pre-touch) that
+    targets the journey to the pool:
+
+      * side  = long  if pool is ABOVE price (we ride the rise to supply),
+                short if pool is BELOW price (we ride the fall to demand).
+      * entry = current close (decision_at), evaluator fills next-bar open.
+      * target_atr = current distance to pool's NEAR boundary, capped at
+                     ``max_target_atr`` so a 50-ATR-away pool can't produce a
+                     50-ATR target.
+      * stop_atr = configurable (default 1.0 — wider than the V1 touched
+                   alpha because the signal entry is far from any structure).
+      * horizon = the proximity model's shortest horizon (matches its
+                  prediction window — typically 12 bars under MIS).
+
+    Why this is different from the V1 ``pool_reach`` alpha: V1 trades the
+    POST-touch rejection. This alpha trades the PRE-touch journey TO the
+    pool. The two are orthogonal — a pool that reliably gets touched can be
+    monetised even when the touch itself doesn't reject. This is the user's
+    "journey-to-destination" thesis as an Alpha.
+
+    Dedup: emits ONE signal per pool (the earliest qualifying bar) to avoid
+    flooding the evaluator with sequential same-pool signals as the model's
+    confidence ramps up.
+
+    Requires ``report.unified_proximity`` (one model per horizon),
+    ``report.unified_ml`` (for pool quality predictions used as a proximity
+    input feature), and ``report.unified_featurizer``. Falls back gracefully
+    (returns []) when any is missing.
+    """
+
+    DEFAULT_STOP_ATR: float = 1.0
+    DEFAULT_MAX_TARGET_ATR: float = 4.0
+    DEFAULT_MAX_DIST_ATR: float = 5.0
+    DEFAULT_MIN_DIST_ATR: float = 0.10
+    DEFAULT_SAMPLE_EVERY: int = 12
+    DEFAULT_MIN_P_TOUCH: float = 0.60
+
+    def __init__(self, min_p_touch: float = DEFAULT_MIN_P_TOUCH,
+                 max_dist_atr: float = DEFAULT_MAX_DIST_ATR,
+                 max_target_atr: float = DEFAULT_MAX_TARGET_ATR,
+                 stop_atr: float = DEFAULT_STOP_ATR,
+                 sample_every: int = DEFAULT_SAMPLE_EVERY,
+                 horizon_bars: Optional[int] = None,
+                 name: str = "proximity_journey") -> None:
+        if not 0.0 < min_p_touch < 1.0:
+            raise ValueError(
+                f"min_p_touch must be in (0,1), got {min_p_touch}")
+        if max_dist_atr <= 0:
+            raise ValueError(f"max_dist_atr must be > 0, got {max_dist_atr}")
+        if max_target_atr <= 0:
+            raise ValueError(f"max_target_atr must be > 0, got {max_target_atr}")
+        if stop_atr <= 0:
+            raise ValueError(f"stop_atr must be > 0, got {stop_atr}")
+        if sample_every < 1:
+            raise ValueError(f"sample_every must be >= 1, got {sample_every}")
+        self._name = name
+        self.min_p_touch = float(min_p_touch)
+        self.max_dist_atr = float(max_dist_atr)
+        self.max_target_atr = float(max_target_atr)
+        self.stop_atr = float(stop_atr)
+        self.sample_every = int(sample_every)
+        self._horizon_override = (int(horizon_bars)
+                                  if horizon_bars is not None else None)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return (
+            f"Pre-touch journey to a predicted pool touch. Emits when "
+            f"proximity model P(touch <= H) >= {self.min_p_touch:.2f}. "
+            f"Target = distance to pool (cap {self.max_target_atr:.1f} ATR), "
+            f"stop {self.stop_atr:.2f} ATR, horizon = proximity model's "
+            f"primary horizon. One signal per pool."
+        )
+
+    def _resolve_horizon(self, prox_models: Dict[int, Any]) -> int:
+        if self._horizon_override is not None:
+            return self._horizon_override
+        return int(min(prox_models.keys()))
+
+    def candidates(self, *, symbol: str, df_base: pd.DataFrame,
+                   atr_series: pd.Series,
+                   extra: Optional[Dict[str, Any]] = None,
+                   ) -> List[AlphaSignal]:
+        extra = extra or {}
+        ad = extra.get("asset_data")
+        report = extra.get("report")
+        if ad is None or report is None:
+            return []
+        prox = getattr(report, "unified_proximity", None)
+        if not prox:
+            return []
+        ml = getattr(report, "unified_ml", None)
+        feat = getattr(report, "unified_featurizer", None)
+        if ml is None or feat is None:
+            return []
+
+        primary_h = self._resolve_horizon(prox)
+        if primary_h not in prox:
+            return []
+        model = prox[primary_h]
+
+        pools = ad.walkforward.oos_pools
+        results = ad.walkforward.oos_results
+        if not pools:
+            return []
+        try:
+            X = feat.transform_batch(pools)
+            q_preds = np.asarray(ml.predict(X, pools=pools), dtype=float)
+        except Exception:
+            return []
+        # Defaults for any failed Q prediction.
+        q_preds = np.where(np.isfinite(q_preds), q_preds, 0.5)
+
+        from liqpool.timing import StateFeaturizer
+        try:
+            sf = StateFeaturizer(df_base)
+        except Exception:
+            return []
+
+        atr_vals = (atr_series.values if atr_series is not None
+                    else sf.atr_14.values)
+        idx_values = df_base.index
+        n = len(df_base)
+        # Need at least horizon bars of runway after decision to be honest.
+        last_decision = max(0, n - primary_h - 1)
+        first_decision = 80                        # warm-up matches snapshot generation
+
+        emitted: set = set()
+        close_arr = df_base["close"].values
+        signals: List[AlphaSignal] = []
+        for j in range(first_decision, last_decision + 1, self.sample_every):
+            ts = idx_values[j]
+            close_T = float(close_arr[j])
+            a_T = max(float(atr_vals[j]), 1e-9)
+            try:
+                state = sf.features_at(j, active_pools=[])
+            except Exception:
+                continue
+
+            for pi, pool in enumerate(pools):
+                if pi in emitted:
+                    continue
+                if pool.available_at > ts:
+                    continue
+                result = results[pi]
+                if (getattr(result, "touched_at", None) is not None
+                        and result.touched_at <= ts):
+                    continue
+                if (getattr(result, "broken_at", None) is not None
+                        and result.broken_at <= ts):
+                    continue
+
+                if pool.price_low > close_T:
+                    dist_atr = (pool.price_low - close_T) / a_T
+                    pool_side = "above"
+                    trade_side = "long"
+                    journey_target = (pool.price_low - close_T) / a_T
+                elif pool.price_high < close_T:
+                    dist_atr = (close_T - pool.price_high) / a_T
+                    pool_side = "below"
+                    trade_side = "short"
+                    journey_target = (close_T - pool.price_high) / a_T
+                else:
+                    continue                       # already inside the zone
+                if dist_atr < self.DEFAULT_MIN_DIST_ATR:
+                    continue                       # too close — no journey to ride
+                if dist_atr > self.max_dist_atr:
+                    continue
+
+                try:
+                    p_touch = float(model.predict_one(
+                        pool, dist_atr, pool_side, state,
+                        float(q_preds[pi]), atr_val=a_T,
+                    ))
+                except Exception:
+                    continue
+                if not np.isfinite(p_touch) or p_touch < self.min_p_touch:
+                    continue
+
+                target_atr = min(float(journey_target), self.max_target_atr)
+                if target_atr <= 0:
+                    continue
+                signals.append(AlphaSignal(
+                    alpha_name=self._name, symbol=symbol,
+                    decision_at=ts, decision_idx=j,
+                    side=trade_side,
+                    entry_reference=close_T,
+                    stop_atr=self.stop_atr,
+                    target_atr=target_atr,
+                    horizon_bars=int(primary_h),
+                    confidence=float(p_touch),
+                    state={
+                        "pool_idx": int(pi),
+                        "pool_score": float(pool.score),
+                        "factor": _headline_for_pool(pool),
+                        "tf_count": int(len(set(pool.tfs))),
+                        "p_touch": float(p_touch),
+                        "dist_atr_at_decision": float(dist_atr),
+                        "side_to_pool": pool_side,
+                        "proximity_horizon": int(primary_h),
+                    },
+                ))
+                emitted.add(pi)
+        return signals
+
+    def regime_tags(self, signal, df_base, atr_series):
+        tags = super().regime_tags(signal, df_base, atr_series)
+        tags["factor"] = str(signal.state.get("factor", "OTHER"))
+        tags["tf_bucket"] = _tf_bucket(int(signal.state.get("tf_count", 0)))
+        p = float(signal.state.get("p_touch", 0.5))
+        tags["p_touch_bucket"] = (
+            "p_high" if p >= 0.80 else
+            "p_moderate" if p >= 0.65 else "p_marginal"
+        )
+        d = float(signal.state.get("dist_atr_at_decision", 0.0))
+        tags["dist_bucket"] = (
+            "near_0_1_atr" if d < 1.0 else
+            "mid_1_3_atr" if d < 3.0 else "far_3_plus_atr"
+        )
+        return tags

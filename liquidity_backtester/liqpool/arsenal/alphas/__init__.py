@@ -7,6 +7,7 @@ from .mean_reversion import MeanReversionAlpha
 from .model_filtered import (
     DirectionConfirmedPoolAlpha,
     PolicyReturnAlpha,
+    ProximityFilteredPoolAlpha,
     QualityFilteredPoolAlpha,
 )
 from .momentum import MomentumAlpha
@@ -18,5 +19,6 @@ __all__ = [
     "MeanReversionAlpha",
     "MomentumAlpha",
     "PolicyReturnAlpha",
+    "ProximityFilteredPoolAlpha",
     "QualityFilteredPoolAlpha",
 ]

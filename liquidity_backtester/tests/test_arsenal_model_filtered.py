@@ -23,6 +23,7 @@ import pandas as pd
 from liqpool.arsenal.alphas import (
     DirectionConfirmedPoolAlpha,
     PolicyReturnAlpha,
+    ProximityFilteredPoolAlpha,
     QualityFilteredPoolAlpha,
 )
 
@@ -332,6 +333,229 @@ class PolicyReturnAlphaTests(unittest.TestCase):
                      extra={"asset_data": ad, "report": report})
         self.assertEqual(len(sigs), 1)
         self.assertAlmostEqual(sigs[0].state["predicted_r"], 0.35, places=6)
+
+
+# ---------------------------------------------------------------------------
+# ProximityFilteredPoolAlpha
+# ---------------------------------------------------------------------------
+
+class _StubProximityModel:
+    """Returns a configurable P(touch within horizon) per call.
+
+    Records each call so tests can assert what was queried.
+    """
+    def __init__(self, return_value: float = 0.75):
+        self.return_value = float(return_value)
+        self.calls: list = []
+
+    def predict_one(self, pool, dist_atr, side, state, quality_pred,
+                    atr_val=1.0):
+        self.calls.append({
+            "pool_idx": getattr(pool, "_idx", None),
+            "dist_atr": float(dist_atr),
+            "side": side,
+            "quality_pred": float(quality_pred),
+            "atr_val": float(atr_val),
+        })
+        return self.return_value
+
+
+def _far_pools_for_journey(df):
+    """One pool well above current price, one well below.
+
+    Picked so both are out-of-zone for the journey alpha and produce
+    distinct trade sides (long toward the above-pool, short toward below).
+    """
+    p_above = _Pool(side="high", price_low=110.0, price_high=111.0,
+                    tfs=["base"])
+    p_above._idx = 0
+    p_below = _Pool(side="low", price_low=90.0, price_high=91.0,
+                    tfs=["base"])
+    p_below._idx = 1
+    # Touch-times AFTER the candidate-emission window so the alpha sees them
+    # as still-untouched at decision time.
+    r_above = _Result(pool_idx=0, touched_at=df.index[-1], side="high")
+    r_below = _Result(pool_idx=1, touched_at=df.index[-1], side="low")
+    return _AD(base_df=df, walkforward=_WF(oos_pools=[p_above, p_below],
+                                             oos_results=[r_above, r_below]))
+
+
+class _ProximityReport(_StubReport):
+    def __init__(self, prox_model, *, primary_h: int = 12,
+                 unified_ml=None, unified_featurizer=None, assets=None):
+        super().__init__(unified_ml=unified_ml,
+                         unified_featurizer=unified_featurizer, assets=assets)
+        self.unified_proximity = {primary_h: prox_model}
+
+
+class ProximityFilteredPoolAlphaTests(unittest.TestCase):
+
+    def _bars(self, n=120):
+        # Long enough that with sample_every=12 and warm-up=80, several
+        # decision bars fit before the last_decision = n - 12 - 1 cap.
+        return _bars_ist(n, "10:00", base_price=100.0)
+
+    def test_init_rejects_invalid_args(self):
+        with self.assertRaises(ValueError):
+            ProximityFilteredPoolAlpha(min_p_touch=0.0)
+        with self.assertRaises(ValueError):
+            ProximityFilteredPoolAlpha(min_p_touch=1.0)
+        with self.assertRaises(ValueError):
+            ProximityFilteredPoolAlpha(max_dist_atr=0.0)
+        with self.assertRaises(ValueError):
+            ProximityFilteredPoolAlpha(sample_every=0)
+
+    def test_returns_empty_without_proximity_model(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        report = _StubReport()
+        sigs = ProximityFilteredPoolAlpha().candidates(
+            symbol="X", df_base=df, atr_series=None,
+            extra={"asset_data": ad, "report": report},
+        )
+        self.assertEqual(sigs, [])
+
+    def test_returns_empty_without_quality_model(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        report = _ProximityReport(_StubProximityModel(0.80))
+        # No unified_ml in report -> can't compute Q -> empty.
+        sigs = ProximityFilteredPoolAlpha().candidates(
+            symbol="X", df_base=df, atr_series=None,
+            extra={"asset_data": ad, "report": report},
+        )
+        self.assertEqual(sigs, [])
+
+    def test_emits_journey_signals_above_threshold(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)         # above 0.60
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        # Wide max_dist_atr so the synthetic 10-ATR-away pools qualify.
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0,
+                                            sample_every=12)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertEqual(len(sigs), 2,
+            "should emit one signal per pool (dedup keeps the earliest)")
+        sides = {s.side for s in sigs}
+        self.assertEqual(sides, {"long", "short"})
+        # Confidence == p_touch.
+        for s in sigs:
+            self.assertAlmostEqual(s.confidence, 0.80, places=6)
+            self.assertAlmostEqual(s.state["p_touch"], 0.80, places=6)
+
+    def test_below_threshold_emits_nothing(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.50)         # < 0.60
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertEqual(sigs, [])
+
+    def test_dedup_one_signal_per_pool(self):
+        df = self._bars(n=200)
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0,
+                                            sample_every=6)    # many samples
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        pool_idxs = [s.state["pool_idx"] for s in sigs]
+        self.assertEqual(sorted(pool_idxs), sorted(set(pool_idxs)),
+            "each pool should appear at most once")
+
+    def test_skips_pools_already_touched(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        # Move pool 0's touched_at to BEFORE the warm-up so the alpha treats
+        # it as already-touched at every decision bar.
+        ad.walkforward.oos_results[0].touched_at = df.index[10]
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        # Only pool 1 (untouched until last bar) qualifies.
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0].state["pool_idx"], 1)
+
+    def test_target_atr_capped_by_max_target(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        # Tiny cap forces target_atr = 2.0 regardless of how far the pool is.
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0,
+                                            max_target_atr=2.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        for s in sigs:
+            self.assertLessEqual(s.target_atr, 2.0 + 1e-9)
+
+    def test_max_dist_atr_excludes_far_pools(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        # Pools sit ~10 ATR away; max_dist_atr=1.0 excludes them all.
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60, max_dist_atr=1.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertEqual(sigs, [])
+
+    def test_signal_carries_horizon_from_proximity_model(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        # Two horizons in the bundle — primary is the smallest (12).
+        report = _ProximityReport(prox, primary_h=12,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        report.unified_proximity[36] = prox                   # second horizon
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        for s in sigs:
+            self.assertEqual(s.horizon_bars, 12)
+            self.assertEqual(s.state["proximity_horizon"], 12)
+
+    def test_regime_tags_include_p_touch_and_dist_buckets(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.85)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        alpha = ProximityFilteredPoolAlpha(min_p_touch=0.60,
+                                            max_dist_atr=50.0)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        tags = alpha.regime_tags(sigs[0], df, None)
+        self.assertEqual(tags["p_touch_bucket"], "p_high")
+        self.assertIn(tags["dist_bucket"], {"near_0_1_atr", "mid_1_3_atr",
+                                               "far_3_plus_atr"})
 
 
 if __name__ == "__main__":
