@@ -69,6 +69,15 @@ _STATE_NUMERIC = [
     "nearest_above_atr", "nearest_below_atr",
     "pull_above", "pull_below", "pull_ratio",
     "minutes_since_session_open",
+    # MTF today-relative session context. These are computed from the 5-min
+    # base bars by collapsing each IST trading day into running stats: they
+    # tell the model "where are we within today's session?" without needing
+    # a separate higher-TF data feed. Cheap and intraday-MIS-honest.
+    "htf_today_range_atr",
+    "htf_today_pos_in_range",
+    "htf_today_open_to_now_atr",
+    "htf_session_volume_ratio",
+    "htf_overnight_gap_atr",
 ]
 _STATE_SESSION = [f"st_session_{s}" for s in SESSION_LABELS]
 STATE_FEATURE_NAMES = _STATE_NUMERIC + _STATE_SESSION
@@ -85,9 +94,96 @@ class StateFeaturizer:
         self.close = df_base["close"].values
         self.high = df_base["high"].values
         self.low = df_base["low"].values
+        self.open_ = df_base["open"].values
+        self.volume = (df_base["volume"].values
+                       if "volume" in df_base.columns
+                       else np.zeros(len(df_base), dtype=float))
         self.idx = df_base.index
         self.roll_mean_50 = df_base["close"].rolling(50, min_periods=10).mean().bfill().values
         self.roll_std_50 = df_base["close"].rolling(50, min_periods=10).std().bfill().values
+        self._precompute_session_relative_arrays()
+
+    def _precompute_session_relative_arrays(self) -> None:
+        """Build per-bar running stats over the bar's own IST trading day.
+
+        Each IST date forms one session. For every bar j we record the running
+        high/low/cumulative-volume from that day's first bar up to j, today's
+        open price, and (for context features) the previous day's last close
+        and a 20-day average session volume. All in O(n) time over the bars.
+        """
+        n = len(self.idx)
+        if n == 0:
+            self._today_open_idx = np.zeros(0, dtype=int)
+            self._today_open_price = np.zeros(0)
+            self._today_low_run = np.zeros(0)
+            self._today_high_run = np.zeros(0)
+            self._today_cum_vol = np.zeros(0)
+            self._prev_day_last_close = np.full(0, np.nan)
+            self._prev_20d_avg_vol = np.zeros(0)
+            return
+
+        ist_dt = pd.DatetimeIndex(self.idx) + pd.Timedelta(hours=5, minutes=30)
+        ist_dates = ist_dt.normalize().values
+        new_day = np.concatenate(([True], ist_dates[1:] != ist_dates[:-1]))
+
+        today_open_idx = np.empty(n, dtype=int)
+        today_open_price = np.empty(n, dtype=float)
+        today_low_run = np.empty(n, dtype=float)
+        today_high_run = np.empty(n, dtype=float)
+        today_cum_vol = np.empty(n, dtype=float)
+
+        cur_open_idx = 0
+        cur_open_price = float(self.open_[0])
+        cur_low = float("inf")
+        cur_high = float("-inf")
+        cur_vol = 0.0
+        for j in range(n):
+            if new_day[j]:
+                cur_open_idx = j
+                cur_open_price = float(self.open_[j])
+                cur_low = float(self.low[j])
+                cur_high = float(self.high[j])
+                cur_vol = float(self.volume[j])
+            else:
+                cur_low = min(cur_low, float(self.low[j]))
+                cur_high = max(cur_high, float(self.high[j]))
+                cur_vol += float(self.volume[j])
+            today_open_idx[j] = cur_open_idx
+            today_open_price[j] = cur_open_price
+            today_low_run[j] = cur_low
+            today_high_run[j] = cur_high
+            today_cum_vol[j] = cur_vol
+
+        self._today_open_idx = today_open_idx
+        self._today_open_price = today_open_price
+        self._today_low_run = today_low_run
+        self._today_high_run = today_high_run
+        self._today_cum_vol = today_cum_vol
+
+        # Per-day rollups: total volume and last close on each IST date.
+        day_change_idx = np.where(new_day)[0]
+        end_idx = np.concatenate((day_change_idx[1:] - 1, [n - 1]))
+        day_total_vol = today_cum_vol[end_idx]
+        day_last_close = self.close[end_idx]
+
+        # day index for each bar.
+        day_index = np.searchsorted(day_change_idx, np.arange(n), side="right") - 1
+
+        # prev_day_last_close per bar: NaN on bars of the very first IST day.
+        prev_close_per_day = np.concatenate(([np.nan], day_last_close[:-1]))
+        self._prev_day_last_close = prev_close_per_day[day_index]
+
+        # 20-day trailing average of session volume, excluding today.
+        n_days = len(day_total_vol)
+        cumsum = np.concatenate(([0.0], np.cumsum(day_total_vol)))
+        prev_avg_per_day = np.empty(n_days, dtype=float)
+        for k in range(n_days):
+            lo = max(0, k - 20)
+            if k == lo:
+                prev_avg_per_day[k] = 0.0
+            else:
+                prev_avg_per_day[k] = (cumsum[k] - cumsum[lo]) / float(k - lo)
+        self._prev_20d_avg_vol = prev_avg_per_day[day_index]
 
     def features_at(self, j: int, active_pools: List[Pool]) -> Dict[str, float]:
         n = len(self.idx)
@@ -147,6 +243,36 @@ class StateFeaturizer:
         nearest_below_d = nearest_below_d if nearest_below_d != float("inf") else 100.0
         pull_ratio = (pull_above - pull_below) / max(pull_above + pull_below, 1e-9)
 
+        today_open_price = float(self._today_open_price[j])
+        today_low = float(self._today_low_run[j])
+        today_high = float(self._today_high_run[j])
+        today_range = today_high - today_low
+        htf_today_range_atr = today_range / a
+        # Mid-range when the day hasn't traded a non-zero range yet (first bar
+        # of day, or pathological flat run). 0.5 is the neutral "no signal" code.
+        if today_range > 1e-9:
+            htf_today_pos_in_range = (c[j] - today_low) / today_range
+        else:
+            htf_today_pos_in_range = 0.5
+        htf_today_open_to_now_atr = (c[j] - today_open_price) / a
+
+        prev_avg_vol = float(self._prev_20d_avg_vol[j])
+        cum_v = float(self._today_cum_vol[j])
+        if prev_avg_vol > 1e-9:
+            # Ratio of cumulative session volume so far to the trailing 20-day
+            # average TOTAL session volume. The model already has
+            # ``minutes_since_session_open`` so it can learn the joint
+            # "ratio=X at minute Y means heavy/light tape today".
+            htf_session_volume_ratio = cum_v / prev_avg_vol
+        else:
+            htf_session_volume_ratio = 1.0
+
+        prev_close = self._prev_day_last_close[j]
+        if not np.isnan(prev_close):
+            htf_overnight_gap_atr = (today_open_price - float(prev_close)) / a
+        else:
+            htf_overnight_gap_atr = 0.0
+
         feats: Dict[str, float] = {
             "ret_1": log_ret(1),
             "ret_6": log_ret(6),
@@ -165,6 +291,11 @@ class StateFeaturizer:
             "pull_below": float(pull_below),
             "pull_ratio": float(pull_ratio),
             "minutes_since_session_open": float(m_since_open),
+            "htf_today_range_atr": float(htf_today_range_atr),
+            "htf_today_pos_in_range": float(htf_today_pos_in_range),
+            "htf_today_open_to_now_atr": float(htf_today_open_to_now_atr),
+            "htf_session_volume_ratio": float(htf_session_volume_ratio),
+            "htf_overnight_gap_atr": float(htf_overnight_gap_atr),
         }
         for s in SESSION_LABELS:
             feats[f"st_session_{s}"] = 1.0 if session == s else 0.0
