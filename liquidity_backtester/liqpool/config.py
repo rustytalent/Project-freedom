@@ -87,6 +87,18 @@ class Config:
     # swing-style multi-day labels (e.g. for research on swing strategies).
     intraday_session_only: bool = True
 
+    # Q (PoolRespectModel) bucket-shrinkage cap. The post-hoc per-(TF,factor)
+    # bucket calibration in PoolRespectModel pulls predictions toward the
+    # bucket's empirical OOS rate with weight pull = n/(n+20). With no cap,
+    # large buckets (n>=4000) get pull≈1.0 which COLLAPSES every prediction
+    # in that bucket to the bucket mean — that is the "Q compression"
+    # symptom (Q range 23-56% instead of 0-100%, gate at 70% unreachable;
+    # see reports/phase4_workstream0_q_audit.md). Capping the pull at 0.30
+    # preserves the underlying gbm's within-bucket variance while still
+    # applying meaningful per-bucket bias correction. Set to 1.0 to recover
+    # legacy (compressed) behaviour for research.
+    q_bucket_shrinkage_max: float = 0.30
+
     # Two-tier reaction / break thresholds (in ATR units).
     #   weak_reaction_atr  : enough reverse move post-touch to count as a 'mild' respect.
     #   strong_reaction_atr: definitive rejection.

@@ -349,28 +349,42 @@ class PoolRespectModel:
         return np.clip(calib.transform(p, distance_atr), 0.02, 0.98)
 
     def fit_bucket_calib(self, pools: List[Pool], y_true: np.ndarray, p_predicted: np.ndarray,
-                         min_bucket_n: int = 10) -> None:
+                         min_bucket_n: int = 10,
+                         shrinkage_max: float = 1.0) -> None:
         """Build per-bucket pull weights from observed (pred, actual) on the OOS set.
 
         For each bucket: empirical_rate = mean(y_true_in_bucket). The "pull" applied at predict
         time is a sample-size-weighted shrinkage toward this rate:
-            pull_weight = n / (n + 20)   (Wilson-style shrinkage; 20 = global-prior strength)
+            pull_weight = min(shrinkage_max, n / (n + 20))
+            (Wilson-style shrinkage; 20 = global-prior strength)
         Adjustment at predict time:
             calibrated = (1 - pull) * global_prediction + pull * empirical_rate
         Small buckets (n<min_bucket_n) get no per-bucket adjustment.
+
+        ``shrinkage_max`` caps the maximum pull weight. With ``shrinkage_max=1.0``
+        (legacy default for backward compatibility) the pull is unbounded, so
+        large buckets (e.g. 4+TF EQHL with n>=4000) get pull≈1.0 which
+        collapses ALL predictions in that bucket to the bucket empirical mean.
+        That's the "Q compression" symptom documented in
+        ``reports/phase4_workstream0_q_audit.md``: regardless of how confident
+        the underlying gbm was, the post-shrinkage Q range collapsed to ~23-56%.
+        Setting ``shrinkage_max`` to e.g. 0.30 preserves the model's
+        within-bucket variance while still applying meaningful per-bucket bias
+        correction.
         """
         groups: Dict[Tuple[str, str], List[Tuple[float, int]]] = defaultdict(list)
         for p, pred, y in zip(pools, p_predicted, y_true):
             key = (_tf_bucket(len(set(p.tfs))), _headline_factor(p))
             groups[key].append((float(pred), int(y)))
         self.bucket_calib.clear()
+        cap = float(max(0.0, min(1.0, shrinkage_max)))
         for key, items in groups.items():
             if len(items) < min_bucket_n:
                 continue
             arr_y = np.array([y for _, y in items])
             emp = float(arr_y.mean())
             n = len(items)
-            pull = n / (n + 20.0)
+            pull = min(cap, n / (n + 20.0))
             self.bucket_calib[key] = BucketCalib(n_oos=n, empirical_rate=emp, pull_weight=pull)
 
     def predict(self, X: pd.DataFrame, pools: Optional[List[Pool]] = None) -> np.ndarray:
@@ -503,7 +517,8 @@ class SectorMoERespectModel:
     def _fit_bucket_if_possible(self, model: PoolRespectModel, X_oos: Optional[pd.DataFrame],
                                 oos_pools: Optional[List[Pool]],
                                 oos_results: Optional[List[PoolResult]],
-                                min_bucket_n: int = 10) -> int:
+                                min_bucket_n: int = 10,
+                                shrinkage_max: float = 1.0) -> int:
         if X_oos is None or not oos_pools or not oos_results:
             return 0
         decisive_mask = trainable_mask(oos_results)
@@ -513,7 +528,9 @@ class SectorMoERespectModel:
         pools_dec = [p for p, keep in zip(oos_pools, decisive_mask) if keep]
         p_raw = model.predict_raw(X_oos)
         p_raw_dec = p_raw[decisive_mask]
-        model.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=min_bucket_n)
+        model.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec,
+                                min_bucket_n=min_bucket_n,
+                                shrinkage_max=shrinkage_max)
         return int(decisive_mask.sum())
 
     def fit(self, X: pd.DataFrame, y: np.ndarray, train_pools: List[Pool],
@@ -530,7 +547,8 @@ class SectorMoERespectModel:
             embargo_bars: int = 78,
             base_period_seconds: float = 300.0,
             validation_method: str = "purged_embargoed_walk_forward",
-            regularization_preset: str = "default") -> "SectorMoERespectModel":
+            regularization_preset: str = "default",
+            bucket_shrinkage_max: float = 1.0) -> "SectorMoERespectModel":
         if len(X) != len(y) or len(X) != len(train_pools):
             raise ValueError("X, y, and train_pools must have matching lengths")
         if expert_weight is not None:
@@ -553,7 +571,8 @@ class SectorMoERespectModel:
             regularization_preset=regularization_preset,
         )
         self._fit_bucket_if_possible(self.global_model, X_oos, oos_pools, oos_results,
-                                     min_bucket_n=10)
+                                     min_bucket_n=10,
+                                     shrinkage_max=bucket_shrinkage_max)
         self._copy_global_metrics()
 
         sectors = sorted({self._sector_for_pool(p) for p in train_pools})
@@ -614,6 +633,7 @@ class SectorMoERespectModel:
                             [oos_pools[i] for i in oos_idx],
                             [oos_results[i] for i in oos_idx],
                             min_bucket_n=8,
+                            shrinkage_max=bucket_shrinkage_max,
                         )
 
                 global_loss = None

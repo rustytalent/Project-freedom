@@ -303,7 +303,10 @@ def walk_forward(tf_data: Dict[str, pd.DataFrame], cfg: Config,
                     )
                     pools_dec = [p for p, m in zip(report.oos_pools, oos_decisive_mask) if m]
                     p_raw_dec = p_raw[oos_decisive_mask]
-                    model.fit_bucket_calib(pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=10)
+                    model.fit_bucket_calib(
+                        pools_dec, y_oos_dec, p_raw_dec, min_bucket_n=10,
+                        shrinkage_max=getattr(cfg, "q_bucket_shrinkage_max", 1.0),
+                    )
 
                 # Final calibrated predictions on the FULL OOS set (with bucket shrinkage)
                 p_final = model.predict(X_oos, pools=report.oos_pools)
