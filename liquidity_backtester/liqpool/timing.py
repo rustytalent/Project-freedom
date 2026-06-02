@@ -95,6 +95,15 @@ _STATE_NUMERIC = [
     "vah_today_dist_atr",
     "val_today_dist_atr",
     "in_value_area_today",
+    # NSE F&O expiry-cycle event context. Indian equity volatility is
+    # heavily driven by the weekly (Thursday) and monthly (last-Thursday)
+    # options-expiry rhythm. Even cash-equity intraday traders feel the
+    # tape change on expiry days. These features are pure calendar math
+    # off the bar's own IST date — no extra data feed.
+    "days_to_monthly_expiry",
+    "is_weekly_expiry_day",
+    "is_morning_after_expiry",
+    "is_monthly_expiry_week",
 ]
 _STATE_SESSION = [f"st_session_{s}" for s in SESSION_LABELS]
 STATE_FEATURE_NAMES = _STATE_NUMERIC + _STATE_SESSION
@@ -121,6 +130,7 @@ class StateFeaturizer:
         self._precompute_session_relative_arrays()
         self._precompute_avwap_arrays()
         self._precompute_frvp_arrays()
+        self._precompute_expiry_arrays()
 
     def _precompute_session_relative_arrays(self) -> None:
         """Build per-bar running stats over the bar's own IST trading day.
@@ -371,6 +381,86 @@ class StateFeaturizer:
         self._vah_today = vah_arr
         self._val_today = val_arr
 
+    def _precompute_expiry_arrays(self) -> None:
+        """NSE F&O expiry-cycle event features per bar.
+
+        Convention used here (true for NSE as of 2024-2026):
+          * Weekly expiry for Nifty / Bank Nifty options falls on Thursday.
+          * Monthly expiry (last Thursday of the month) applies to single-
+            stock futures + options and to index futures.
+          * Caveat: when Thursday is an NSE holiday, expiry shifts to the
+            preceding Wednesday. This featurizer does NOT carry an NSE
+            holiday calendar, so on those <5% of months the
+            ``days_to_monthly_expiry`` value will be off by one. Documented
+            limitation; sufficient signal granularity for the GBM.
+        """
+        n = len(self.idx)
+        if n == 0:
+            self._days_to_monthly_expiry = np.zeros(0, dtype=float)
+            self._is_weekly_expiry_day = np.zeros(0, dtype=float)
+            self._is_morning_after_expiry = np.zeros(0, dtype=float)
+            self._is_monthly_expiry_week = np.zeros(0, dtype=float)
+            return
+
+        ist_dt = pd.DatetimeIndex(self.idx) + pd.Timedelta(hours=5, minutes=30)
+        ist_dates = ist_dt.normalize()
+        # Thursday == 3 in pandas / Python (Monday=0). ``weekday`` on a
+        # DatetimeIndex returns a numpy array directly in modern pandas.
+        is_thursday = np.asarray(ist_dt.weekday == 3, dtype=float)
+
+        # Last Thursday of each bar's IST month.
+        last_thu_of_month = np.empty(n, dtype="datetime64[ns]")
+        for k in range(n):
+            d = ist_dates[k]
+            # First day of the NEXT month, minus one day = last day of d's month.
+            if d.month == 12:
+                next_first = pd.Timestamp(year=d.year + 1, month=1, day=1)
+            else:
+                next_first = pd.Timestamp(year=d.year, month=d.month + 1, day=1)
+            last_day = next_first - pd.Timedelta(days=1)
+            # Step back from last_day to the most recent Thursday.
+            shift = (last_day.weekday() - 3) % 7
+            last_thu_of_month[k] = (last_day - pd.Timedelta(days=int(shift))).to_datetime64()
+
+        days_to_monthly_expiry = (
+            (last_thu_of_month - ist_dates.values).astype("timedelta64[D]")
+            .astype(float)
+        )
+        # When the bar's date is AFTER its month's last Thursday (the
+        # leftover few days), the expiry has already happened: report
+        # 0 instead of a negative number so the GBM sees a clean monotone.
+        days_to_monthly_expiry = np.maximum(days_to_monthly_expiry, 0.0)
+
+        # "Morning after expiry" = the bar's IST date is the FIRST trading
+        # day after a Thursday. Detect via: previous bar's IST date != this
+        # bar's, AND the previous IST date was a Thursday. Edge case: very
+        # first bar of the dataset can't have a "previous" — set 0.
+        # "Morning after expiry" applies to EVERY bar of any IST trading day
+        # whose immediately-previous trading day (in the data) was a Thursday,
+        # not just the first bar of that day. Build per-unique-IST-date
+        # lookup, then map back per-bar.
+        ist_date_vals = ist_dates.values
+        new_day_mask = np.concatenate(([True], ist_date_vals[1:] != ist_date_vals[:-1]))
+        unique_idx_starts = np.where(new_day_mask)[0]
+        unique_dates = ist_date_vals[unique_idx_starts]
+        unique_weekdays = pd.DatetimeIndex(unique_dates).weekday
+        prev_day_was_thu_per_unique = np.concatenate((
+            [False],
+            np.asarray(unique_weekdays[:-1] == 3, dtype=bool),
+        ))
+        # day_index: which unique-date index does each bar belong to?
+        day_index = np.searchsorted(unique_idx_starts, np.arange(n),
+                                     side="right") - 1
+        prev_was_thu = prev_day_was_thu_per_unique[day_index].astype(float)
+
+        # "Monthly expiry week" — within 7 calendar days of the last Thursday.
+        is_monthly_expiry_week = (days_to_monthly_expiry <= 7).astype(float)
+
+        self._days_to_monthly_expiry = days_to_monthly_expiry
+        self._is_weekly_expiry_day = is_thursday
+        self._is_morning_after_expiry = prev_was_thu
+        self._is_monthly_expiry_week = is_monthly_expiry_week
+
     def features_at(self, j: int, active_pools: List[Pool]) -> Dict[str, float]:
         n = len(self.idx)
         if j < 1 or j >= n:
@@ -524,6 +614,10 @@ class StateFeaturizer:
             "vah_today_dist_atr": float(vah_today_dist_atr),
             "val_today_dist_atr": float(val_today_dist_atr),
             "in_value_area_today": float(in_value_area_today),
+            "days_to_monthly_expiry": float(self._days_to_monthly_expiry[j]),
+            "is_weekly_expiry_day": float(self._is_weekly_expiry_day[j]),
+            "is_morning_after_expiry": float(self._is_morning_after_expiry[j]),
+            "is_monthly_expiry_week": float(self._is_monthly_expiry_week[j]),
         }
         for s in SESSION_LABELS:
             feats[f"st_session_{s}"] = 1.0 if session == s else 0.0
