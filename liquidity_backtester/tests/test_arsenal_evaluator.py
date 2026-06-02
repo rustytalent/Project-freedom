@@ -118,6 +118,31 @@ class ExecuteSignalTests(unittest.TestCase):
         self.assertGreaterEqual(row["bars_held"], 1)
         self.assertLessEqual(row["bars_held"], 12)
 
+    def test_volume_profile_fields_are_emitted_when_pool_mid_available(self):
+        from liqpool.timing import StateFeaturizer
+        sig = AlphaSignal(
+            alpha_name="pool_reach", symbol="HDFCBANK",
+            decision_at=self.df.index[20], decision_idx=20,
+            side="long", entry_reference=float(self.df["close"].iloc[20]),
+            stop_atr=0.5, target_atr=2.0, horizon_bars=12,
+            confidence=0.55,
+            state={
+                "pool_mid": float(self.df["close"].iloc[20]),
+                "q_pred": 0.55,
+            },
+        )
+        row = _execute_signal(
+            sig, self.df, self.atr, "BANKING", self.cfg,
+            state_featurizer=StateFeaturizer(self.df),
+        )
+        self.assertIsNotNone(row)
+        self.assertTrue(np.isfinite(row["pool_mid_at_touch"]))
+        self.assertTrue(np.isfinite(row["poc_today_at_touch"]))
+        self.assertTrue(np.isfinite(row["vah_today_at_touch"]))
+        self.assertTrue(np.isfinite(row["val_today_at_touch"]))
+        self.assertIn("pool_volume_confirmed_at_touch", row)
+        self.assertEqual(row["pool_q_pred"], 0.55)
+
     def test_signal_with_late_entry_returns_none(self):
         # Build bars starting at 14:00 IST; signal at bar 6 -> entry at 14:35 IST
         # which is past the 14:30 NO_NEW_ENTRY cutoff.

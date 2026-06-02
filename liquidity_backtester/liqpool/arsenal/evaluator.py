@@ -48,6 +48,10 @@ TRADE_COLUMNS: Tuple[str, ...] = (
     "side", "entry_reference", "entry_price", "exit_price",
     "stop_atr", "target_atr", "horizon_bars",
     "confidence",
+    "pool_mid_at_touch", "poc_today_at_touch",
+    "vah_today_at_touch", "val_today_at_touch",
+    "pool_volume_nearest_atr", "pool_volume_confirmed_at_touch",
+    "pool_q_pred",
     "gross_r", "cost_inr", "risk_inr",
     "net_r", "net_pnl", "win",
     "exit_reason", "bars_held",
@@ -75,6 +79,7 @@ def _execute_signal(signal: AlphaSignal,
                     atr_series: pd.Series,
                     sector: str,
                     config: EvaluatorConfig,
+                    state_featurizer: Optional[Any] = None,
                     ) -> Optional[Dict[str, Any]]:
     """Run a single AlphaSignal through the shared pipeline. Returns a
     dict matching :data:`TRADE_COLUMNS` or None if the signal was filtered
@@ -106,6 +111,35 @@ def _execute_signal(signal: AlphaSignal,
     atr_val = float(atr_series.iloc[entry_idx])
     if atr_val <= 0 or not math.isfinite(atr_val):
         return None
+
+    pool_mid_at_touch = float(signal.state.get("pool_mid", np.nan))
+    pool_q_pred = float(signal.state.get("q_pred", signal.confidence))
+    poc_today_at_touch = float("nan")
+    vah_today_at_touch = float("nan")
+    val_today_at_touch = float("nan")
+    pool_volume_nearest_atr = float("nan")
+    pool_volume_confirmed_at_touch = False
+    if state_featurizer is not None and 0 <= signal.decision_idx < len(df_base):
+        try:
+            poc_today_at_touch = float(state_featurizer._poc_today[signal.decision_idx])
+            vah_today_at_touch = float(state_featurizer._vah_today[signal.decision_idx])
+            val_today_at_touch = float(state_featurizer._val_today[signal.decision_idx])
+        except Exception:
+            pass
+    if math.isfinite(pool_mid_at_touch):
+        try:
+            touch_atr = float(atr_series.iloc[signal.decision_idx])
+        except Exception:
+            touch_atr = float("nan")
+        refs = (poc_today_at_touch, vah_today_at_touch, val_today_at_touch)
+        distances = [
+            abs(pool_mid_at_touch - ref) / max(touch_atr, 1e-9)
+            for ref in refs
+            if math.isfinite(ref) and math.isfinite(touch_atr) and touch_atr > 0
+        ]
+        if distances:
+            pool_volume_nearest_atr = float(min(distances))
+            pool_volume_confirmed_at_touch = bool(pool_volume_nearest_atr <= 0.25)
 
     r, exit_reason, exit_idx = triple_barrier_label(
         df_base, entry_idx=entry_idx, side=signal.side,
@@ -157,6 +191,13 @@ def _execute_signal(signal: AlphaSignal,
         "target_atr": signal.target_atr,
         "horizon_bars": signal.horizon_bars,
         "confidence": signal.confidence,
+        "pool_mid_at_touch": pool_mid_at_touch,
+        "poc_today_at_touch": poc_today_at_touch,
+        "vah_today_at_touch": vah_today_at_touch,
+        "val_today_at_touch": val_today_at_touch,
+        "pool_volume_nearest_atr": pool_volume_nearest_atr,
+        "pool_volume_confirmed_at_touch": pool_volume_confirmed_at_touch,
+        "pool_q_pred": pool_q_pred,
         "gross_r": float(r),
         "cost_inr": cost_inr,
         "risk_inr": risk_inr,
@@ -209,6 +250,11 @@ class ArsenalEvaluator:
             if df_base is None or df_base.empty:
                 continue
             atr_series = atr(df_base, self.config.atr_period).bfill()
+            try:
+                from liqpool.timing import StateFeaturizer
+                state_featurizer = StateFeaturizer(df_base)
+            except Exception:
+                state_featurizer = None
             sec = sector_of(symbol)
 
             asset_extras = {
@@ -224,7 +270,10 @@ class ArsenalEvaluator:
                     atr_series=atr_series, extra=extra,
                 )
                 for sig in signals:
-                    row = _execute_signal(sig, df_base, atr_series, sec, self.config)
+                    row = _execute_signal(
+                        sig, df_base, atr_series, sec, self.config,
+                        state_featurizer=state_featurizer,
+                    )
                     if row is None:
                         continue
                     # Regime tags annotate the row in-place (with a prefix).

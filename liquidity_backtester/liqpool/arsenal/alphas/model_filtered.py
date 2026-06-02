@@ -75,6 +75,7 @@ def _base_signal_for_pool(alpha_name: str, symbol: str,
     s = {
         "pool_idx": int(result.pool_idx),
         "pool_score": float(pool.score),
+        "pool_mid": float(pool.mid),
         "factor": _headline_for_pool(pool),
         "tf_count": int(len(set(pool.tfs))),
     }
@@ -817,6 +818,8 @@ class ProximityFilteredPoolAlpha(Alpha):
                     state={
                         "pool_idx": int(pi),
                         "pool_score": float(pool.score),
+                        "pool_mid": float(pool.mid),
+                        "q_pred": float(q_preds[pi]),
                         "factor": _headline_for_pool(pool),
                         "tf_count": int(len(set(pool.tfs))),
                         "p_touch": float(p_touch),

@@ -201,6 +201,71 @@ def _cost_multiplier_summary(trades: pd.DataFrame,
     ).reset_index(drop=True)
 
 
+def _pool_volume_effect(trades: pd.DataFrame,
+                        p_threshold: float,
+                        alpha_name: str = "pool_reach") -> pd.DataFrame:
+    required = {
+        "alpha_name", "pool_volume_confirmed_at_touch", "pool_q_pred",
+        "confidence", "net_r",
+    }
+    if trades.empty or not required.issubset(set(trades.columns)):
+        return pd.DataFrame()
+    frame = trades[trades["alpha_name"].astype(str) == alpha_name].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    frame = frame[frame["pool_volume_confirmed_at_touch"].notna()].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    rows = []
+    for confirmed, g in frame.groupby("pool_volume_confirmed_at_touch"):
+        r = pd.to_numeric(g["net_r"], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna()
+        n = int(len(r))
+        mean_r = float(r.mean()) if n else 0.0
+        se = float(r.std(ddof=1) / math.sqrt(n)) if n > 1 else 0.0
+        p = _normal_p_gt_zero(mean_r, se)
+        rows.append({
+            "population": alpha_name,
+            "pool_volume_confirmed_at_touch": bool(confirmed),
+            "trades": n,
+            "mean_pool_q_pred": float(pd.to_numeric(g["pool_q_pred"], errors="coerce").mean()),
+            "mean_confidence": float(pd.to_numeric(g["confidence"], errors="coerce").mean()),
+            "mean_R": mean_r,
+            "se_R": se,
+            "ci95_lo": mean_r - 1.96 * se,
+            "ci95_hi": mean_r + 1.96 * se,
+            "hit_rate": float((r > 0).mean()) if n else 0.0,
+            "p_mean_R_gt_0": p,
+            "p_threshold": float(p_threshold),
+            "passes_p_threshold": bool(mean_r > 0 and p < p_threshold),
+        })
+    df = pd.DataFrame(rows).sort_values(
+        "pool_volume_confirmed_at_touch", ascending=False
+    ).reset_index(drop=True)
+    if len(df) == 2:
+        confirmed_mask = df["pool_volume_confirmed_at_touch"].astype(bool)
+        yes = df[confirmed_mask].iloc[0]
+        no = df[~confirmed_mask].iloc[0]
+        delta = {
+            "population": alpha_name,
+            "pool_volume_confirmed_at_touch": "delta_true_minus_false",
+            "trades": int(yes["trades"]) - int(no["trades"]),
+            "mean_pool_q_pred": float(yes["mean_pool_q_pred"]) - float(no["mean_pool_q_pred"]),
+            "mean_confidence": float(yes["mean_confidence"]) - float(no["mean_confidence"]),
+            "mean_R": float(yes["mean_R"]) - float(no["mean_R"]),
+            "se_R": float("nan"),
+            "ci95_lo": float("nan"),
+            "ci95_hi": float("nan"),
+            "hit_rate": float(yes["hit_rate"]) - float(no["hit_rate"]),
+            "p_mean_R_gt_0": float("nan"),
+            "p_threshold": float(p_threshold),
+            "passes_p_threshold": False,
+        }
+        df = pd.concat([df, pd.DataFrame([delta])], ignore_index=True)
+    return df
+
+
 def _high_correlation_pairs(alpha_corr: pd.DataFrame,
                             threshold: float = 0.80) -> pd.DataFrame:
     if alpha_corr.empty or "alpha" not in alpha_corr.columns:
@@ -298,6 +363,11 @@ def _parallel_asset_worker(symbol: str) -> pd.DataFrame:
     if df_base is None or df_base.empty:
         return pd.DataFrame()
     atr_series = atr(df_base, config.atr_period).bfill()
+    try:
+        from liqpool.timing import StateFeaturizer
+        state_featurizer = StateFeaturizer(df_base)
+    except Exception:
+        state_featurizer = None
     sec = sector_of(symbol)
     asset_extras = {
         "asset_data": ad,
@@ -313,7 +383,10 @@ def _parallel_asset_worker(symbol: str) -> pd.DataFrame:
             extra=asset_extras,
         )
         for sig in signals:
-            row = _execute_signal(sig, df_base, atr_series, sec, config)
+            row = _execute_signal(
+                sig, df_base, atr_series, sec, config,
+                state_featurizer=state_featurizer,
+            )
             if row is None:
                 continue
             tags = alpha.regime_tags(sig, df_base, atr_series)
@@ -543,8 +616,16 @@ def main() -> int:
     per_side = evaluator.per_regime_summary(trades, "regime_side")
     pw = evaluator.pairwise_combinations(trades)
     daily_returns = evaluator.daily_alpha_returns(trades)
-    alpha_corr = evaluator.alpha_correlation(daily_returns)
-    high_corr = _high_correlation_pairs(alpha_corr)
+    alpha_corr_full = evaluator.alpha_correlation(daily_returns)
+    selection_daily_returns = evaluator.daily_alpha_returns(selection_trades)
+    holdout_daily_returns = evaluator.daily_alpha_returns(holdout_trades)
+    alpha_corr_selection = evaluator.alpha_correlation(selection_daily_returns)
+    alpha_corr_holdout = evaluator.alpha_correlation(holdout_daily_returns)
+    duplicate_corr_base = (
+        alpha_corr_selection if method_meta["used_holdout"] else alpha_corr_full
+    )
+    high_corr = _high_correlation_pairs(duplicate_corr_base)
+    high_corr_holdout = _high_correlation_pairs(alpha_corr_holdout)
     turnover = _per_alpha_turnover(trades)
     multipliers = [float(x) for x in str(args.cost_multipliers).split(",") if x.strip()]
     cost_summary_all = _cost_multiplier_summary(trades, multipliers, p_threshold)
@@ -557,6 +638,11 @@ def main() -> int:
     baseline_delta_holdout = _baseline_delta(
         holdout_trades if method_meta["used_holdout"] else trades
     )
+    pool_volume_effect_all = _pool_volume_effect(trades, p_threshold)
+    pool_volume_effect_primary = _pool_volume_effect(
+        holdout_trades if method_meta["used_holdout"] else trades,
+        p_threshold,
+    )
 
     summary.to_csv(out_dir / "per_alpha_summary.csv", index=False)
     selection_summary.to_csv(out_dir / "selection_per_alpha_summary.csv", index=False)
@@ -566,8 +652,14 @@ def main() -> int:
     per_side.to_csv(out_dir / "per_regime_side.csv", index=False)
     pw.to_csv(out_dir / "pairwise_combinations.csv", index=False)
     daily_returns.to_csv(out_dir / "daily_alpha_returns.csv", index=False)
-    alpha_corr.to_csv(out_dir / "alpha_correlation.csv", index=False)
+    selection_daily_returns.to_csv(out_dir / "selection_daily_alpha_returns.csv", index=False)
+    holdout_daily_returns.to_csv(out_dir / "holdout_daily_alpha_returns.csv", index=False)
+    duplicate_corr_base.to_csv(out_dir / "alpha_correlation.csv", index=False)
+    alpha_corr_full.to_csv(out_dir / "alpha_correlation_full_oos.csv", index=False)
+    alpha_corr_selection.to_csv(out_dir / "alpha_correlation_selection.csv", index=False)
+    alpha_corr_holdout.to_csv(out_dir / "alpha_correlation_holdout.csv", index=False)
     high_corr.to_csv(out_dir / "high_alpha_correlations.csv", index=False)
+    high_corr_holdout.to_csv(out_dir / "high_alpha_correlations_holdout.csv", index=False)
     turnover.to_csv(out_dir / "per_alpha_turnover.csv", index=False)
     cost_summary_all.to_csv(out_dir / "per_alpha_cost_multipliers.csv", index=False)
     cost_summary_holdout.to_csv(
@@ -575,14 +667,18 @@ def main() -> int:
     baseline_delta_all.to_csv(out_dir / "proximity_journey_delta.csv", index=False)
     baseline_delta_holdout.to_csv(
         out_dir / "holdout_or_bonferroni_proximity_journey_delta.csv", index=False)
+    pool_volume_effect_all.to_csv(out_dir / "pool_volume_confirmed_effect_all.csv", index=False)
+    pool_volume_effect_primary.to_csv(
+        out_dir / "pool_volume_confirmed_effect.csv", index=False)
     (out_dir / "methodology_summary.json").write_text(
         json.dumps(method_meta, indent=2, sort_keys=True), encoding="utf-8")
-    (out_dir / "unavailable_requested_dimensions.json").write_text(
+    (out_dir / "requested_dimension_status.json").write_text(
         json.dumps({
             "pool_volume_confirmed": (
-                "not computed: Arsenal trade rows do not yet retain pool mid-price "
-                "and touch-bar POC/VAH/VAL together. This must be added to signal "
-                "state/evaluator rows before the split can be audited honestly."
+                "computed for pool-based signals using pool_mid_at_touch and "
+                "the nearest of POC/VAH/VAL from the signal decision/touch bar; "
+                "post-touch pool_reach decision_idx is the touch bar, while "
+                "pre-touch journey alphas use decision-time volume context."
             )
         }, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -604,10 +700,19 @@ def main() -> int:
     _print_per_regime(per_session, "session")
     _print_per_regime(per_side, "side")
     _print_pairwise(pw)
-    _print_correlations(alpha_corr)
+    print("\n[arsenal] alpha_correlation.csv uses "
+          f"{'selection slice' if method_meta['used_holdout'] else 'full OOS with Bonferroni'} "
+          "for duplicate detection.")
+    _print_correlations(duplicate_corr_base)
     if not high_corr.empty:
         print("\n================ HIGH ALPHA CORRELATIONS (|rho| >= 0.80) ================")
         print(high_corr.to_string(index=False))
+    if method_meta["used_holdout"] and not high_corr_holdout.empty:
+        print("\n================ HOLDOUT HIGH ALPHA CORRELATIONS (sanity) ================")
+        print(high_corr_holdout.to_string(index=False))
+    if not pool_volume_effect_primary.empty:
+        print("\n================ POOL VOLUME CONFIRMED EFFECT ================")
+        print(pool_volume_effect_primary.to_string(index=False))
     if not turnover.empty:
         print("\n================ PER-ALPHA TURNOVER ================")
         print(turnover.to_string(index=False))

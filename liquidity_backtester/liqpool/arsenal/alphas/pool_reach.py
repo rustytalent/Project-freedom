@@ -83,6 +83,8 @@ class LiquidityPoolReachAlpha(Alpha):
                 state={
                     "pool_idx": int(result.pool_idx),
                     "pool_score": float(pool.score),
+                    "pool_mid": float(pool.mid),
+                    "q_pred": float(getattr(result, "pool_quality", 0.5) or 0.5),
                     "factor": _headline_for_pool(pool),
                     "tf_count": int(len(set(pool.tfs))),
                 },
