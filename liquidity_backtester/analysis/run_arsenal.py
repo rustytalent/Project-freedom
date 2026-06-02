@@ -216,8 +216,29 @@ def _pool_volume_effect(trades: pd.DataFrame,
     frame = frame[frame["pool_volume_confirmed_at_touch"].notna()].copy()
     if frame.empty:
         return pd.DataFrame()
+
+    def _to_bool(value) -> Optional[bool]:
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in {"true", "1", "yes"}:
+                return True
+            if low in {"false", "0", "no"}:
+                return False
+        if pd.isna(value):
+            return None
+        return bool(value)
+
+    frame["_pool_volume_confirmed_bool"] = frame[
+        "pool_volume_confirmed_at_touch"
+    ].map(_to_bool)
+    frame = frame[frame["_pool_volume_confirmed_bool"].notna()].copy()
+    if frame.empty:
+        return pd.DataFrame()
+
     rows = []
-    for confirmed, g in frame.groupby("pool_volume_confirmed_at_touch"):
+    for confirmed, g in frame.groupby("_pool_volume_confirmed_bool"):
         r = pd.to_numeric(g["net_r"], errors="coerce").replace(
             [np.inf, -np.inf], np.nan
         ).dropna()
@@ -243,10 +264,11 @@ def _pool_volume_effect(trades: pd.DataFrame,
     df = pd.DataFrame(rows).sort_values(
         "pool_volume_confirmed_at_touch", ascending=False
     ).reset_index(drop=True)
-    if len(df) == 2:
+    present = set(df["pool_volume_confirmed_at_touch"].map(_to_bool).dropna())
+    if {True, False}.issubset(present):
         confirmed_mask = df["pool_volume_confirmed_at_touch"].astype(bool)
         yes = df[confirmed_mask].iloc[0]
-        no = df[~confirmed_mask].iloc[0]
+        no = df[df["pool_volume_confirmed_at_touch"].map(_to_bool) == False].iloc[0]
         delta = {
             "population": alpha_name,
             "pool_volume_confirmed_at_touch": "delta_true_minus_false",
