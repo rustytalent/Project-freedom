@@ -104,6 +104,20 @@ _STATE_NUMERIC = [
     "is_weekly_expiry_day",
     "is_morning_after_expiry",
     "is_monthly_expiry_week",
+    # Path / context features. Same-instant snapshots (z-score, dist-to-pool)
+    # cannot distinguish a bull-trap from a genuine breakdown — both have
+    # identical state at the trap-fade moment but opposite futures. These
+    # features encode the SHAPE of how price got here, not just the level:
+    # opening-range character, trendiness-vs-choppiness, the gap-then-fade
+    # pattern an institutional liquidity grab leaves on the tape, and the
+    # current vol regime. All causal from the same 5-min bars.
+    "first_15min_range_atr",
+    "first_15min_direction_atr",
+    "path_efficiency_30",
+    "direction_changes_30",
+    "is_gap_up_trap_fade",
+    "is_gap_down_reversal",
+    "vol_regime_zscore_20d",
 ]
 _STATE_SESSION = [f"st_session_{s}" for s in SESSION_LABELS]
 STATE_FEATURE_NAMES = _STATE_NUMERIC + _STATE_SESSION
@@ -131,6 +145,7 @@ class StateFeaturizer:
         self._precompute_avwap_arrays()
         self._precompute_frvp_arrays()
         self._precompute_expiry_arrays()
+        self._precompute_path_context_arrays()
 
     def _precompute_session_relative_arrays(self) -> None:
         """Build per-bar running stats over the bar's own IST trading day.
@@ -461,6 +476,128 @@ class StateFeaturizer:
         self._is_morning_after_expiry = prev_was_thu
         self._is_monthly_expiry_week = is_monthly_expiry_week
 
+    def _precompute_path_context_arrays(self) -> None:
+        """Path / context features encoding the SHAPE of recent bars.
+
+        Per-bar arrays of length n:
+          * _first_15min_range_atr[j] — range of bars [open_idx, open_idx+2]
+                                        of j's session, in ATR(14) units.
+                                        0.0 before bar 3 of the session.
+          * _first_15min_direction_atr[j] — close[open_idx+2] - open[open_idx],
+                                        in ATR(14) units. Sign-bearing.
+          * _path_efficiency_30[j] — |close[j] - close[j-29]| /
+                                        sum_{k=j-28..j} |close[k] - close[k-1]|.
+                                        Range 0..1; 1.0 = perfectly linear,
+                                        0.0 = pure noise.
+          * _direction_changes_30[j] — count of sign flips in
+                                        diff(close[j-29..j]) over 30 bars.
+          * _is_gap_up_trap_fade[j] — 1.0 when overnight gap > 0.5 ATR AND
+                                        first-15-min direction < -0.3 ATR.
+                                        The classic institutional bull-trap.
+          * _is_gap_down_reversal[j] — 1.0 when overnight gap < -0.5 ATR AND
+                                        first-15-min direction > +0.3 ATR.
+                                        The classic morning panic + reversal.
+          * _vol_regime_zscore_20d[j] — z-score of session-end ATR(14)
+                                        against the trailing 20 IST trading
+                                        days. Captures vol expansion /
+                                        contraction regime.
+        """
+        n = len(self.idx)
+        if n == 0:
+            self._first_15min_range_atr = np.zeros(0, dtype=float)
+            self._first_15min_direction_atr = np.zeros(0, dtype=float)
+            self._path_efficiency_30 = np.zeros(0, dtype=float)
+            self._direction_changes_30 = np.zeros(0, dtype=float)
+            self._is_gap_up_trap_fade = np.zeros(0, dtype=float)
+            self._is_gap_down_reversal = np.zeros(0, dtype=float)
+            self._vol_regime_zscore_20d = np.zeros(0, dtype=float)
+            return
+
+        atr14 = self.atr_14.values
+        c = self.close
+        # 1) First-15-min features — derived from session-open bar offsets.
+        first_15min_range_atr = np.zeros(n, dtype=float)
+        first_15min_dir_atr = np.zeros(n, dtype=float)
+        open_idx_arr = self._today_open_idx
+        for j in range(n):
+            oi = int(open_idx_arr[j])
+            bars_in = j - oi
+            if bars_in < 2:
+                continue                              # not yet 3 bars in
+            third_bar = oi + 2
+            r = float(self.high[oi:third_bar + 1].max()
+                      - self.low[oi:third_bar + 1].min())
+            d = float(self.close[third_bar] - self.open_[oi])
+            denom = max(float(atr14[third_bar]), 1e-9)
+            first_15min_range_atr[j] = r / denom
+            first_15min_dir_atr[j] = d / denom
+        self._first_15min_range_atr = first_15min_range_atr
+        self._first_15min_direction_atr = first_15min_dir_atr
+
+        # 2) Path efficiency over 30 bars (Kaufman efficiency ratio).
+        path_eff = np.zeros(n, dtype=float)
+        dir_changes = np.zeros(n, dtype=float)
+        for j in range(n):
+            lo = max(0, j - 29)
+            if j - lo < 5:                            # need at least 5 moves
+                continue
+            window = c[lo:j + 1]
+            net = abs(window[-1] - window[0])
+            moves = np.abs(np.diff(window))
+            total = float(moves.sum())
+            if total > 1e-9:
+                path_eff[j] = float(net / total)
+            else:
+                path_eff[j] = 0.0
+            # Direction changes: count sign flips in diff(window).
+            diffs = np.diff(window)
+            signs = np.sign(diffs)
+            # Only count flips between non-zero signs.
+            nz = signs[signs != 0]
+            if len(nz) >= 2:
+                dir_changes[j] = float((np.diff(nz) != 0).sum())
+        self._path_efficiency_30 = path_eff
+        self._direction_changes_30 = dir_changes
+
+        # 3) Trap-fade / reversal flags, using overnight_gap and first_15min_dir.
+        gap_atr = np.where(
+            np.isnan(self._prev_day_last_close), 0.0,
+            (self._today_open_price - np.where(
+                np.isnan(self._prev_day_last_close), self._today_open_price,
+                self._prev_day_last_close)) / np.maximum(atr14, 1e-9),
+        )
+        trap_up = ((gap_atr > 0.5) & (first_15min_dir_atr < -0.3)).astype(float)
+        trap_dn = ((gap_atr < -0.5) & (first_15min_dir_atr > 0.3)).astype(float)
+        self._is_gap_up_trap_fade = trap_up
+        self._is_gap_down_reversal = trap_dn
+
+        # 4) Vol regime z-score: per-IST-day session-end ATR, z-scored vs
+        #    the trailing 20 IST trading days. Causal: today's day's z-score
+        #    uses prior 20 days' stats, NOT including today.
+        ist_dt = pd.DatetimeIndex(self.idx) + pd.Timedelta(hours=5, minutes=30)
+        ist_dates = ist_dt.normalize().values
+        new_day_mask = np.concatenate(([True], ist_dates[1:] != ist_dates[:-1]))
+        day_change_idx = np.where(new_day_mask)[0]
+        end_idx = np.concatenate((day_change_idx[1:] - 1, [n - 1]))
+        day_end_atr = atr14[end_idx]
+        n_days = len(day_end_atr)
+        per_day_z = np.zeros(n_days, dtype=float)
+        for k in range(n_days):
+            lo = max(0, k - 20)
+            if k - lo < 5:                            # need 5+ days history
+                per_day_z[k] = 0.0
+                continue
+            window = day_end_atr[lo:k]                # exclude today
+            mu = float(np.mean(window))
+            sd = float(np.std(window, ddof=1)) if len(window) > 1 else 0.0
+            if sd > 1e-9:
+                per_day_z[k] = float((day_end_atr[k] - mu) / sd)
+            else:
+                per_day_z[k] = 0.0
+        day_index = np.searchsorted(day_change_idx, np.arange(n),
+                                     side="right") - 1
+        self._vol_regime_zscore_20d = per_day_z[day_index]
+
     def features_at(self, j: int, active_pools: List[Pool]) -> Dict[str, float]:
         n = len(self.idx)
         if j < 1 or j >= n:
@@ -618,6 +755,13 @@ class StateFeaturizer:
             "is_weekly_expiry_day": float(self._is_weekly_expiry_day[j]),
             "is_morning_after_expiry": float(self._is_morning_after_expiry[j]),
             "is_monthly_expiry_week": float(self._is_monthly_expiry_week[j]),
+            "first_15min_range_atr": float(self._first_15min_range_atr[j]),
+            "first_15min_direction_atr": float(self._first_15min_direction_atr[j]),
+            "path_efficiency_30": float(self._path_efficiency_30[j]),
+            "direction_changes_30": float(self._direction_changes_30[j]),
+            "is_gap_up_trap_fade": float(self._is_gap_up_trap_fade[j]),
+            "is_gap_down_reversal": float(self._is_gap_down_reversal[j]),
+            "vol_regime_zscore_20d": float(self._vol_regime_zscore_20d[j]),
         }
         for s in SESSION_LABELS:
             feats[f"st_session_{s}"] = 1.0 if session == s else 0.0
