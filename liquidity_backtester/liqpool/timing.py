@@ -78,6 +78,23 @@ _STATE_NUMERIC = [
     "htf_today_open_to_now_atr",
     "htf_session_volume_ratio",
     "htf_overnight_gap_atr",
+    # Anchored VWAP + FRVP: volume-weighted features that the pure
+    # price-structure detector ignores. AVWAP tells the model "is price
+    # above/below the volume-weighted fair value since {today,this-week}-open?
+    # And is that fair value rising or falling?". FRVP (fixed-range volume
+    # profile) tells the model "where did most of today's trading actually
+    # happen?" — the Point of Control (POC), Value Area High/Low (VAH/VAL).
+    # Both are causal: at bar j we only read bars i<=j of the same session
+    # (AVWAP today / FRVP today) or of the same IST week (AVWAP week).
+    "avwap_today_dist_atr",
+    "avwap_today_slope_5_atr",
+    "avwap_today_dev_sigmas",
+    "avwap_week_dist_atr",
+    "avwap_week_slope_5_atr",
+    "poc_today_dist_atr",
+    "vah_today_dist_atr",
+    "val_today_dist_atr",
+    "in_value_area_today",
 ]
 _STATE_SESSION = [f"st_session_{s}" for s in SESSION_LABELS]
 STATE_FEATURE_NAMES = _STATE_NUMERIC + _STATE_SESSION
@@ -102,6 +119,8 @@ class StateFeaturizer:
         self.roll_mean_50 = df_base["close"].rolling(50, min_periods=10).mean().bfill().values
         self.roll_std_50 = df_base["close"].rolling(50, min_periods=10).std().bfill().values
         self._precompute_session_relative_arrays()
+        self._precompute_avwap_arrays()
+        self._precompute_frvp_arrays()
 
     def _precompute_session_relative_arrays(self) -> None:
         """Build per-bar running stats over the bar's own IST trading day.
@@ -184,6 +203,173 @@ class StateFeaturizer:
             else:
                 prev_avg_per_day[k] = (cumsum[k] - cumsum[lo]) / float(k - lo)
         self._prev_20d_avg_vol = prev_avg_per_day[day_index]
+
+    def _precompute_avwap_arrays(self) -> None:
+        """Anchored VWAP from today's open and from this IST week's open.
+
+        Per-bar value = cum(typical_price * volume) / cum(volume), where the
+        running sums reset at each anchor. Standard-deviation band tracks
+        the population variance of typical_price about the running AVWAP,
+        which the predict-time code uses to convert price-vs-AVWAP into a
+        sigma deviation feature. All O(n) over the bars.
+        """
+        n = len(self.idx)
+        if n == 0:
+            self._avwap_today = np.zeros(0)
+            self._avwap_week = np.zeros(0)
+            self._avwap_today_sigma = np.zeros(0)
+            return
+
+        ist_dt = pd.DatetimeIndex(self.idx) + pd.Timedelta(hours=5, minutes=30)
+        ist_dates = ist_dt.normalize().values
+        new_day = np.concatenate(([True], ist_dates[1:] != ist_dates[:-1]))
+        # Week anchor: weekday-of-IST-date drops (Mon=0 after Fri=4) OR a
+        # gap > 2 calendar days (covers Fri->Mon and longer holidays).
+        ist_weekday = ist_dt.weekday.values
+        ist_day_diff = np.diff(ist_dates).astype("timedelta64[D]").astype(int)
+        new_week = np.concatenate((
+            [True],
+            (ist_weekday[1:] < ist_weekday[:-1]) | (ist_day_diff > 2),
+        ))
+
+        # Typical price = (high + low + close) / 3 — standard VWAP input.
+        tp = (self.high + self.low + self.close) / 3.0
+        vol = self.volume.astype(float)
+
+        avwap_today = np.empty(n, dtype=float)
+        avwap_week = np.empty(n, dtype=float)
+        avwap_today_sigma = np.empty(n, dtype=float)
+        # Running accumulators reset at each anchor.
+        d_cum_pv = 0.0
+        d_cum_v = 0.0
+        d_cum_pv2 = 0.0    # second moment of price for sigma band
+        w_cum_pv = 0.0
+        w_cum_v = 0.0
+        for j in range(n):
+            if new_day[j]:
+                d_cum_pv = 0.0
+                d_cum_v = 0.0
+                d_cum_pv2 = 0.0
+            if new_week[j]:
+                w_cum_pv = 0.0
+                w_cum_v = 0.0
+            v_j = vol[j]
+            tp_j = tp[j]
+            d_cum_pv += tp_j * v_j
+            d_cum_v += v_j
+            d_cum_pv2 += (tp_j ** 2) * v_j
+            w_cum_pv += tp_j * v_j
+            w_cum_v += v_j
+            # Guard against zero-volume bars at the start of a session.
+            d_v_eff = max(d_cum_v, 1e-9)
+            w_v_eff = max(w_cum_v, 1e-9)
+            avwap_today[j] = d_cum_pv / d_v_eff
+            avwap_week[j] = w_cum_pv / w_v_eff
+            mean_t = avwap_today[j]
+            var_t = max(0.0, (d_cum_pv2 / d_v_eff) - mean_t * mean_t)
+            avwap_today_sigma[j] = float(np.sqrt(var_t))
+
+        self._avwap_today = avwap_today
+        self._avwap_week = avwap_week
+        self._avwap_today_sigma = avwap_today_sigma
+
+    def _precompute_frvp_arrays(self) -> None:
+        """Fixed-range volume profile per IST session: POC, VAH, VAL per bar.
+
+        For each session we bin the typical-price stream by a fixed width
+        (anchored at the session-open ATR(60), so bins are stable across the
+        day even as range expands). Per bar j we report:
+
+          * POC[j] — price (bin midpoint) with the highest accumulated volume
+                     from session-open to j.
+          * VAH[j], VAL[j] — high and low edges of the price range whose
+                     accumulated volume is the smallest cluster summing to
+                     >= 70% of session-so-far total volume, ranked from the
+                     POC outward. The "developing 70% value area" standard.
+
+        All causal (only reads bars <= j of the same session). O(n * bins);
+        bins ~= 30, so trivial.
+        """
+        n = len(self.idx)
+        if n == 0:
+            self._poc_today = np.zeros(0)
+            self._vah_today = np.zeros(0)
+            self._val_today = np.zeros(0)
+            return
+
+        ist_dt = pd.DatetimeIndex(self.idx) + pd.Timedelta(hours=5, minutes=30)
+        ist_dates = ist_dt.normalize().values
+        new_day = np.concatenate(([True], ist_dates[1:] != ist_dates[:-1]))
+
+        tp = (self.high + self.low + self.close) / 3.0
+        vol = self.volume.astype(float)
+        atr60_vals = self.atr_60.values
+
+        poc_arr = np.empty(n, dtype=float)
+        vah_arr = np.empty(n, dtype=float)
+        val_arr = np.empty(n, dtype=float)
+
+        # Per-session state.
+        bin_volume: Dict[int, float] = {}
+        origin = 0.0
+        bin_width = 1.0
+        total_vol = 0.0
+
+        for j in range(n):
+            if new_day[j]:
+                bin_volume = {}
+                origin = float(self.open_[j])
+                bin_width = max(0.10 * float(atr60_vals[j]), 1e-6)
+                total_vol = 0.0
+            bin_idx = int(np.floor((tp[j] - origin) / bin_width))
+            bin_volume[bin_idx] = bin_volume.get(bin_idx, 0.0) + vol[j]
+            total_vol += vol[j]
+            # POC: bin with max volume.
+            if total_vol <= 1e-9:
+                poc_arr[j] = tp[j]
+                vah_arr[j] = tp[j]
+                val_arr[j] = tp[j]
+                continue
+            poc_bin = max(bin_volume.items(), key=lambda kv: kv[1])[0]
+            poc_price = origin + (poc_bin + 0.5) * bin_width
+            poc_arr[j] = poc_price
+            # VAH/VAL: expand outward from the POC through VISITED bins
+            # (not just adjacent indices — a random-walk session leaves
+            # gaps that should be skipped over, not treated as terminators).
+            visited = sorted(bin_volume.keys())
+            poc_pos = visited.index(poc_bin)
+            upper_pos = poc_pos
+            lower_pos = poc_pos
+            target = 0.70 * total_vol
+            cum = bin_volume[poc_bin]
+            while cum < target:
+                has_up = upper_pos + 1 < len(visited)
+                has_dn = lower_pos > 0
+                if not has_up and not has_dn:
+                    break
+                if not has_dn:
+                    upper_pos += 1
+                    cum += bin_volume[visited[upper_pos]]
+                elif not has_up:
+                    lower_pos -= 1
+                    cum += bin_volume[visited[lower_pos]]
+                else:
+                    next_up_vol = bin_volume[visited[upper_pos + 1]]
+                    next_dn_vol = bin_volume[visited[lower_pos - 1]]
+                    if next_up_vol >= next_dn_vol:
+                        upper_pos += 1
+                        cum += next_up_vol
+                    else:
+                        lower_pos -= 1
+                        cum += next_dn_vol
+            high_bin = visited[upper_pos]
+            low_bin = visited[lower_pos]
+            vah_arr[j] = origin + (high_bin + 1) * bin_width
+            val_arr[j] = origin + low_bin * bin_width
+
+        self._poc_today = poc_arr
+        self._vah_today = vah_arr
+        self._val_today = val_arr
 
     def features_at(self, j: int, active_pools: List[Pool]) -> Dict[str, float]:
         n = len(self.idx)
@@ -273,6 +459,39 @@ class StateFeaturizer:
         else:
             htf_overnight_gap_atr = 0.0
 
+        # AVWAP-relative features. Slopes use lag=5 so they capture a
+        # ~25-min window on 5-min bars; before bar 5 of a session we just
+        # report zero (no slope to read).
+        avwap_today = float(self._avwap_today[j])
+        avwap_week = float(self._avwap_week[j])
+        avwap_today_dist_atr = (c[j] - avwap_today) / a
+        avwap_week_dist_atr = (c[j] - avwap_week) / a
+        if j >= 5:
+            avwap_today_slope_5_atr = (avwap_today
+                                       - float(self._avwap_today[j - 5])) / a
+            avwap_week_slope_5_atr = (avwap_week
+                                      - float(self._avwap_week[j - 5])) / a
+        else:
+            avwap_today_slope_5_atr = 0.0
+            avwap_week_slope_5_atr = 0.0
+        sigma_t = float(self._avwap_today_sigma[j])
+        if sigma_t > 1e-9:
+            avwap_today_dev_sigmas = (c[j] - avwap_today) / sigma_t
+        else:
+            avwap_today_dev_sigmas = 0.0
+
+        # FRVP-relative features. The "in_value_area" flag is a soft 0/1
+        # so the GBM can split on it. dist_to_poc preserves sign so the
+        # model can distinguish above-POC (overbought relative to today's
+        # volume centre) from below-POC.
+        poc_t = float(self._poc_today[j])
+        vah_t = float(self._vah_today[j])
+        val_t = float(self._val_today[j])
+        poc_today_dist_atr = (c[j] - poc_t) / a
+        vah_today_dist_atr = (c[j] - vah_t) / a
+        val_today_dist_atr = (c[j] - val_t) / a
+        in_value_area_today = 1.0 if (val_t <= c[j] <= vah_t) else 0.0
+
         feats: Dict[str, float] = {
             "ret_1": log_ret(1),
             "ret_6": log_ret(6),
@@ -296,6 +515,15 @@ class StateFeaturizer:
             "htf_today_open_to_now_atr": float(htf_today_open_to_now_atr),
             "htf_session_volume_ratio": float(htf_session_volume_ratio),
             "htf_overnight_gap_atr": float(htf_overnight_gap_atr),
+            "avwap_today_dist_atr": float(avwap_today_dist_atr),
+            "avwap_today_slope_5_atr": float(avwap_today_slope_5_atr),
+            "avwap_today_dev_sigmas": float(avwap_today_dev_sigmas),
+            "avwap_week_dist_atr": float(avwap_week_dist_atr),
+            "avwap_week_slope_5_atr": float(avwap_week_slope_5_atr),
+            "poc_today_dist_atr": float(poc_today_dist_atr),
+            "vah_today_dist_atr": float(vah_today_dist_atr),
+            "val_today_dist_atr": float(val_today_dist_atr),
+            "in_value_area_today": float(in_value_area_today),
         }
         for s in SESSION_LABELS:
             feats[f"st_session_{s}"] = 1.0 if session == s else 0.0
