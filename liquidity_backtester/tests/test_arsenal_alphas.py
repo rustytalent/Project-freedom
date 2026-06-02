@@ -66,6 +66,10 @@ class _StubPool:
         self.contributors = contributors or [_StubContributor("EQH")]
         self.score = score
 
+    @property
+    def mid(self) -> float:
+        return (self.price_low + self.price_high) / 2.0
+
 
 @dataclass
 class _StubWalkforward:

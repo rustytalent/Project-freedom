@@ -173,8 +173,13 @@ def _cost_multiplier_summary(trades: pd.DataFrame,
     rows = []
     for alpha_name, g in trades.groupby("alpha_name"):
         base_r = pd.to_numeric(g["net_r"], errors="coerce")
+        gross_r = pd.to_numeric(g.get("gross_r"), errors="coerce")
         cost = pd.to_numeric(g["cost_inr"], errors="coerce")
         risk = pd.to_numeric(g["risk_inr"], errors="coerce").replace(0, np.nan)
+        # Cost-in-units-of-risk per trade. Aggregated this is "how many R
+        # of edge the cost is eating on average" — the missing diagnostic
+        # that the prior cost-wall table buried inside net_r.
+        cost_r = (cost / risk).replace([np.inf, -np.inf], np.nan)
         for m in multipliers:
             stressed = base_r - (cost * (float(m) - 1.0) / risk)
             stressed = stressed.replace([np.inf, -np.inf], np.nan).dropna()
@@ -183,11 +188,15 @@ def _cost_multiplier_summary(trades: pd.DataFrame,
             se = float(stressed.std(ddof=1) / math.sqrt(n)) if n > 1 else 0.0
             p = _normal_p_gt_zero(mean_r, se)
             wins = stressed > 0
+            mean_gross_r = float(gross_r.dropna().mean()) if gross_r.notna().any() else float("nan")
+            mean_cost_r_at_m = float(cost_r.dropna().mean()) * float(m) if cost_r.notna().any() else float("nan")
             rows.append({
                 "alpha_name": alpha_name,
                 "cost_multiplier": float(m),
                 "trades": n,
                 "win": float(wins.mean()) if n else 0.0,
+                "mean_gross_R": mean_gross_r,
+                "mean_cost_R": mean_cost_r_at_m,
                 "mean_R": mean_r,
                 "se_R": se,
                 "ci95_lo": mean_r - 1.96 * se,

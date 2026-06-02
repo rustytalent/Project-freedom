@@ -163,6 +163,34 @@ class ExecuteSignalTests(unittest.TestCase):
         row = _execute_signal(sig, self.df, self.atr, "BANKING", self.cfg)
         self.assertIsNone(row)
 
+    def test_min_economic_position_filter_rejects_uneconomic_signal(self):
+        # Aggressive ratio (50x) forces rejection: even a healthy target
+        # can't be 50x the brokerage on a small notional.
+        cfg = EvaluatorConfig(notional_inr=5_000,
+                              min_target_to_cost_ratio=50.0)
+        sig = self._sig(idx=20, target=0.5)
+        row = _execute_signal(sig, self.df, self.atr, "BANKING", cfg)
+        self.assertIsNone(row,
+            "target reward 50x below fee floor should be filtered")
+
+    def test_min_economic_position_filter_disabled_when_ratio_zero(self):
+        # Same uneconomic fixture but ratio=0 -> filter disabled -> trade.
+        cfg = EvaluatorConfig(notional_inr=5_000,
+                              min_target_to_cost_ratio=0.0)
+        sig = self._sig(idx=20, target=0.5)
+        row = _execute_signal(sig, self.df, self.atr, "BANKING", cfg)
+        self.assertIsNotNone(row,
+            "ratio=0.0 should disable the economic filter")
+
+    def test_min_economic_position_filter_passes_large_position(self):
+        # ₹2L notional with default target_atr=2.0 — reward easily clears
+        # 3x cost. Must trade.
+        cfg = EvaluatorConfig(notional_inr=200_000,
+                              min_target_to_cost_ratio=3.0)
+        sig = self._sig(idx=20)
+        row = _execute_signal(sig, self.df, self.atr, "BANKING", cfg)
+        self.assertIsNotNone(row)
+
 
 # ---------------------------------------------------------------------------
 # Evaluator: end-to-end

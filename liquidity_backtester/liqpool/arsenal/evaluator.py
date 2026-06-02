@@ -62,9 +62,23 @@ TRADE_COLUMNS: Tuple[str, ...] = (
 class EvaluatorConfig:
     """Per-evaluator settings. Defaults match the v1 simulator we trust."""
     cost_cfg: ZerodhaEquityCostConfig = field(default_factory=ZerodhaEquityCostConfig)
-    notional_inr: float = 50_000.0      # default position size (₹50k)
+    notional_inr: float = 100_000.0     # default position size (₹1L). Bumped from
+                                        # ₹50k because at ₹50k a ₹770 stock gives
+                                        # qty=64 — below the practitioner floor
+                                        # where a 3-rupee move outearns the fees.
+                                        # See user HDFC sizing example.
     atr_period: int = 14
     slippage_bps_per_side: float = 1.0  # flat bps slippage on entry + exit
+
+    # Minimum-economic-position filter: reject any signal whose target reward
+    # in INR is less than ``min_target_to_cost_ratio`` * round-trip cost.
+    # Default 3.0 = "the target must outearn the fee by 3×". Set to 0.0 to
+    # disable (recover the old behaviour where every signal trades regardless
+    # of size). This filter materially changes which trades enter the book —
+    # at ₹50k notional + low-ATR stocks the historical strategy was paying
+    # ~1.1R per trade in cost (see analysis docs), so this is the structural
+    # fix, not a research dial.
+    min_target_to_cost_ratio: float = 3.0
 
     def slippage_fraction(self) -> float:
         return float(self.slippage_bps_per_side) / 10_000.0
@@ -111,6 +125,26 @@ def _execute_signal(signal: AlphaSignal,
     atr_val = float(atr_series.iloc[entry_idx])
     if atr_val <= 0 or not math.isfinite(atr_val):
         return None
+
+    # Minimum-economic-position filter. The position size implied by
+    # notional / entry_price determines how many rupees a unit-ATR target
+    # actually pays. If even the BEST-CASE outcome (target hit) doesn't
+    # clear k× the round-trip cost, this trade is structurally unprofitable
+    # — no edge in the model can rescue it. Reject before triple-barrier.
+    if config.min_target_to_cost_ratio > 0.0:
+        qty_check = max(1, int(config.notional_inr / max(entry_price, 1e-9)))
+        target_reward_inr = float(signal.target_atr) * atr_val * qty_check
+        # Approximate round-trip cost at target-hit price (favourable exit).
+        if signal.side == "long":
+            optimistic_exit = entry_price + signal.target_atr * atr_val
+        else:
+            optimistic_exit = entry_price - signal.target_atr * atr_val
+        rt_cost = estimate_round_trip_charges(
+            entry_price, optimistic_exit, qty_check, config.cost_cfg,
+            side="short" if signal.side == "short" else "long",
+        )
+        if target_reward_inr < config.min_target_to_cost_ratio * float(rt_cost["total_cost"]):
+            return None
 
     pool_mid_at_touch = float(signal.state.get("pool_mid", np.nan))
     pool_q_pred = float(signal.state.get("q_pred", signal.confidence))
