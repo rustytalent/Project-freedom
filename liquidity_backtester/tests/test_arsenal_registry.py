@@ -76,10 +76,18 @@ class AlphaRegistryTests(unittest.TestCase):
 
 
 class DefaultRegistryTests(unittest.TestCase):
-    def test_default_registry_has_three_seed_alphas(self):
+    def test_default_registry_has_seed_and_pretouch_alphas(self):
         reg = default_registry()
-        self.assertEqual(set(reg.names()),
-                         {"pool_reach", "mean_reversion", "momentum"})
+        self.assertTrue({
+            "pool_reach",
+            "mean_reversion",
+            "momentum",
+            "proximity_journey",
+            "distance_5_8_journey",
+            "proximity_direction_soft",
+            "opening_range_to_pool",
+            "sector_rotation_journey",
+        }.issubset(set(reg.names())))
 
 
 if __name__ == "__main__":

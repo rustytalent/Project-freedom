@@ -332,3 +332,37 @@ class ArsenalEvaluator:
                     "alpha_b_mean_R_overall": float(trades.loc[trades["alpha_name"] == b, "net_r"].mean()),
                 })
         return pd.DataFrame(rows).sort_values("combined_mean_R", ascending=False).reset_index(drop=True)
+
+    @staticmethod
+    def daily_alpha_returns(trades: pd.DataFrame) -> pd.DataFrame:
+        """Daily net-R series by alpha for portfolio/diversification checks.
+
+        Uses sum of trade ``net_r`` per alpha per day. This is not a capital
+        allocator yet; it is the simplest apples-to-apples view of whether
+        alpha P&L streams move together.
+        """
+        if trades.empty or "entry_at" not in trades.columns:
+            return pd.DataFrame()
+        frame = trades.copy()
+        frame["entry_day"] = pd.to_datetime(frame["entry_at"]).dt.date.astype(str)
+        pivot = frame.pivot_table(
+            index="entry_day",
+            columns="alpha_name",
+            values="net_r",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+        return pivot.sort_index().reset_index()
+
+    @staticmethod
+    def alpha_correlation(daily_returns: pd.DataFrame) -> pd.DataFrame:
+        """Pairwise correlation of alpha daily net-R streams."""
+        if daily_returns.empty or len(daily_returns.columns) <= 2:
+            return pd.DataFrame()
+        values = daily_returns.drop(columns=["entry_day"], errors="ignore")
+        if values.empty:
+            return pd.DataFrame()
+        corr = values.corr().reset_index().rename(columns={"alpha_name": "alpha"})
+        if "index" in corr.columns:
+            corr = corr.rename(columns={"index": "alpha"})
+        return corr

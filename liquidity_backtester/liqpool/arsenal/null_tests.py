@@ -129,7 +129,12 @@ def collect_signals_per_asset(alpha: Alpha, report,
         if ad.base_df is None or ad.base_df.empty:
             continue
         atr_series = atr(ad.base_df, atr_period).bfill()
-        extra = {"asset_data": ad, "sector": sector_of(symbol), **extras}
+        extra = {
+            "asset_data": ad,
+            "sector": sector_of(symbol),
+            "report": report,
+            **extras,
+        }
         signals.extend(alpha.candidates(
             symbol=symbol, df_base=ad.base_df,
             atr_series=atr_series, extra=extra,

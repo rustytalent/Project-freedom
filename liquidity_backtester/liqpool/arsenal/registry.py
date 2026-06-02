@@ -81,9 +81,28 @@ def default_registry() -> AlphaRegistry:
     from .alphas.pool_reach import LiquidityPoolReachAlpha
     from .alphas.mean_reversion import MeanReversionAlpha
     from .alphas.momentum import MomentumAlpha
+    from .alphas.model_filtered import (
+        DistanceBandJourneyAlpha,
+        OpeningRangeToPoolAlpha,
+        ProximityDirectionSoftAlpha,
+        ProximityFilteredPoolAlpha,
+        SectorRotationJourneyAlpha,
+    )
 
     reg = AlphaRegistry()
     reg.register(LiquidityPoolReachAlpha())
     reg.register(MeanReversionAlpha())
     reg.register(MomentumAlpha())
+    reg.register(ProximityFilteredPoolAlpha(
+        name="proximity_journey",
+        min_p_touch=0.50,
+        min_score=0.58,
+        max_dist_atr=10.0,
+        use_soft_score=True,
+        use_multi_horizon=True,
+    ))
+    reg.register(DistanceBandJourneyAlpha())
+    reg.register(ProximityDirectionSoftAlpha())
+    reg.register(OpeningRangeToPoolAlpha())
+    reg.register(SectorRotationJourneyAlpha())
     return reg

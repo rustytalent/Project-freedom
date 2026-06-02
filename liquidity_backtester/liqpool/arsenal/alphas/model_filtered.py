@@ -28,7 +28,7 @@ user can grid-search thresholds with multiple registry entries:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -423,8 +423,18 @@ class ProximityFilteredPoolAlpha(Alpha):
     DEFAULT_MIN_DIST_ATR: float = 0.10
     DEFAULT_SAMPLE_EVERY: int = 12
     DEFAULT_MIN_P_TOUCH: float = 0.60
+    DEFAULT_MIN_SCORE: float = 0.60
 
     def __init__(self, min_p_touch: float = DEFAULT_MIN_P_TOUCH,
+                 min_score: Optional[float] = None,
+                 distance_band: Optional[Tuple[float, float]] = None,
+                 allowed_sessions: Optional[Sequence[str]] = None,
+                 use_soft_score: bool = False,
+                 use_direction_score: bool = False,
+                 use_sector_rotation: bool = False,
+                 use_vol_regime: bool = False,
+                 use_multi_horizon: bool = False,
+                 require_opening_breakout: bool = False,
                  max_dist_atr: float = DEFAULT_MAX_DIST_ATR,
                  max_target_atr: float = DEFAULT_MAX_TARGET_ATR,
                  stop_atr: float = DEFAULT_STOP_ATR,
@@ -444,6 +454,15 @@ class ProximityFilteredPoolAlpha(Alpha):
             raise ValueError(f"sample_every must be >= 1, got {sample_every}")
         self._name = name
         self.min_p_touch = float(min_p_touch)
+        self.min_score = (float(min_score) if min_score is not None else None)
+        self.distance_band = distance_band
+        self.allowed_sessions = tuple(allowed_sessions or ())
+        self.use_soft_score = bool(use_soft_score)
+        self.use_direction_score = bool(use_direction_score)
+        self.use_sector_rotation = bool(use_sector_rotation)
+        self.use_vol_regime = bool(use_vol_regime)
+        self.use_multi_horizon = bool(use_multi_horizon)
+        self.require_opening_breakout = bool(require_opening_breakout)
         self.max_dist_atr = float(max_dist_atr)
         self.max_target_atr = float(max_target_atr)
         self.stop_atr = float(stop_atr)
@@ -459,7 +478,8 @@ class ProximityFilteredPoolAlpha(Alpha):
     def description(self) -> str:
         return (
             f"Pre-touch journey to a predicted pool touch. Emits when "
-            f"proximity model P(touch <= H) >= {self.min_p_touch:.2f}. "
+            f"proximity model P(touch <= H) >= {self.min_p_touch:.2f}"
+            f"{' and soft score clears threshold' if self.use_soft_score else ''}. "
             f"Target = distance to pool (cap {self.max_target_atr:.1f} ATR), "
             f"stop {self.stop_atr:.2f} ATR, horizon = proximity model's "
             f"primary horizon. One signal per pool."
@@ -469,6 +489,141 @@ class ProximityFilteredPoolAlpha(Alpha):
         if self._horizon_override is not None:
             return self._horizon_override
         return int(min(prox_models.keys()))
+
+    def _opening_range(self, df_base: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+        from liqpool.execution_backtest import _ist_minute_of_day
+        minutes = pd.Series([_ist_minute_of_day(ts) for ts in df_base.index],
+                            index=df_base.index)
+        day_key = pd.Series([(ts + pd.Timedelta(hours=5, minutes=30)).date()
+                             for ts in df_base.index], index=df_base.index)
+        mask = (
+            (minutes >= 9 * 60 + 15)
+            & (minutes < 10 * 60 + 15)
+        )
+        opening_high = df_base["high"].where(mask).groupby(day_key).transform("max").ffill()
+        opening_low = df_base["low"].where(mask).groupby(day_key).transform("min").ffill()
+        return opening_high, opening_low
+
+    def _distance_score(self, dist_atr: float) -> float:
+        if self.distance_band is not None:
+            lo, hi = self.distance_band
+            if lo <= dist_atr < hi:
+                return 1.0
+            return 0.0
+        if 5.0 <= dist_atr < 8.0:
+            return 1.0
+        if 3.0 <= dist_atr < 10.0:
+            return 0.80
+        if 1.0 <= dist_atr < 12.0:
+            return 0.55
+        return 0.25
+
+    def _sector_score(self, sector: str, trade_side: str,
+                      report: Any) -> Tuple[float, str]:
+        if not self.use_sector_rotation:
+            return 0.50, "neutral"
+        cache = getattr(report, "_arsenal_sector_rotation_cache", None)
+        if cache is None:
+            try:
+                from liqpool.sectors import compute_sector_metrics, detect_rotation
+                asset_dfs = {
+                    sym: ad.base_df for sym, ad in report.assets.items()
+                    if getattr(ad, "base_df", None) is not None
+                }
+                rotation = detect_rotation(compute_sector_metrics(asset_dfs))
+                cache = {
+                    "rotation_in": set(rotation.get("rotation_in", []) or []),
+                    "rotation_out": set(rotation.get("rotation_out", []) or []),
+                }
+            except Exception:
+                cache = {"rotation_in": set(), "rotation_out": set()}
+            try:
+                setattr(report, "_arsenal_sector_rotation_cache", cache)
+            except Exception:
+                pass
+        rotation_in = cache.get("rotation_in", set())
+        rotation_out = cache.get("rotation_out", set())
+        if trade_side == "long":
+            if sector in rotation_in:
+                return 1.0, "with_rotation_in"
+            if sector in rotation_out:
+                return 0.15, "against_rotation_out"
+        else:
+            if sector in rotation_out:
+                return 1.0, "with_rotation_out"
+            if sector in rotation_in:
+                return 0.15, "against_rotation_in"
+        return 0.55, "neutral"
+
+    def _vol_score(self, state: Dict[str, float]) -> Tuple[float, str]:
+        if not self.use_vol_regime:
+            return 0.50, "not_used"
+        vol = float(state.get("vol_ratio", 1.0) or 1.0)
+        if 0.85 <= vol <= 1.35:
+            return 1.0, "normal_vol"
+        if 0.65 <= vol < 0.85:
+            return 0.65, "low_vol"
+        if 1.35 < vol <= 1.80:
+            return 0.65, "high_vol"
+        return 0.30, "extreme_vol"
+
+    def _soft_score(self, *,
+                    p_touch: float,
+                    p_touch_by_h: Dict[int, float],
+                    p_direction_to_pool: Optional[float],
+                    dist_atr: float,
+                    sector: str,
+                    trade_side: str,
+                    state: Dict[str, float],
+                    report: Any,
+                    ) -> Tuple[float, Dict[str, Any]]:
+        prox_score = float(p_touch)
+        if self.use_multi_horizon and p_touch_by_h:
+            vals = [float(v) for _, v in sorted(p_touch_by_h.items()) if np.isfinite(v)]
+            if vals:
+                urgent = vals[0]
+                developing = max(vals)
+                # Urgent + developing shapes both matter. A high longer-horizon
+                # probability with weaker near-horizon probability is a slower
+                # journey, not an automatic reject.
+                prox_score = 0.60 * urgent + 0.40 * developing
+
+        direction_score = 0.50
+        if self.use_direction_score and p_direction_to_pool is not None:
+            direction_score = float(np.clip(p_direction_to_pool, 0.0, 1.0))
+        distance_score = self._distance_score(dist_atr)
+        sector_score, sector_tag = self._sector_score(sector, trade_side, report)
+        vol_score, vol_tag = self._vol_score(state)
+
+        weights = {
+            "proximity": 0.45,
+            "direction": 0.20 if self.use_direction_score else 0.0,
+            "distance": 0.15,
+            "sector": 0.10 if self.use_sector_rotation else 0.0,
+            "vol": 0.10 if self.use_vol_regime else 0.0,
+        }
+        used = sum(weights.values())
+        # If optional dimensions are off, redistribute to proximity/distance.
+        if used < 0.999:
+            weights["proximity"] += 1.0 - used
+        score = (
+            weights["proximity"] * prox_score
+            + weights["direction"] * direction_score
+            + weights["distance"] * distance_score
+            + weights["sector"] * sector_score
+            + weights["vol"] * vol_score
+        )
+        components = {
+            "score": float(score),
+            "score_proximity": float(prox_score),
+            "score_direction": float(direction_score),
+            "score_distance": float(distance_score),
+            "score_sector": float(sector_score),
+            "score_vol": float(vol_score),
+            "sector_rotation_tag": sector_tag,
+            "vol_regime_tag": vol_tag,
+        }
+        return float(score), components
 
     def candidates(self, *, symbol: str, df_base: pd.DataFrame,
                    atr_series: pd.Series,
@@ -491,6 +646,8 @@ class ProximityFilteredPoolAlpha(Alpha):
         if primary_h not in prox:
             return []
         model = prox[primary_h]
+        direction_model = getattr(report, "unified_direction", None)
+        sector = str(extra.get("sector", "OTHER"))
 
         pools = ad.walkforward.oos_pools
         results = ad.walkforward.oos_results
@@ -517,6 +674,9 @@ class ProximityFilteredPoolAlpha(Alpha):
         # Need at least horizon bars of runway after decision to be honest.
         last_decision = max(0, n - primary_h - 1)
         first_decision = 80                        # warm-up matches snapshot generation
+        opening_high = opening_low = None
+        if self.require_opening_breakout:
+            opening_high, opening_low = self._opening_range(df_base)
 
         emitted: set = set()
         close_arr = df_base["close"].values
@@ -525,10 +685,36 @@ class ProximityFilteredPoolAlpha(Alpha):
             ts = idx_values[j]
             close_T = float(close_arr[j])
             a_T = max(float(atr_vals[j]), 1e-9)
+            live_pools = []
+            for pi, pool in enumerate(pools):
+                result = results[pi]
+                if pool.available_at > ts:
+                    continue
+                if (getattr(result, "touched_at", None) is not None
+                        and result.touched_at <= ts):
+                    continue
+                if (getattr(result, "broken_at", None) is not None
+                        and result.broken_at <= ts):
+                    continue
+                live_pools.append(pool)
             try:
-                state = sf.features_at(j, active_pools=[])
+                state = sf.features_at(j, active_pools=live_pools)
             except Exception:
                 continue
+            session = "unknown"
+            try:
+                from liqpool.regime import nse_session
+                session = nse_session(pd.Timestamp(ts))
+            except Exception:
+                pass
+            if self.allowed_sessions and session not in self.allowed_sessions:
+                continue
+            p_up = None
+            if direction_model is not None and self.use_direction_score:
+                try:
+                    p_up = float(direction_model.predict_state(state))
+                except Exception:
+                    p_up = None
 
             for pi, pool in enumerate(pools):
                 if pi in emitted:
@@ -548,27 +734,73 @@ class ProximityFilteredPoolAlpha(Alpha):
                     pool_side = "above"
                     trade_side = "long"
                     journey_target = (pool.price_low - close_T) / a_T
+                    if self.require_opening_breakout and opening_high is not None:
+                        if not np.isfinite(opening_high.iloc[j]) or close_T < float(opening_high.iloc[j]):
+                            continue
                 elif pool.price_high < close_T:
                     dist_atr = (close_T - pool.price_high) / a_T
                     pool_side = "below"
                     trade_side = "short"
                     journey_target = (close_T - pool.price_high) / a_T
+                    if self.require_opening_breakout and opening_low is not None:
+                        if not np.isfinite(opening_low.iloc[j]) or close_T > float(opening_low.iloc[j]):
+                            continue
                 else:
                     continue                       # already inside the zone
                 if dist_atr < self.DEFAULT_MIN_DIST_ATR:
                     continue                       # too close — no journey to ride
                 if dist_atr > self.max_dist_atr:
                     continue
+                if self.distance_band is not None:
+                    lo, hi = self.distance_band
+                    if not (lo <= dist_atr < hi):
+                        continue
 
                 try:
-                    p_touch = float(model.predict_one(
+                    p_touch_by_h = {}
+                    for h, pm in prox.items():
+                        if h != primary_h and not self.use_multi_horizon:
+                            continue
+                        p_touch_by_h[int(h)] = float(pm.predict_one(
+                            pool, dist_atr, pool_side, state,
+                            float(q_preds[pi]), atr_val=a_T,
+                        ))
+                    p_touch = float(p_touch_by_h.get(primary_h, model.predict_one(
                         pool, dist_atr, pool_side, state,
                         float(q_preds[pi]), atr_val=a_T,
-                    ))
+                    )))
                 except Exception:
                     continue
                 if not np.isfinite(p_touch) or p_touch < self.min_p_touch:
                     continue
+                p_direction_to_pool = None
+                if p_up is not None:
+                    p_direction_to_pool = float(p_up if trade_side == "long" else 1.0 - p_up)
+                score = p_touch
+                score_state: Dict[str, Any] = {
+                    "score": float(score),
+                    "score_proximity": float(p_touch),
+                    "score_direction": float(p_direction_to_pool if p_direction_to_pool is not None else 0.5),
+                    "score_distance": float(self._distance_score(dist_atr)),
+                    "score_sector": 0.5,
+                    "score_vol": 0.5,
+                    "sector_rotation_tag": "not_used",
+                    "vol_regime_tag": "not_used",
+                }
+                if self.use_soft_score:
+                    score, score_state = self._soft_score(
+                        p_touch=p_touch,
+                        p_touch_by_h=p_touch_by_h,
+                        p_direction_to_pool=p_direction_to_pool,
+                        dist_atr=float(dist_atr),
+                        sector=sector,
+                        trade_side=trade_side,
+                        state=state,
+                        report=report,
+                    )
+                    threshold = self.min_score if self.min_score is not None else self.DEFAULT_MIN_SCORE
+                    if score < threshold:
+                        continue
 
                 target_atr = min(float(journey_target), self.max_target_atr)
                 if target_atr <= 0:
@@ -581,16 +813,23 @@ class ProximityFilteredPoolAlpha(Alpha):
                     stop_atr=self.stop_atr,
                     target_atr=target_atr,
                     horizon_bars=int(primary_h),
-                    confidence=float(p_touch),
+                    confidence=float(np.clip(score, 0.0, 1.0)),
                     state={
                         "pool_idx": int(pi),
                         "pool_score": float(pool.score),
                         "factor": _headline_for_pool(pool),
                         "tf_count": int(len(set(pool.tfs))),
                         "p_touch": float(p_touch),
+                        "p_touch_by_horizon": dict(sorted(p_touch_by_h.items())),
+                        "p_direction_to_pool": (
+                            float(p_direction_to_pool)
+                            if p_direction_to_pool is not None else None
+                        ),
                         "dist_atr_at_decision": float(dist_atr),
                         "side_to_pool": pool_side,
                         "proximity_horizon": int(primary_h),
+                        "session": session,
+                        **score_state,
                     },
                 ))
                 emitted.add(pi)
@@ -610,4 +849,85 @@ class ProximityFilteredPoolAlpha(Alpha):
             "near_0_1_atr" if d < 1.0 else
             "mid_1_3_atr" if d < 3.0 else "far_3_plus_atr"
         )
+        tags["sector_rotation"] = str(signal.state.get("sector_rotation_tag", "not_used"))
+        tags["vol_regime"] = str(signal.state.get("vol_regime_tag", "not_used"))
+        score = float(signal.state.get("score", signal.confidence))
+        tags["score_bucket"] = (
+            "score_high" if score >= 0.80 else
+            "score_mid" if score >= 0.65 else "score_low"
+        )
         return tags
+
+
+class DistanceBandJourneyAlpha(ProximityFilteredPoolAlpha):
+    """Pre-touch journey alpha restricted to a specific distance band."""
+
+    def __init__(self, distance_band: Tuple[float, float] = (5.0, 8.0),
+                 name: str = "distance_5_8_journey",
+                 **kwargs: Any) -> None:
+        super().__init__(
+            name=name,
+            distance_band=distance_band,
+            max_dist_atr=max(float(distance_band[1]), kwargs.pop("max_dist_atr", 8.0)),
+            use_soft_score=True,
+            use_multi_horizon=True,
+            min_p_touch=kwargs.pop("min_p_touch", 0.50),
+            min_score=kwargs.pop("min_score", 0.58),
+            **kwargs,
+        )
+
+
+class ProximityDirectionSoftAlpha(ProximityFilteredPoolAlpha):
+    """Pre-touch journey alpha using direction as a soft score component."""
+
+    def __init__(self, name: str = "proximity_direction_soft",
+                 **kwargs: Any) -> None:
+        super().__init__(
+            name=name,
+            use_soft_score=True,
+            use_direction_score=True,
+            use_multi_horizon=True,
+            min_p_touch=kwargs.pop("min_p_touch", 0.45),
+            min_score=kwargs.pop("min_score", 0.60),
+            max_dist_atr=kwargs.pop("max_dist_atr", 10.0),
+            **kwargs,
+        )
+
+
+class OpeningRangeToPoolAlpha(ProximityFilteredPoolAlpha):
+    """Pre-touch journey alpha after opening-range break toward a pool."""
+
+    def __init__(self, name: str = "opening_range_to_pool",
+                 **kwargs: Any) -> None:
+        super().__init__(
+            name=name,
+            allowed_sessions=kwargs.pop("allowed_sessions", ("morning", "midday")),
+            require_opening_breakout=True,
+            use_soft_score=True,
+            use_direction_score=True,
+            use_multi_horizon=True,
+            min_p_touch=kwargs.pop("min_p_touch", 0.45),
+            min_score=kwargs.pop("min_score", 0.62),
+            max_dist_atr=kwargs.pop("max_dist_atr", 8.0),
+            sample_every=kwargs.pop("sample_every", 6),
+            **kwargs,
+        )
+
+
+class SectorRotationJourneyAlpha(ProximityFilteredPoolAlpha):
+    """Pre-touch journey alpha with sector rotation and volatility context."""
+
+    def __init__(self, name: str = "sector_rotation_journey",
+                 **kwargs: Any) -> None:
+        super().__init__(
+            name=name,
+            use_soft_score=True,
+            use_direction_score=True,
+            use_sector_rotation=True,
+            use_vol_regime=True,
+            use_multi_horizon=True,
+            min_p_touch=kwargs.pop("min_p_touch", 0.45),
+            min_score=kwargs.pop("min_score", 0.62),
+            max_dist_atr=kwargs.pop("max_dist_atr", 10.0),
+            **kwargs,
+        )

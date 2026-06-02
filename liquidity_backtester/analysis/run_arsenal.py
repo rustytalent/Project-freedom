@@ -97,6 +97,14 @@ def _print_pairwise(pw: pd.DataFrame) -> None:
               f"{r['combined_mean_R']:>+15.2f} {ci:>16}")
 
 
+def _print_correlations(corr: pd.DataFrame) -> None:
+    print("\n================ DAILY ALPHA CORRELATION ================")
+    if corr.empty:
+        print("  (not enough daily alpha streams)")
+        return
+    print(corr.to_string(index=False, float_format=lambda x: f"{x:0.2f}"))
+
+
 def _print_null_tests(null_results: List[NullResult]) -> None:
     print("\n================ NULL TESTS ================")
     if not null_results:
@@ -204,16 +212,35 @@ def main() -> int:
     per_session = evaluator.per_regime_summary(trades, "regime_session")
     per_side = evaluator.per_regime_summary(trades, "regime_side")
     pw = evaluator.pairwise_combinations(trades)
+    daily_returns = evaluator.daily_alpha_returns(trades)
+    alpha_corr = evaluator.alpha_correlation(daily_returns)
 
     summary.to_csv(out_dir / "per_alpha_summary.csv", index=False)
     per_session.to_csv(out_dir / "per_regime_session.csv", index=False)
     per_side.to_csv(out_dir / "per_regime_side.csv", index=False)
     pw.to_csv(out_dir / "pairwise_combinations.csv", index=False)
+    daily_returns.to_csv(out_dir / "daily_alpha_returns.csv", index=False)
+    alpha_corr.to_csv(out_dir / "alpha_correlation.csv", index=False)
+
+    extra_regime_dims = [
+        "regime_factor",
+        "regime_tf_bucket",
+        "regime_p_touch_bucket",
+        "regime_dist_bucket",
+        "regime_score_bucket",
+        "regime_sector_rotation",
+        "regime_vol_regime",
+    ]
+    for dim in extra_regime_dims:
+        reg = evaluator.per_regime_summary(trades, dim)
+        if not reg.empty:
+            reg.to_csv(out_dir / f"per_{dim}.csv", index=False)
 
     _print_per_alpha(summary)
     _print_per_regime(per_session, "session")
     _print_per_regime(per_side, "side")
     _print_pairwise(pw)
+    _print_correlations(alpha_corr)
 
     null_results: List[NullResult] = []
     if not args.skip_null_tests:

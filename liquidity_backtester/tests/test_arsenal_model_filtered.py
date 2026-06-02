@@ -21,10 +21,14 @@ import numpy as np
 import pandas as pd
 
 from liqpool.arsenal.alphas import (
+    DistanceBandJourneyAlpha,
     DirectionConfirmedPoolAlpha,
+    OpeningRangeToPoolAlpha,
     PolicyReturnAlpha,
     ProximityFilteredPoolAlpha,
+    ProximityDirectionSoftAlpha,
     QualityFilteredPoolAlpha,
+    SectorRotationJourneyAlpha,
 )
 
 
@@ -556,6 +560,70 @@ class ProximityFilteredPoolAlphaTests(unittest.TestCase):
         self.assertEqual(tags["p_touch_bucket"], "p_high")
         self.assertIn(tags["dist_bucket"], {"near_0_1_atr", "mid_1_3_atr",
                                                "far_3_plus_atr"})
+        self.assertIn("score_bucket", tags)
+
+    def test_soft_direction_variant_uses_direction_without_hard_gate(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        report.unified_direction = _StubDirectionModel(p_up=0.70)
+        alpha = ProximityDirectionSoftAlpha(max_dist_atr=50.0,
+                                            min_score=0.10)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertGreaterEqual(len(sigs), 1)
+        self.assertTrue(any("p_direction_to_pool" in s.state for s in sigs))
+        self.assertTrue(all("score_direction" in s.state for s in sigs))
+
+    def test_distance_band_variant_filters_to_configured_band(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.80)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        # Synthetic pools sit far from price, so a 0-1 ATR band should reject.
+        alpha = DistanceBandJourneyAlpha(distance_band=(0.0, 1.0),
+                                         max_dist_atr=50.0,
+                                         min_score=0.10)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertEqual(sigs, [])
+
+    def test_sector_rotation_variant_emits_and_scores_components(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.90)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        report.unified_direction = _StubDirectionModel(p_up=0.70)
+        report.assets = {"X": ad}
+        alpha = SectorRotationJourneyAlpha(max_dist_atr=50.0,
+                                           min_score=0.10)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report,
+                                       "sector": "AUTO"})
+        self.assertGreaterEqual(len(sigs), 1)
+        self.assertTrue(all("score_sector" in s.state for s in sigs))
+        self.assertTrue(all("score_vol" in s.state for s in sigs))
+
+    def test_opening_range_variant_is_constructible_and_graceful(self):
+        df = self._bars()
+        ad = _far_pools_for_journey(df)
+        prox = _StubProximityModel(return_value=0.90)
+        report = _ProximityReport(prox,
+                                  unified_ml=_StubQModel([0.50, 0.50]),
+                                  unified_featurizer=_StubFeaturizer())
+        report.unified_direction = _StubDirectionModel(p_up=0.70)
+        alpha = OpeningRangeToPoolAlpha(max_dist_atr=50.0,
+                                        min_score=0.10)
+        sigs = alpha.candidates(symbol="X", df_base=df, atr_series=None,
+                                extra={"asset_data": ad, "report": report})
+        self.assertIsInstance(sigs, list)
 
 
 if __name__ == "__main__":
