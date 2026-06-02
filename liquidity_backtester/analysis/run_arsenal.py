@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing as mp
 import pickle
 from pathlib import Path
 from typing import List
@@ -46,6 +47,14 @@ from liqpool.arsenal import (
     sign_flip_null,
     time_shuffle_null,
 )
+from liqpool.arsenal.evaluator import _execute_signal
+from liqpool.indicators import atr
+from liqpool.sectors import sector_of
+
+
+_PARALLEL_REPORT = None
+_PARALLEL_ALPHAS = None
+_PARALLEL_CONFIG = None
 
 
 def _load_bundle(model_dir: Path):
@@ -54,6 +63,60 @@ def _load_bundle(model_dir: Path):
         raise SystemExit(f"missing bundle: {p}")
     with p.open("rb") as f:
         return pickle.load(f)
+
+
+def _parallel_asset_worker(symbol: str) -> pd.DataFrame:
+    report = _PARALLEL_REPORT
+    alphas = _PARALLEL_ALPHAS
+    config = _PARALLEL_CONFIG
+    if report is None or alphas is None or config is None:
+        raise RuntimeError("parallel arsenal worker was not initialised")
+    ad = report.assets[symbol]
+    df_base = ad.base_df
+    if df_base is None or df_base.empty:
+        return pd.DataFrame()
+    atr_series = atr(df_base, config.atr_period).bfill()
+    sec = sector_of(symbol)
+    asset_extras = {
+        "asset_data": ad,
+        "sector": sec,
+        "report": report,
+    }
+    rows = []
+    for alpha in alphas:
+        signals = alpha.candidates(
+            symbol=symbol,
+            df_base=df_base,
+            atr_series=atr_series,
+            extra=asset_extras,
+        )
+        for sig in signals:
+            row = _execute_signal(sig, df_base, atr_series, sec, config)
+            if row is None:
+                continue
+            tags = alpha.regime_tags(sig, df_base, atr_series)
+            for k, v in tags.items():
+                row[f"regime_{k}"] = v
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _run_parallel_arsenal(report, alphas, config: EvaluatorConfig,
+                          workers: int) -> pd.DataFrame:
+    global _PARALLEL_REPORT, _PARALLEL_ALPHAS, _PARALLEL_CONFIG
+    _PARALLEL_REPORT = report
+    _PARALLEL_ALPHAS = alphas
+    _PARALLEL_CONFIG = config
+    symbols = list(report.assets.keys())
+    ctx = mp.get_context("fork")
+    frames = []
+    with ctx.Pool(processes=int(workers)) as pool:
+        for frame in pool.imap_unordered(_parallel_asset_worker, symbols):
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _print_per_alpha(summary: pd.DataFrame) -> None:
@@ -172,6 +235,8 @@ def main() -> int:
     ap.add_argument("--notional-inr", type=float, default=50_000.0)
     ap.add_argument("--null-trials", type=int, default=100)
     ap.add_argument("--skip-null-tests", action="store_true")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes by asset; Linux/VPS path uses fork")
     ap.add_argument("--out", default="output_audit/arsenal")
     args = ap.parse_args()
 
@@ -195,8 +260,12 @@ def main() -> int:
     config = EvaluatorConfig(notional_inr=args.notional_inr)
     evaluator = ArsenalEvaluator(alphas, config=config)
 
-    print(f"\n[arsenal] running evaluator across {len(report.assets)} assets...")
-    trades = evaluator.run(report)
+    print(f"\n[arsenal] running evaluator across {len(report.assets)} assets "
+          f"(workers={max(1, int(args.workers))})...")
+    if int(args.workers) > 1:
+        trades = _run_parallel_arsenal(report, alphas, config, int(args.workers))
+    else:
+        trades = evaluator.run(report)
     print(f"[arsenal] {len(trades):,} trades produced")
 
     trades_path = out_dir / "trades.parquet"
