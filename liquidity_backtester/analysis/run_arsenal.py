@@ -34,7 +34,7 @@ import math
 import multiprocessing as mp
 import pickle
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -57,12 +57,234 @@ _PARALLEL_ALPHAS = None
 _PARALLEL_CONFIG = None
 
 
+def _resolve_model_dir(bundle: str, model_dir: str) -> Path:
+    if bundle:
+        p = Path(bundle).expanduser()
+        if (p / "multi_asset_report.pkl").exists():
+            return p
+        if p.name == str(p):
+            return Path("output_models") / str(p)
+        return p
+    return Path(model_dir).expanduser()
+
+
 def _load_bundle(model_dir: Path):
     p = model_dir / "multi_asset_report.pkl"
     if not p.exists():
         raise SystemExit(f"missing bundle: {p}")
     with p.open("rb") as f:
         return pickle.load(f)
+
+
+def _normal_p_gt_zero(mean_r: float, se_r: float) -> float:
+    if not np.isfinite(mean_r) or not np.isfinite(se_r) or se_r <= 0:
+        return 1.0 if mean_r <= 0 else 0.0
+    z = mean_r / se_r
+    return float(0.5 * math.erfc(z / math.sqrt(2.0)))
+
+
+def _summary_with_pvalues(trades: pd.DataFrame,
+                          p_threshold: float) -> pd.DataFrame:
+    summary = ArsenalEvaluator.per_alpha_summary(trades)
+    if summary.empty:
+        return summary
+    pvals = []
+    for _, row in summary.iterrows():
+        p = _normal_p_gt_zero(float(row["mean_R"]), float(row["se_R"]))
+        pvals.append(p)
+    summary["p_mean_R_gt_0"] = pvals
+    summary["p_threshold"] = float(p_threshold)
+    summary["passes_p_threshold"] = summary["p_mean_R_gt_0"] < float(p_threshold)
+    return summary
+
+
+def _split_holdout(trades: pd.DataFrame, holdout_frac: float
+                   ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
+    meta = {
+        "requested_holdout_frac": float(holdout_frac),
+        "method": "bonferroni",
+        "used_holdout": False,
+        "reason": "holdout_frac<=0 or insufficient dated trades",
+        "cutoff": None,
+        "span_days": 0.0,
+    }
+    if trades.empty or holdout_frac <= 0 or "entry_at" not in trades.columns:
+        return trades.copy(), trades.iloc[0:0].copy(), meta
+    ts = pd.to_datetime(trades["entry_at"], errors="coerce")
+    valid = ts.notna()
+    if not valid.any():
+        meta["reason"] = "entry_at could not be parsed"
+        return trades.copy(), trades.iloc[0:0].copy(), meta
+    span_days = float((ts[valid].max() - ts[valid].min()).total_seconds() / 86400.0)
+    meta["span_days"] = span_days
+    if span_days < 180:
+        meta["reason"] = "OOS span < 180 days, using Bonferroni instead of holdout"
+        return trades.copy(), trades.iloc[0:0].copy(), meta
+
+    valid_ts = ts[valid].sort_values()
+    q = max(0.01, min(0.99, 1.0 - holdout_frac))
+    cutoff_idx = min(len(valid_ts) - 1, max(0, int(math.floor(len(valid_ts) * q)) - 1))
+    cutoff = valid_ts.iloc[cutoff_idx]
+    selection = trades[ts <= cutoff].copy()
+    holdout = trades[ts > cutoff].copy()
+    if selection.empty or holdout.empty:
+        meta["reason"] = "chronological split produced an empty side"
+        return trades.copy(), trades.iloc[0:0].copy(), meta
+    meta.update({
+        "method": "chronological_holdout",
+        "used_holdout": True,
+        "reason": "last OOS slice reserved before alpha selection",
+        "cutoff": str(cutoff),
+    })
+    return selection, holdout, meta
+
+
+def _per_alpha_turnover(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+    rows = []
+    ts = pd.to_datetime(trades["entry_at"], errors="coerce")
+    frame = trades.copy()
+    frame["_entry_ts"] = ts
+    for alpha_name, g in frame.groupby("alpha_name"):
+        n = int(len(g))
+        symbols = max(1, int(g["symbol"].nunique()))
+        dated = g["_entry_ts"].dropna()
+        if len(dated) >= 2:
+            months = max(1.0 / 21.0, float((dated.max() - dated.min()).days) / 30.4375)
+        else:
+            months = 1.0 / 21.0
+        rows.append({
+            "alpha_name": alpha_name,
+            "trades": n,
+            "unique_symbols": symbols,
+            "mean_holding_bars": float(pd.to_numeric(g["bars_held"], errors="coerce").mean()),
+            "entries_per_asset_month": float(n / max(symbols * months, 1e-9)),
+            "too_sparse_n_lt_200": bool(n < 200),
+        })
+    return pd.DataFrame(rows).sort_values("alpha_name").reset_index(drop=True)
+
+
+def _cost_multiplier_summary(trades: pd.DataFrame,
+                             multipliers: List[float],
+                             p_threshold: float) -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+    rows = []
+    for alpha_name, g in trades.groupby("alpha_name"):
+        base_r = pd.to_numeric(g["net_r"], errors="coerce")
+        cost = pd.to_numeric(g["cost_inr"], errors="coerce")
+        risk = pd.to_numeric(g["risk_inr"], errors="coerce").replace(0, np.nan)
+        for m in multipliers:
+            stressed = base_r - (cost * (float(m) - 1.0) / risk)
+            stressed = stressed.replace([np.inf, -np.inf], np.nan).dropna()
+            n = int(len(stressed))
+            mean_r = float(stressed.mean()) if n else 0.0
+            se = float(stressed.std(ddof=1) / math.sqrt(n)) if n > 1 else 0.0
+            p = _normal_p_gt_zero(mean_r, se)
+            wins = stressed > 0
+            rows.append({
+                "alpha_name": alpha_name,
+                "cost_multiplier": float(m),
+                "trades": n,
+                "win": float(wins.mean()) if n else 0.0,
+                "mean_R": mean_r,
+                "se_R": se,
+                "ci95_lo": mean_r - 1.96 * se,
+                "ci95_hi": mean_r + 1.96 * se,
+                "p_mean_R_gt_0": p,
+                "p_threshold": float(p_threshold),
+                "passes_cost_wall": bool(mean_r > 0 and p < p_threshold),
+            })
+    return pd.DataFrame(rows).sort_values(
+        ["cost_multiplier", "mean_R"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+
+def _high_correlation_pairs(alpha_corr: pd.DataFrame,
+                            threshold: float = 0.80) -> pd.DataFrame:
+    if alpha_corr.empty or "alpha" not in alpha_corr.columns:
+        return pd.DataFrame()
+    rows = []
+    matrix = alpha_corr.set_index("alpha")
+    names = [str(x) for x in matrix.index]
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if b not in matrix.columns:
+                continue
+            corr = matrix.loc[a, b]
+            if pd.isna(corr):
+                continue
+            corr_f = float(corr)
+            if abs(corr_f) >= float(threshold):
+                rows.append({
+                    "alpha_a": a,
+                    "alpha_b": b,
+                    "corr": corr_f,
+                    "duplicate_candidate": bool(corr_f > 0),
+                    "threshold": float(threshold),
+                })
+    if not rows:
+        return pd.DataFrame(columns=[
+            "alpha_a", "alpha_b", "corr", "duplicate_candidate", "threshold",
+        ])
+    return pd.DataFrame(rows).sort_values(
+        "corr", key=lambda s: s.abs(), ascending=False
+    ).reset_index(drop=True)
+
+
+def _confidence_decile_lift(g: pd.DataFrame) -> float:
+    if g.empty or "confidence" not in g.columns or len(g) < 20:
+        return float("nan")
+    ordered = g.sort_values("confidence")
+    n = max(1, len(ordered) // 10)
+    bottom = float(pd.to_numeric(ordered.head(n)["net_r"], errors="coerce").mean())
+    top = float(pd.to_numeric(ordered.tail(n)["net_r"], errors="coerce").mean())
+    if abs(bottom) < 1e-9:
+        return float("inf") if top > 0 else float("nan")
+    return float(top / bottom)
+
+
+def _baseline_delta(trades: pd.DataFrame,
+                    baseline: str = "proximity_journey_baseline",
+                    upgraded: str = "proximity_journey") -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+    rows = []
+    for name in (baseline, upgraded):
+        g = trades[trades["alpha_name"] == name]
+        if g.empty:
+            rows.append({"alpha_name": name, "missing": True})
+            continue
+        r = pd.to_numeric(g["net_r"], errors="coerce").dropna()
+        rows.append({
+            "alpha_name": name,
+            "missing": False,
+            "trades": int(len(r)),
+            "mean_R": float(r.mean()) if len(r) else 0.0,
+            "hit_rate": float((r > 0).mean()) if len(r) else 0.0,
+            "sharpe": float(r.mean() / r.std(ddof=1)) if len(r) > 1 and r.std(ddof=1) > 0 else 0.0,
+            "confidence_decile_lift": _confidence_decile_lift(g),
+        })
+    df = pd.DataFrame(rows)
+    if len(df) == 2 and not bool(df["missing"].any()):
+        b = df[df["alpha_name"] == baseline].iloc[0]
+        u = df[df["alpha_name"] == upgraded].iloc[0]
+        df = pd.concat([df, pd.DataFrame([{
+            "alpha_name": "delta_upgraded_minus_baseline",
+            "missing": False,
+            "trades": int(u["trades"]) - int(b["trades"]),
+            "mean_R": float(u["mean_R"]) - float(b["mean_R"]),
+            "hit_rate": float(u["hit_rate"]) - float(b["hit_rate"]),
+            "sharpe": float(u["sharpe"]) - float(b["sharpe"]),
+            "confidence_decile_lift": (
+                float(u["confidence_decile_lift"]) - float(b["confidence_decile_lift"])
+                if np.isfinite(float(u["confidence_decile_lift"]))
+                and np.isfinite(float(b["confidence_decile_lift"]))
+                else float("nan")
+            ),
+        }])], ignore_index=True)
+    return df
 
 
 def _parallel_asset_worker(symbol: str) -> pd.DataFrame:
@@ -183,7 +405,9 @@ def _print_null_tests(null_results: List[NullResult]) -> None:
 
 
 def _final_verdict(summary: pd.DataFrame,
-                   null_results: List[NullResult]) -> List[str]:
+                   null_results: List[NullResult],
+                   p_threshold: float = 0.05,
+                   method_meta: Optional[Dict] = None) -> List[str]:
     out: List[str] = []
     if summary.empty:
         out.append("No trades produced. Either the bundle has no OOS data "
@@ -195,7 +419,10 @@ def _final_verdict(summary: pd.DataFrame,
                           & (summary["ci95_hi"] > 0)]
     negative = summary[summary["mean_R"] <= 0]
 
+    method_meta = method_meta or {}
     out.append(f"Alphas evaluated: {len(summary)}")
+    out.append(f"Methodology: {method_meta.get('method', 'bonferroni')} "
+               f"(p_threshold={p_threshold:.5f})")
     out.append(f"  Statistically positive (ci95_lo > 0): {len(positive)}")
     for _, r in positive.iterrows():
         out.append(f"    + {r['alpha_name']:<22} n={int(r['trades']):>5} "
@@ -217,8 +444,8 @@ def _final_verdict(summary: pd.DataFrame,
                            if nr.test_name == "sign_flip"), float("nan"))
             time_s = "n/a" if math.isnan(time_p) else f"{time_p:.3f}"
             sign_s = "n/a" if math.isnan(sign_p) else f"{sign_p:.3f}"
-            # Edge survives both nulls if p < 0.05.
-            both_pass = (time_p < 0.05) and (sign_p < 0.05)
+            # Edge survives both nulls if p clears the selected threshold.
+            both_pass = (time_p < p_threshold) and (sign_p < p_threshold)
             tag = "PASS" if both_pass else ("BORDERLINE" if (time_p < 0.10 or sign_p < 0.10)
                                              else "FAIL")
             out.append(f"  {alpha_name:<22} time-shuffle p={time_s}  "
@@ -229,6 +456,8 @@ def _final_verdict(summary: pd.DataFrame,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--bundle", default="",
+                    help="bundle name under output_models/ or explicit model dir")
     ap.add_argument("--model-dir", default="output_models/core25_latest")
     ap.add_argument("--alphas", default="",
                     help="comma-separated alpha names; empty = run all registered")
@@ -237,10 +466,18 @@ def main() -> int:
     ap.add_argument("--skip-null-tests", action="store_true")
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel worker processes by asset; Linux/VPS path uses fork")
+    ap.add_argument("--holdout-frac", type=float, default=0.0,
+                    help="reserve the last chronological fraction for final alpha reporting when OOS span >= 180 days")
+    ap.add_argument("--cost-multipliers", default="1.0,1.25,1.5,2.0",
+                    help="comma-separated cost stress multipliers for alpha summaries")
+    ap.add_argument("--emit-alpha-correlation-matrix", action="store_true",
+                    help="accepted for runbook clarity; matrix is always emitted")
+    ap.add_argument("--emit-per-alpha-turnover", action="store_true",
+                    help="accepted for runbook clarity; turnover is always emitted")
     ap.add_argument("--out", default="output_audit/arsenal")
     args = ap.parse_args()
 
-    model_dir = Path(args.model_dir).expanduser()
+    model_dir = _resolve_model_dir(args.bundle, args.model_dir)
     out_dir = Path(args.out).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -268,6 +505,17 @@ def main() -> int:
         trades = evaluator.run(report)
     print(f"[arsenal] {len(trades):,} trades produced")
 
+    n_alphas = max(1, len(alphas))
+    selection_trades, holdout_trades, method_meta = _split_holdout(
+        trades, float(args.holdout_frac)
+    )
+    p_threshold = 0.05 if method_meta["used_holdout"] else 0.05 / n_alphas
+    method_meta.update({
+        "n_alphas": n_alphas,
+        "p_threshold": p_threshold,
+        "bonferroni_applied": not bool(method_meta["used_holdout"]),
+    })
+
     trades_path = out_dir / "trades.parquet"
     if not trades.empty:
         # Convert tz-aware/timestamp columns to str for parquet stability.
@@ -277,19 +525,66 @@ def main() -> int:
             trades[c] = trades[c].astype(str)
         trades.to_parquet(trades_path, index=False)
 
-    summary = evaluator.per_alpha_summary(trades)
+    summary = _summary_with_pvalues(trades, p_threshold)
+    selection_summary = _summary_with_pvalues(selection_trades, p_threshold)
+    holdout_summary = _summary_with_pvalues(holdout_trades, p_threshold)
+    selected_names: List[str] = []
+    if not selection_summary.empty:
+        selected_names = list(selection_summary[
+            (selection_summary["mean_R"] > 0)
+            & (selection_summary["p_mean_R_gt_0"] < p_threshold)
+            & (selection_summary["trades"] >= 200)
+        ]["alpha_name"].astype(str))
+    holdout_selected = (
+        holdout_summary[holdout_summary["alpha_name"].isin(selected_names)].copy()
+        if not holdout_summary.empty else pd.DataFrame()
+    )
     per_session = evaluator.per_regime_summary(trades, "regime_session")
     per_side = evaluator.per_regime_summary(trades, "regime_side")
     pw = evaluator.pairwise_combinations(trades)
     daily_returns = evaluator.daily_alpha_returns(trades)
     alpha_corr = evaluator.alpha_correlation(daily_returns)
+    high_corr = _high_correlation_pairs(alpha_corr)
+    turnover = _per_alpha_turnover(trades)
+    multipliers = [float(x) for x in str(args.cost_multipliers).split(",") if x.strip()]
+    cost_summary_all = _cost_multiplier_summary(trades, multipliers, p_threshold)
+    cost_summary_holdout = _cost_multiplier_summary(
+        holdout_trades if method_meta["used_holdout"] else trades,
+        multipliers,
+        p_threshold,
+    )
+    baseline_delta_all = _baseline_delta(trades)
+    baseline_delta_holdout = _baseline_delta(
+        holdout_trades if method_meta["used_holdout"] else trades
+    )
 
     summary.to_csv(out_dir / "per_alpha_summary.csv", index=False)
+    selection_summary.to_csv(out_dir / "selection_per_alpha_summary.csv", index=False)
+    holdout_summary.to_csv(out_dir / "holdout_per_alpha_summary.csv", index=False)
+    holdout_selected.to_csv(out_dir / "holdout_selected_alpha_summary.csv", index=False)
     per_session.to_csv(out_dir / "per_regime_session.csv", index=False)
     per_side.to_csv(out_dir / "per_regime_side.csv", index=False)
     pw.to_csv(out_dir / "pairwise_combinations.csv", index=False)
     daily_returns.to_csv(out_dir / "daily_alpha_returns.csv", index=False)
     alpha_corr.to_csv(out_dir / "alpha_correlation.csv", index=False)
+    high_corr.to_csv(out_dir / "high_alpha_correlations.csv", index=False)
+    turnover.to_csv(out_dir / "per_alpha_turnover.csv", index=False)
+    cost_summary_all.to_csv(out_dir / "per_alpha_cost_multipliers.csv", index=False)
+    cost_summary_holdout.to_csv(
+        out_dir / "holdout_or_bonferroni_cost_multipliers.csv", index=False)
+    baseline_delta_all.to_csv(out_dir / "proximity_journey_delta.csv", index=False)
+    baseline_delta_holdout.to_csv(
+        out_dir / "holdout_or_bonferroni_proximity_journey_delta.csv", index=False)
+    (out_dir / "methodology_summary.json").write_text(
+        json.dumps(method_meta, indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / "unavailable_requested_dimensions.json").write_text(
+        json.dumps({
+            "pool_volume_confirmed": (
+                "not computed: Arsenal trade rows do not yet retain pool mid-price "
+                "and touch-bar POC/VAH/VAL together. This must be added to signal "
+                "state/evaluator rows before the split can be audited honestly."
+            )
+        }, indent=2, sort_keys=True), encoding="utf-8")
 
     extra_regime_dims = [
         "regime_factor",
@@ -310,6 +605,33 @@ def main() -> int:
     _print_per_regime(per_side, "side")
     _print_pairwise(pw)
     _print_correlations(alpha_corr)
+    if not high_corr.empty:
+        print("\n================ HIGH ALPHA CORRELATIONS (|rho| >= 0.80) ================")
+        print(high_corr.to_string(index=False))
+    if not turnover.empty:
+        print("\n================ PER-ALPHA TURNOVER ================")
+        print(turnover.to_string(index=False))
+    if not baseline_delta_holdout.empty:
+        print("\n================ PROXIMITY JOURNEY ATTRIBUTION ================")
+        print(baseline_delta_holdout.to_string(index=False))
+    if not cost_summary_holdout.empty:
+        print("\n================ COST WALL SUMMARY ================")
+        view = cost_summary_holdout[
+            cost_summary_holdout["cost_multiplier"].isin([1.0, 1.5])
+        ].copy()
+        print(view.to_string(index=False))
+    if method_meta["used_holdout"]:
+        print("\n================ HOLDOUT ALPHA SELECTION ================")
+        print(f"  cutoff: {method_meta['cutoff']}")
+        print(f"  selected on first {(1.0 - args.holdout_frac):.0%}: {selected_names or '(none)'}")
+        if holdout_selected.empty:
+            print("  no selected alpha cleared the selection gate for holdout reporting")
+        else:
+            print(holdout_selected.to_string(index=False))
+    else:
+        print("\n================ MULTIPLE-TESTING CONTROL ================")
+        print(f"  using Bonferroni p < {p_threshold:.5f} across {n_alphas} alphas")
+        print(f"  reason: {method_meta.get('reason')}")
 
     null_results: List[NullResult] = []
     if not args.skip_null_tests:
@@ -327,7 +649,8 @@ def main() -> int:
     _print_null_tests(null_results)
 
     print("\n================ VERDICT ================")
-    for line in _final_verdict(summary, null_results):
+    deliverable_summary = holdout_selected if method_meta["used_holdout"] else summary
+    for line in _final_verdict(deliverable_summary, null_results, p_threshold, method_meta):
         print(line)
     print(f"\n[arsenal] artifacts written to {out_dir}/")
     return 0

@@ -82,6 +82,7 @@ class DefaultRegistryTests(unittest.TestCase):
             "pool_reach",
             "mean_reversion",
             "momentum",
+            "proximity_journey_baseline",
             "proximity_journey",
             "distance_5_8_journey",
             "proximity_direction_soft",

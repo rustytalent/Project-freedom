@@ -94,6 +94,17 @@ def default_registry() -> AlphaRegistry:
     reg.register(MeanReversionAlpha())
     reg.register(MomentumAlpha())
     reg.register(ProximityFilteredPoolAlpha(
+        name="proximity_journey_baseline",
+        min_p_touch=0.60,
+        max_dist_atr=5.0,
+        use_soft_score=False,
+        use_direction_score=False,
+        use_sector_rotation=False,
+        use_vol_regime=False,
+        use_multi_horizon=False,
+        require_opening_breakout=False,
+    ))
+    reg.register(ProximityFilteredPoolAlpha(
         name="proximity_journey",
         min_p_touch=0.50,
         min_score=0.58,
