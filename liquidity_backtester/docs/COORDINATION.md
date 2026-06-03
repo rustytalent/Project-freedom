@@ -131,13 +131,18 @@ Acceptance: a new column `avoidance_recommended` in the trade frame
 (or a sibling table per asset per day), with a test pinning the
 trigger logic.
 
-### 5. (deferred — see OPEN QUESTIONS) — options-language presentation layer
+### 5. Opus or Codex — options-language presentation layer for 5 indexes
 
-Pending user decision on which index to start with (Nifty? BankNifty?
-both?). When chosen: build a small translator that maps proximity
-output ("P(Nifty touches 24,500 today) = 0.82") to strike-grid language
-("the 24,500 strike has 82% chance of being tested before today's EOD").
-No Greeks engine yet. v1 is pure level-to-strike mapping.
+Unblocked. Build a translator that maps proximity output to strike-grid
+language for Nifty 50, Bank Nifty, Fin Nifty, plus two more (user to
+confirm exact two — likely Nifty Midcap Select + Sensex). v1 is pure
+level-to-strike mapping: "P(Nifty touches 24,500 today) = 0.82" →
+"24,500 CE / 24,500 PE: 82% chance of being tested before today's EOD".
+No Greeks engine, no IV, no PCR — those are higher tiers later. Single
+translator module reused across all 5 indexes via a config dict of
+(index_name, lot_size, strike_step). Acceptance: the daily-brief schema
+(NEXT UP #2) carries an options-language sub-section per index, fed
+from this translator.
 
 ---
 
@@ -146,21 +151,29 @@ No Greeks engine yet. v1 is pure level-to-strike mapping.
 Answer these inline (replace the question with the answer + initials).
 They block NEXT UP items.
 
-1. **Which index first for the options-language layer?** Nifty 50, Bank
-   Nifty, both, or Fin Nifty? (Affects strike-grid math and the customer
-   ergonomics of v1.)
+1. **Which index first for the options-language layer?**
+   **ANSWERED (user, 2026-06-03):** Five major indexes —
+   Nifty 50, Bank Nifty, Fin Nifty, plus two more (likely Nifty Midcap
+   Select + Sensex; user to confirm exact two). Engine is the same per
+   index, only the strike-grid translator repeats.
 
-2. **First three customers — when do we want to be brief-ready?** A
-   week? A month? This affects whether outcome-logging is built in
-   parallel with the brief or sequenced after it.
+2. **First three customers — when do we want to be brief-ready?**
+   **ANSWERED (user, 2026-06-03):** A few weeks. Drives parallel build
+   of outcome-logging alongside the brief, not sequenced after.
 
-3. **Pricing for the first 3 — confirm ₹20–25k/month per customer or
-   different number?** Affects whether we offer the strategy-diagnosis
-   wedge as free or as a paid one-time deliverable (₹5k? ₹10k?).
+3. **Pricing for the first 3 — confirm ₹20–25k/month?**
+   **ANSWERED (user, 2026-06-03):** FREE for the first week to the
+   small pool of hand-picked pilot users. Charge from week 2 onward.
+   Strategy-diagnosis wedge: pricing TBD — likely free during the same
+   pilot week, paid afterwards. Number per-customer: not locked, will
+   set after pilot week-1 outcomes are observed.
 
-4. **Do you want the daily brief delivered as PDF, plain email, web
-   dashboard, or all of the above for v1?** Affects what the generation
-   pipeline has to render to.
+4. **Delivery format for the daily brief?**
+   **ANSWERED (user, 2026-06-03):** PDF + plain email YES for v1.
+   Web dashboard ONLY if total monthly hosting + build cost is < ₹300.
+   In practice this means GitHub Pages / Vercel free tier / Cloudflare
+   Pages — anything that's ₹0/month for static content. No paid SaaS
+   tooling for the dashboard until paid customers exist.
 
 ---
 
