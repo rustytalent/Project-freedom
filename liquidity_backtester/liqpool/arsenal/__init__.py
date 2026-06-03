@@ -33,7 +33,7 @@ from .null_tests import (
     sign_flip_null,
     time_shuffle_null,
 )
-from .registry import AlphaRegistry, default_registry
+from .registry import AlphaRegistry, default_registry, research_registry
 
 __all__ = [
     "Alpha",
@@ -48,6 +48,7 @@ __all__ = [
     "TRADE_COLUMNS",
     "collect_signals_per_asset",
     "default_registry",
+    "research_registry",
     "sign_flip_null",
     "signals_to_frame",
     "time_shuffle_null",

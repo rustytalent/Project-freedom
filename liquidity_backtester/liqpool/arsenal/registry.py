@@ -72,22 +72,24 @@ class AlphaRegistry:
 
 
 def default_registry() -> AlphaRegistry:
-    """Build a registry pre-populated with the bundled seed alphas.
+    """Production-ready alphas suitable for the daily Arsenal sweep.
 
-    Importing this at module top would create a circular dependency
+    Includes baselines with sufficient trade volume to be statistically
+    interpretable (>=200 OOS trades per asset in typical bundles) plus
+    the proximity-journey alpha + its single-input baseline for
+    attribution.
+
+    Sparse / experimental alphas (typically <200 trades) live in
+    :func:`research_registry` so they don't contaminate routine sweeps.
+
+    Importing alphas at module top would create a circular dependency
     (registry depends on alphas/ which depends on Alpha). We construct
     lazily in the function body.
     """
     from .alphas.pool_reach import LiquidityPoolReachAlpha
     from .alphas.mean_reversion import MeanReversionAlpha
     from .alphas.momentum import MomentumAlpha
-    from .alphas.model_filtered import (
-        DistanceBandJourneyAlpha,
-        OpeningRangeToPoolAlpha,
-        ProximityDirectionSoftAlpha,
-        ProximityFilteredPoolAlpha,
-        SectorRotationJourneyAlpha,
-    )
+    from .alphas.model_filtered import ProximityFilteredPoolAlpha
 
     reg = AlphaRegistry()
     reg.register(LiquidityPoolReachAlpha())
@@ -112,6 +114,31 @@ def default_registry() -> AlphaRegistry:
         use_soft_score=True,
         use_multi_horizon=True,
     ))
+    return reg
+
+
+def research_registry() -> AlphaRegistry:
+    """``default_registry()`` plus the sparse / experimental alphas.
+
+    The additional members typically produce fewer than 200 OOS trades
+    per Arsenal run, which means their per-alpha mean_R and p-value
+    estimates are statistically uninformative. They are kept here for
+    explicit research sweeps where the sparse signal is acceptable —
+    e.g. when running on a much larger basket, or when sweeping the
+    alphas' own configuration knobs.
+
+    DO NOT use this registry as the default for routine retrains; the
+    extra alphas inflate the multiple-comparison problem without
+    contributing reliable signal at the current basket size.
+    """
+    from .alphas.model_filtered import (
+        DistanceBandJourneyAlpha,
+        OpeningRangeToPoolAlpha,
+        ProximityDirectionSoftAlpha,
+        SectorRotationJourneyAlpha,
+    )
+
+    reg = default_registry()
     reg.register(DistanceBandJourneyAlpha())
     reg.register(ProximityDirectionSoftAlpha())
     reg.register(OpeningRangeToPoolAlpha())

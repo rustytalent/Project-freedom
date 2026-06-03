@@ -6,7 +6,11 @@ import unittest
 import pandas as pd
 
 from liqpool.arsenal.base import Alpha, AlphaSignal
-from liqpool.arsenal.registry import AlphaRegistry, default_registry
+from liqpool.arsenal.registry import (
+    AlphaRegistry,
+    default_registry,
+    research_registry,
+)
 
 
 class _NamedAlpha(Alpha):
@@ -76,7 +80,7 @@ class AlphaRegistryTests(unittest.TestCase):
 
 
 class DefaultRegistryTests(unittest.TestCase):
-    def test_default_registry_has_seed_and_pretouch_alphas(self):
+    def test_default_registry_has_baseline_alphas(self):
         reg = default_registry()
         self.assertTrue({
             "pool_reach",
@@ -84,11 +88,43 @@ class DefaultRegistryTests(unittest.TestCase):
             "momentum",
             "proximity_journey_baseline",
             "proximity_journey",
-            "distance_5_8_journey",
-            "proximity_direction_soft",
-            "opening_range_to_pool",
-            "sector_rotation_journey",
         }.issubset(set(reg.names())))
+
+    def test_default_registry_excludes_sparse_alphas(self):
+        # The 4 sparse alphas moved to research_registry to keep
+        # routine sweeps statistically interpretable.
+        reg = default_registry()
+        for sparse in ("distance_5_8_journey",
+                        "proximity_direction_soft",
+                        "opening_range_to_pool",
+                        "sector_rotation_journey"):
+            self.assertNotIn(sparse, reg.names(),
+                f"sparse alpha {sparse!r} should be in research_registry, "
+                f"not default_registry — it produces <200 OOS trades "
+                f"per typical Arsenal run")
+
+
+class ResearchRegistryTests(unittest.TestCase):
+    def test_research_registry_is_superset_of_default(self):
+        d = set(default_registry().names())
+        r = set(research_registry().names())
+        self.assertTrue(d.issubset(r),
+            f"research_registry must be a superset of default_registry. "
+            f"Missing: {d - r}")
+
+    def test_research_registry_includes_sparse_alphas(self):
+        reg = research_registry()
+        for sparse in ("distance_5_8_journey",
+                        "proximity_direction_soft",
+                        "opening_range_to_pool",
+                        "sector_rotation_journey"):
+            self.assertIn(sparse, reg.names(),
+                f"sparse alpha {sparse!r} should be available via "
+                f"research_registry for explicit research sweeps")
+
+    def test_research_registry_total_count(self):
+        # default (5) + sparse (4) = 9 alphas.
+        self.assertEqual(len(research_registry()), 9)
 
 
 if __name__ == "__main__":

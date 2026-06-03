@@ -1441,11 +1441,28 @@ def main():
                   f"skipped={replay.get('skipped', 0)} "
                   f"severity={replay.get('severity', args.replay_audit_severity.upper())}")
             if not leakage_issues.empty:
-                for _, row in leakage_issues.head(5).iterrows():
-                    print(f"  [{row['severity']}] {row['check']} {row['symbol']}: "
-                          f"{row['message']}")
-                if len(leakage_issues) > 5:
-                    print(f"  ... {len(leakage_issues) - 5} more audit rows in artifact")
+                # Phase 3C produces hundreds of warnings on healthy bundles
+                # because boundary bars near session end legitimately have
+                # less-than-full-horizon label windows. Printing 5 raw rows
+                # + "475 more in artifact" is signal-poor and crowds the
+                # real summary. Group by (severity, check, message) and
+                # print one count-per-group line instead — the full row
+                # detail still goes to leakage_issues.csv.
+                grouped = (
+                    leakage_issues
+                    .groupby(["severity", "check", "message"])
+                    .size().reset_index(name="count")
+                    .sort_values(["severity", "count"],
+                                  ascending=[True, False])
+                )
+                print(f"  Issue summary ({len(leakage_issues)} rows total, "
+                       f"{len(grouped)} unique issue classes):")
+                for _, row in grouped.head(10).iterrows():
+                    print(f"  [{row['severity']}] {row['check']}: "
+                           f"{row['count']} × {row['message']}")
+                if len(grouped) > 10:
+                    print(f"  ... {len(grouped) - 10} more issue classes "
+                           f"in leakage_issues.csv")
         except Exception as e:
             leakage_summary = {"status": "ERROR", "error": str(e)}
             print(f"  [leakage_audit] skipped: {e}")

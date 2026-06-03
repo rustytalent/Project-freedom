@@ -89,8 +89,12 @@ EXEMPT_FILES = {
     "tests/test_compliance_language.py",
     "liqpool/scoring.py",  # contains FORBIDDEN_PUBLIC_TOKENS + the disclaimer
 }
+# Directory subtrees skipped entirely. ``docs/archive`` holds frozen
+# historical docs (pre-coordination handoffs); they predate the current
+# language policy and are explicitly not edited.
 SKIP_DIR_PARTS = {".git", "__pycache__", ".pytest_cache", "data_cache",
-                  "node_modules", ".venv", "output", "output_models"}
+                  "node_modules", ".venv", "output", "output_models",
+                  "archive"}
 SCAN_EXTS = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".html",
              ".tsx", ".jsx", ".ts", ".js", ".csv"}
 
