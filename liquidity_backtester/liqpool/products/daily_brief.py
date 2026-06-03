@@ -249,11 +249,34 @@ def _gather_active_pool_predictions(report,
     inside the OOS window — i.e. it is still in play as of the bundle's
     last bar. The brief uses these as the candidate set for both
     top_watchlist and key_zones.
+
+    Per-pool inputs to the proximity model:
+
+      * ``dist_atr`` — true distance (in ATR units) from the bundle's
+        last close to the pool's near boundary. CRITICAL: this used to
+        be a hardcoded 1.0 placeholder, which caused the proximity model
+        to return ~98% probability for every pool regardless of how far
+        away it actually was. Codex's first real-bundle backfill caught
+        this immediately (calibration_error 0.98 on the very_high bucket
+        for proximity predictions). Now computed from real prices.
+      * ``state`` — the StateFeaturizer's per-bar features at the last
+        bar of the asset's OOS window. Falls back to {} on featurizer
+        failure; the proximity model treats missing features as 0.0.
+      * ``quality_pred`` — per-pool Q from report.unified_ml if both
+        unified_ml and unified_featurizer are present in the report;
+        otherwise 0.5 (neutral). Q is a model input feature for the
+        proximity head.
     """
     from liqpool.sectors import sector_of
     assets = getattr(report, "assets", {}) or {}
     prox_models = getattr(report, "unified_proximity", {}) or {}
     out: List[Dict[str, Any]] = []
+
+    # Q + featurizer: optional. When present, batch-predict Q for the
+    # full active-pool set so each predict_one call has real Q context.
+    unified_ml = getattr(report, "unified_ml", None)
+    unified_featurizer = getattr(report, "unified_featurizer", None)
+
     for symbol, ad in assets.items():
         wf = getattr(ad, "walkforward", None)
         if wf is None:
@@ -264,40 +287,78 @@ def _gather_active_pool_predictions(report,
         if df_base is None or df_base.empty:
             continue
         last_close = float(df_base["close"].iloc[-1])
+        # ATR at the last bar — the denominator for distance_atr. Use
+        # the same window as the StateFeaturizer (atr_14) to keep
+        # downstream feature comparisons honest.
+        try:
+            from liqpool.indicators import atr as _atr
+            atr_series = _atr(df_base, 14).bfill()
+            atr_at_last = max(float(atr_series.iloc[-1]), 1e-9)
+        except Exception:
+            atr_at_last = 1.0
+
+        # Build the state feature dict at the last bar.
+        last_state: Dict[str, float] = {}
+        try:
+            from liqpool.timing import StateFeaturizer
+            sf = StateFeaturizer(df_base)
+            last_state = sf.features_at(len(df_base) - 1, active_pools=[])
+        except Exception:
+            last_state = {}
+
+        # Per-pool Q predictions — best effort. If anything fails, every
+        # pool gets neutral q=0.5.
+        per_pool_q: Dict[int, float] = {}
+        if unified_ml is not None and unified_featurizer is not None and pools:
+            try:
+                X_pools = unified_featurizer.transform_batch(pools)
+                q_preds = unified_ml.predict(X_pools, pools=pools)
+                for i, q in enumerate(q_preds):
+                    q_val = float(q) if q is not None else 0.5
+                    if not np.isfinite(q_val):
+                        q_val = 0.5
+                    per_pool_q[i] = q_val
+            except Exception:
+                per_pool_q = {}
+
         sec = sector_of(symbol)
-        for pool, result in zip(pools, results):
+        for pool_idx, (pool, result) in enumerate(zip(pools, results)):
             # Only pools that are STILL in play as of the bundle's end:
             # never touched, never broken.
             if getattr(result, "touched_at", None) is not None:
                 continue
             if getattr(result, "broken_at", None) is not None:
                 continue
-            # Side relative to last close.
+            # Side + true distance relative to last close.
             if pool.price_low > last_close:
                 side_from_close = "above"
                 key_level = float(pool.price_low)
                 key_level_type = "supply_pool"
                 trade_side = "short"
+                dist_atr = (pool.price_low - last_close) / atr_at_last
             elif pool.price_high < last_close:
                 side_from_close = "below"
                 key_level = float(pool.price_high)
                 key_level_type = "demand_pool"
                 trade_side = "long"
+                dist_atr = (last_close - pool.price_high) / atr_at_last
             else:
                 continue                      # already inside the zone
-            # Per-horizon P(touch).
+            q_for_pool = per_pool_q.get(pool_idx, 0.5)
+            # Per-horizon P(touch) — predict_one fed the REAL distance,
+            # the real state at the last bar, and the real per-pool Q.
+            # Previously dist_atr was a 1.0 placeholder which caused
+            # the proximity model to return ~98% for every pool. Fixed.
             p_per_horizon: Dict[str, float] = {}
             for h, pm in sorted(prox_models.items()):
                 try:
                     p = float(pm.predict_one(
                         pool=pool,
-                        dist_atr=1.0,                 # placeholder; real
-                                                      # generator would
-                                                      # compute properly
+                        dist_atr=float(dist_atr),
                         side=side_from_close,
-                        state={},
-                        quality_pred=0.5,
-                        atr_val=1.0,
+                        state=last_state,
+                        quality_pred=q_for_pool,
+                        atr_val=atr_at_last,
                     ))
                 except Exception:
                     p = 0.0
@@ -313,6 +374,8 @@ def _gather_active_pool_predictions(report,
                 "side_from_close": side_from_close,
                 "key_level": key_level,
                 "key_level_type": key_level_type,
+                "dist_atr_at_last_bar": float(dist_atr),
+                "q_pred": float(q_for_pool),
                 "p_short": p_short,
                 "p_long": p_long,
                 "p_per_horizon": p_per_horizon,

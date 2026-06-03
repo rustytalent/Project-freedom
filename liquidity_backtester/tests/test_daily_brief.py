@@ -105,10 +105,33 @@ class _StubProximityModel:
     def __init__(self, returned_p: float = 0.40) -> None:
         self.returned_p = float(returned_p)
         self.val_auc = 0.85
+        # Capture the kwargs every predict_one call sees, so tests can
+        # assert the generator passes REAL inputs (not placeholders).
+        self.last_call_kwargs: Dict[str, Any] = {}
 
     def predict_one(self, pool, dist_atr, side, state, quality_pred,
                     atr_val=1.0):
+        self.last_call_kwargs = {
+            "dist_atr": float(dist_atr),
+            "side": str(side),
+            "state_keys": sorted(state.keys()) if state else [],
+            "quality_pred": float(quality_pred),
+            "atr_val": float(atr_val),
+        }
         return self.returned_p
+
+
+class _DistanceSensitiveStubModel:
+    """Returns P that scales inversely with distance. Used to pin that
+    the generator passes real per-pool distances (not a placeholder)."""
+    def __init__(self) -> None:
+        self.val_auc = 0.85
+
+    def predict_one(self, pool, dist_atr, side, state, quality_pred,
+                    atr_val=1.0):
+        # Far away -> low P; close -> high P. Hard linear shape so the
+        # test can pin the relationship.
+        return max(0.0, 1.0 - float(dist_atr) / 50.0)
 
 
 class _StubDirectionModel:
@@ -436,6 +459,48 @@ class BriefWithOutcomeLogTests(unittest.TestCase):
             strike_rows = preds[preds["prediction_type"] == "options_strike"]
             self.assertGreater(len(strike_rows), 0)
             self.assertIn("NIFTY50", set(strike_rows["symbol"]))
+
+    def test_predict_one_receives_real_distance_not_placeholder(self) -> None:
+        """REGRESSION TEST.
+
+        Before this test existed, the daily brief generator passed
+        dist_atr=1.0 as a hardcoded placeholder to every predict_one
+        call, regardless of the actual price-to-pool distance. That
+        caused the proximity model to return ~98% probability for
+        every pool on a real bundle (Codex's first 90-day backfill
+        produced calibration_error 0.98 on the very_high bucket).
+
+        This test pins that the generator passes a DIFFERENT dist_atr
+        for two pools at different distances. If dist_atr ever goes
+        back to a constant for all pools, this test fails.
+        """
+        report = _two_asset_report(p_touch=0.40)
+        # Replace the unified_proximity with a stub that captures the
+        # dist_atr it was called with.
+        captured: List[float] = []
+
+        class _DistanceCaptureStub:
+            val_auc = 0.85
+            def predict_one(self, pool, dist_atr, side, state,
+                            quality_pred, atr_val=1.0):
+                captured.append(float(dist_atr))
+                return 0.40
+
+        report.unified_proximity = {12: _DistanceCaptureStub()}
+        _ = generate_brief(report, trading_date_ist="2026-06-03")
+        # We have 2 active pools at different prices (90-91 below close
+        # ~100, 520-521 above close ~500). Each gets one predict_one
+        # call. The two distances MUST differ.
+        self.assertGreaterEqual(len(captured), 2,
+            f"generator should make >=2 predict_one calls; got {len(captured)}")
+        self.assertNotEqual(captured[0], captured[1],
+            f"dist_atr must differ across pools at different distances; "
+            f"got {captured} — this indicates the dist_atr placeholder "
+            f"bug regressed")
+        # Both distances must be > 0 (placeholder was 1.0; real values
+        # for these fixtures are roughly 10-20 ATR or more).
+        for d in captured:
+            self.assertGreater(d, 0.0)
 
     def test_yesterday_audit_renders_pending_when_no_history(self) -> None:
         from liqpool.products.outcome_log import OutcomeLogWriter
