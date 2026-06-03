@@ -54,6 +54,28 @@ Strategic decisions (recorded for posterity, no commit attached):
                             brief, or the most valuable early data is lost forever.
 2026-06-03 [opus + user] — Stop adding alpha modules. Next code work is the daily
                             artifact pipeline, not feature #43.
+2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
+  * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
+  * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
+  * vol_regime_zscore_20d is #6 proximity h=12 feature (gain 11520) — generalizes
+  * Q model OOS val AUC = 0.541 (barely above noise) — DEMOTE Q to context-only,
+    do not use as a hard live gate; Q-DECOMPRESS revealed honest weakness
+  * 4 of 5 sector experts got 0% MoE weight (only FMCG 5.4%) — sector MoE largely
+    collapses to global model; sector layer adds little
+  * Proximity overall AUC 0.92-0.95 but at 0-1 ATR (trader-relevant distance)
+    the honest AUC is 0.73-0.76 — strong, but the headline number is inflated
+    by easy far-away cases
+  * R1 policy-return regressor: spearman > 0.10 in ALL FOUR modes
+    (blind_limit 0.32, displacement 0.17, touch 0.16, reclaim 0.16) — the
+    regressor CAN rank trades; top-decile is 27-33% less negative than mean,
+    BUT top decile is still negative across all modes
+  * Direction model OOS AUC 0.567, top-quartile-confidence accuracy 58.8% —
+    useful filter, not standalone signal
+  * Reaction model OOS AUC 0.78 (strict_reaction) — strong, calibrated
+  * Today's basket verdict: NO TRADEABLE SETUP, max T_today 12% on HCLTECH,
+    max T_2d 27% — exactly the kind of AVOID day the daily brief surfaces
+  * Cost-realism filter NOT yet observable here (only fires in Arsenal evaluator,
+    not bundle-level execution_backtest). Codex NEXT UP #1 still pending.
 ```
 
 ---
@@ -83,28 +105,44 @@ dump lists which of the 25 new features (across all 5 commits this week)
 landed top-10/top-20 per model. Results pasted back into chat or summary
 appended here under RECENTLY DECIDED.
 
-### 2. Opus — design the Daily Brief artifact schema ✓ SPEC SHIPPED
+### 2. Opus — Daily Brief generator + renderer ✓ SCHEMA APPROVED, IMPLEMENTATION IN PROGRESS
 
-**Status:** spec committed at `docs/daily_brief_schema.md`. Awaiting
-user review. No code yet; user must confirm the schema matches the
-product they want before generator code is written.
+**Status:** schema at `docs/daily_brief_schema.md` validated against
+retrain output 710362b — every section maps to data already in the
+bundle. User approved the schema implicitly by greenlighting "do 2
+then 1" after the schema review. Implementation now active.
 
-**Acceptance:** User reads the schema (8 sections, JSON contract +
-human renderer rules) and either approves or requests changes. On
-approval, NEW NEXT UP item created: "Opus — implement
-`liqpool/products/daily_brief.py` generator + `brief_renderer.py`".
+**Scope for v1 implementation:**
+  * `liqpool/products/daily_brief.py` — reads a MultiAssetReport
+    bundle, produces the JSON.
+  * `liqpool/products/brief_renderer.py` — JSON → plain-text email
+    body. PDF rendering deferred to v2 (after first paying customer).
+  * Tests for both modules.
+  * Sections fully implemented for v1: brief_metadata, sector_regime,
+    top_watchlist, avoid_list, key_zones, confidence_notes.
+  * Sections stubbed for v1 (rendered as "pending"): index_regime
+    (needs index data not in current bundle), options_suitability
+    (blocked on level-to-strike translator), yesterday_audit (blocked
+    on outcome log).
 
-### 3. Opus — design outcome-logging schema ✓ SPEC SHIPPED
+**Acceptance:** generate a brief from the existing 710362b bundle for
+trading_date_ist=2026-06-03 with a non-empty avoid_list and verdict
+matching the bundle's verdict ("NO TRADEABLE SETUP"). Both JSON and
+text renderers round-trip cleanly. Tests pin section presence and
+the "no tipster outputs" constraint (no "buy/sell/long/short" in
+human prose).
 
-**Status:** spec committed at `docs/outcome_logging_schema.md`.
-Awaiting user review.
+### 3. Opus — Outcome log writer ✓ SCHEMA APPROVED, NOT YET STARTED
 
-**Acceptance:** User reads the two-table model (predictions +
-resolutions) + the backfill plan and confirms. On approval, this
-item splits into:
-  (a) Opus — implement `liqpool/products/outcome_log.py` writer
-  (b) Opus or Codex — backfill 90 days from existing bundles
-  (c) Codex — implement `resolver.py` end-of-day job
+**Status:** schema at `docs/outcome_logging_schema.md` approved per
+"do 2 then 1". Implementation queued AFTER the Daily Brief generator
+because the brief generator's emit-prediction calls feed the log,
+not the other way around.
+
+**Sub-tasks:**
+  (a) Opus — implement `liqpool/products/outcome_log.py` writer.
+  (b) Opus or Codex — backfill 90 days from existing bundles.
+  (c) Codex — implement `resolver.py` end-of-day job.
 
 ### 4. Codex — wire avoidance-alpha as first-class output
 
