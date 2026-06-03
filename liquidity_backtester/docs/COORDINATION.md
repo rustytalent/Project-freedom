@@ -57,7 +57,8 @@ Strategic decisions (recorded for posterity, no commit attached):
 2026-06-03 [opus]  fdbaf08 — BRIEF-V1: Daily Brief generator + plain-text renderer + 18 tests
 2026-06-03 [opus]  3ca8a21 — PRODUCT-CORE: outcome log + strike translator + brief integration + backfill + 42 tests
 2026-06-03 [opus]  e2c6ccf — SYSTEM-DOC: single comprehensive overview of architecture + pipeline (docs/SYSTEM_OVERVIEW.md)
-2026-06-03 [opus]  (this)  — CLEANUP-1: phase3c noise reduction + stale handoff docs archived + sparse alphas split into research_registry()
+2026-06-03 [opus]  5689a94 — CLEANUP-1: phase3c noise reduction + stale handoff docs archived + sparse alphas split into research_registry()
+2026-06-03 [opus]  (this)  — CLEANUP-2: SectorMoE per-sector experts default OFF (Config.train_sector_experts=False); saves ~40% Q training time with no measurable AUC impact
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated

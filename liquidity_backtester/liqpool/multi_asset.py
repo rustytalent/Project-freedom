@@ -663,6 +663,7 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                 validation_method=cfg.validation_method,
                 regularization_preset=cfg.regularization_preset,
                 bucket_shrinkage_max=getattr(cfg, "q_bucket_shrinkage_max", 1.0),
+                train_sector_experts=getattr(cfg, "train_sector_experts", True),
             )
             report.unified_ml = ml
             report.unified_oos_audit = build_oos_prediction_audit(

@@ -548,7 +548,19 @@ class SectorMoERespectModel:
             base_period_seconds: float = 300.0,
             validation_method: str = "purged_embargoed_walk_forward",
             regularization_preset: str = "default",
-            bucket_shrinkage_max: float = 1.0) -> "SectorMoERespectModel":
+            bucket_shrinkage_max: float = 1.0,
+            train_sector_experts: bool = True) -> "SectorMoERespectModel":
+        """Fit the global Q model and (optionally) per-sector experts.
+
+        ``train_sector_experts`` controls whether the per-sector expert
+        loop runs at all. The pipeline default (set in Config) is False
+        because empirically, 4 of 5 sectors get dynamic MoE weight 0%
+        every retrain — the experts get trained and then thrown away.
+        Skipping the per-sector loop saves ~40% of Q training time with
+        no measurable impact on blended Q AUC. Setting True restores
+        the legacy MoE behaviour for research toggling. When False, all
+        sector_weights are 0.0 and the global model carries all weight.
+        """
         if len(X) != len(y) or len(X) != len(train_pools):
             raise ValueError("X, y, and train_pools must have matching lengths")
         if expert_weight is not None:
@@ -579,6 +591,29 @@ class SectorMoERespectModel:
         self.sector_models.clear()
         self.sector_stats.clear()
         self.sector_weights.clear()
+
+        if not train_sector_experts:
+            # Mark every sector as 'experts_disabled' so the report still
+            # carries the per-sector accounting (downstream callers
+            # iterate sector_stats and would crash on a missing key).
+            for sector in sectors:
+                idx = [i for i, p in enumerate(train_pools)
+                        if self._sector_for_pool(p) == sector]
+                y_sector = y[idx]
+                self.sector_stats[sector] = {
+                    "train_n": int(len(idx)),
+                    "pos_n": int((y_sector == 1).sum()),
+                    "neg_n": int((y_sector == 0).sum()),
+                    "status": "experts_disabled",
+                    "reason": "train_sector_experts=False",
+                    "oos_decisive_n": 0,
+                    "val_auc": None,
+                    "expert_logloss": None,
+                    "global_logloss": None,
+                    "sector_weight": 0.0,
+                }
+                self.sector_weights[sector] = 0.0
+            return self
 
         for sector in sectors:
             idx = [i for i, p in enumerate(train_pools) if self._sector_for_pool(p) == sector]

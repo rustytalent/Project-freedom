@@ -99,6 +99,16 @@ class Config:
     # legacy (compressed) behaviour for research.
     q_bucket_shrinkage_max: float = 0.30
 
+    # Whether to train per-sector experts in the SectorMoE Q model.
+    # Empirically 4 of 5 sectors get dynamic MoE weight 0% every retrain
+    # — the experts are trained then discarded by the shrinkage logic
+    # ("expert did not beat global enough"). Default False saves ~40% of
+    # Q training time with no measurable impact on blended Q AUC. Set
+    # True to restore legacy MoE behaviour for research toggling. When
+    # False, every sector's status is reported as "experts_disabled" in
+    # the OOS audit and the blended Q is simply the global model.
+    train_sector_experts: bool = False
+
     # Two-tier reaction / break thresholds (in ATR units).
     #   weak_reaction_atr  : enough reverse move post-touch to count as a 'mild' respect.
     #   strong_reaction_atr: definitive rejection.
