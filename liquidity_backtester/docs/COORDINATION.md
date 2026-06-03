@@ -83,40 +83,28 @@ dump lists which of the 25 new features (across all 5 commits this week)
 landed top-10/top-20 per model. Results pasted back into chat or summary
 appended here under RECENTLY DECIDED.
 
-### 2. Opus — design the Daily Brief artifact schema
+### 2. Opus — design the Daily Brief artifact schema ✓ SPEC SHIPPED
 
-Define the data contract for the daily brief BEFORE either agent writes
-generation code. Sections, per the design discussion:
+**Status:** spec committed at `docs/daily_brief_schema.md`. Awaiting
+user review. No code yet; user must confirm the schema matches the
+product they want before generator code is written.
 
-1. Index regime (today's vol bucket, gap classification, trap risk)
-2. Sector regime (which sectors trending vs chopping)
-3. Top watchlist (5–10 instruments with proximity scores)
-4. Options suitability — for Nifty/BankNifty: directional bias, expected
-   range bucket, theta-danger flag, trend-vs-chop call
-5. Avoid list (instruments + regimes where model says "stand aside")
-6. Key zones (the proximity-model levels with P(touch) + horizon)
-7. Confidence notes (which model heads are calibrated today, which are
-   drifting)
-8. Yesterday audit (what we predicted yesterday → what happened)
+**Acceptance:** User reads the schema (8 sections, JSON contract +
+human renderer rules) and either approves or requests changes. On
+approval, NEW NEXT UP item created: "Opus — implement
+`liqpool/products/daily_brief.py` generator + `brief_renderer.py`".
 
-Acceptance: `docs/data_product_spec.md` updated (or new file
-`docs/daily_brief_schema.md`) with JSON schema + human-prose template.
-No code yet — the schema must be reviewed by user before generation
-code is written.
+### 3. Opus — design outcome-logging schema ✓ SPEC SHIPPED
 
-### 3. Opus — design outcome-logging schema
+**Status:** spec committed at `docs/outcome_logging_schema.md`.
+Awaiting user review.
 
-The data flywheel starts here. Define what gets logged per prediction:
-
-- Prediction ID, timestamp, instrument, level, horizon, P(touch),
-  model version, regime tags
-- Resolution: did the level get touched within horizon? exit price?
-  drawdown along the way? whether the avoid-list call would have
-  protected capital?
-
-Acceptance: schema doc committed under `docs/`. No code yet — pin the
-contract first. Must support backfilling from existing OOS bundles so
-we have history from day one, not just from customer #1.
+**Acceptance:** User reads the two-table model (predictions +
+resolutions) + the backfill plan and confirms. On approval, this
+item splits into:
+  (a) Opus — implement `liqpool/products/outcome_log.py` writer
+  (b) Opus or Codex — backfill 90 days from existing bundles
+  (c) Codex — implement `resolver.py` end-of-day job
 
 ### 4. Codex — wire avoidance-alpha as first-class output
 
