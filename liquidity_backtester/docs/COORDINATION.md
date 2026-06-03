@@ -54,6 +54,8 @@ Strategic decisions (recorded for posterity, no commit attached):
                             brief, or the most valuable early data is lost forever.
 2026-06-03 [opus + user] — Stop adding alpha modules. Next code work is the daily
                             artifact pipeline, not feature #43.
+2026-06-03 [opus]  fdbaf08 — BRIEF-V1: Daily Brief generator + plain-text renderer + 18 tests
+2026-06-03 [opus]  3ca8a21 — PRODUCT-CORE: outcome log + strike translator + brief integration + backfill + 42 tests
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
@@ -105,44 +107,97 @@ dump lists which of the 25 new features (across all 5 commits this week)
 landed top-10/top-20 per model. Results pasted back into chat or summary
 appended here under RECENTLY DECIDED.
 
-### 2. Opus — Daily Brief generator + renderer ✓ SCHEMA APPROVED, IMPLEMENTATION IN PROGRESS
+### 2. Opus — Daily Brief generator + renderer ✓ COMPLETE (commit fdbaf08)
 
-**Status:** schema at `docs/daily_brief_schema.md` validated against
-retrain output 710362b — every section maps to data already in the
-bundle. User approved the schema implicitly by greenlighting "do 2
-then 1" after the schema review. Implementation now active.
+`liqpool/products/daily_brief.py` + `brief_renderer.py` + 18 tests
+in commit `fdbaf08`. JSON contract matches `docs/daily_brief_schema.md`.
+Renderer enforces no-tipster-vocabulary guardrail at render time.
 
-**Scope for v1 implementation:**
-  * `liqpool/products/daily_brief.py` — reads a MultiAssetReport
-    bundle, produces the JSON.
-  * `liqpool/products/brief_renderer.py` — JSON → plain-text email
-    body. PDF rendering deferred to v2 (after first paying customer).
-  * Tests for both modules.
-  * Sections fully implemented for v1: brief_metadata, sector_regime,
-    top_watchlist, avoid_list, key_zones, confidence_notes.
-  * Sections stubbed for v1 (rendered as "pending"): index_regime
-    (needs index data not in current bundle), options_suitability
-    (blocked on level-to-strike translator), yesterday_audit (blocked
-    on outcome log).
+### 3. Opus — Outcome log writer + integration + backfill ✓ COMPLETE (commit 3ca8a21)
 
-**Acceptance:** generate a brief from the existing 710362b bundle for
-trading_date_ist=2026-06-03 with a non-empty avoid_list and verdict
-matching the bundle's verdict ("NO TRADEABLE SETUP"). Both JSON and
-text renderers round-trip cleanly. Tests pin section presence and
-the "no tipster outputs" constraint (no "buy/sell/long/short" in
-human prose).
+`liqpool/products/outcome_log.py` + `strike_translator.py` + brief
+integration + `analysis/backfill_outcome_log.py` + 42 new tests in
+commit `3ca8a21`. The brief generator now logs three classes of
+predictions (proximity / avoidance / options_strike) to the
+append-only Parquet flywheel, populates options_suitability via the
+5-index strike translator when index data is provided, and renders
+yesterday_audit from the joined log when history exists.
 
-### 3. Opus — Outcome log writer ✓ SCHEMA APPROVED, NOT YET STARTED
+### 5. Opus — 5-index strike translator ✓ COMPLETE (commit 3ca8a21)
 
-**Status:** schema at `docs/outcome_logging_schema.md` approved per
-"do 2 then 1". Implementation queued AFTER the Daily Brief generator
-because the brief generator's emit-prediction calls feed the log,
-not the other way around.
+INDEX_CONFIGS for Nifty 50 / Bank Nifty / Fin Nifty / Nifty Midcap
+Select / Sensex pinned with strike_step + lot_size + weekly expiry
+weekday. translate_proximity + theta_danger_score +
+premium_regime_for_buyers_and_sellers shipped. No Greeks / IV / PCR
+in v1 — higher-tier additions when paying customers ask.
 
-**Sub-tasks:**
-  (a) Opus — implement `liqpool/products/outcome_log.py` writer.
-  (b) Opus or Codex — backfill 90 days from existing bundles.
-  (c) Codex — implement `resolver.py` end-of-day job.
+---
+
+## NEW QUEUE — post-PRODUCT-CORE
+
+The original items 1-5 are complete or owned. The following sequence
+unblocks the first customer-shippable brief on the real bundle.
+
+### A. Codex — run outcome-log backfill on the real bundle (BLOCKER)
+
+```
+PYTHONPATH=. python analysis/backfill_outcome_log.py \
+    --bundle output_models/core25_head_alpha_710362b/multi_asset_report.pkl \
+    --output-root data/outcome_log \
+    --days 90
+```
+
+Acceptance: parquet files appear under `data/outcome_log/predictions/`
+and `data/outcome_log/resolutions/`, one partition per IST trading
+date. Print row counts per table per partition. Verify
+`OutcomeLogWriter().read_joined("YYYY-MM-DD")` returns a non-empty
+frame for at least 60 of the 90 partitions (some weekends and
+holidays will be empty; the rest must populate).
+
+If the backfill crashes on a real bundle attribute the synthetic
+stubs didn't exercise, report the traceback and STOP — don't paper
+over it. Opus will fix the generator.
+
+### B. Codex — wire generate_brief() into multi_asset_run.py
+
+Find the artifact-emission section of `examples/multi_asset_run.py`
+(near where `live_plan.json` is written) and add a brief-generation
+call that writes:
+  * `daily_brief.json` (the dict from `BriefDocument.to_dict()`)
+  * `daily_brief.txt` (the output of `render_email(brief)`)
+into the existing output directory.
+
+The brief generator's optional kwargs (`outcome_log_writer`,
+`index_data`) start as None / empty in v1. Wiring index_data
+requires index OHLCV which is not in the bundle yet — that's a
+separate later task.
+
+Acceptance: after a multi_asset_run training pass, both files exist
+in the output directory. The `daily_brief.txt` is human-readable and
+non-empty.
+
+### C. Codex — verify cost-realism Arsenal result (STILL OWED)
+
+Original NEXT UP #1, never closed. Pull HEAD (now at `3ca8a21`),
+retrain on a small basket (5 assets is fine for verification),
+run Arsenal with `--workers 15`. Report the COST WALL SUMMARY
+table — specifically whether the new `mean_gross_R` and `mean_cost_R`
+columns confirm or refute the gross/cost decomposition that motivated
+the COST-REALISM commit (Opus's prediction: gross_R near -0.16,
+cost_R near 1.1 at multiplier 1.0).
+
+### D. Opus — wire StateFeaturizer-derived index_data into the brief
+
+When Codex has index OHLCV in a bundle (separate work item, currently
+unblocked but unassigned), populate the `index_data` dict from the
+StateFeaturizer's already-computed `vol_regime_zscore_20d`,
+`path_efficiency_30`, `direction_changes_30` per index. This unstubs
+the index_regime and options_suitability sections for production
+briefs.
+
+---
+
+## NOT NEXT UP (explicitly deferred)
 
 ### 4. Codex — wire avoidance-alpha as first-class output
 
@@ -157,18 +212,8 @@ Acceptance: a new column `avoidance_recommended` in the trade frame
 (or a sibling table per asset per day), with a test pinning the
 trigger logic.
 
-### 5. Opus or Codex — options-language presentation layer for 5 indexes
-
-Unblocked. Build a translator that maps proximity output to strike-grid
-language for Nifty 50, Bank Nifty, Fin Nifty, plus two more (user to
-confirm exact two — likely Nifty Midcap Select + Sensex). v1 is pure
-level-to-strike mapping: "P(Nifty touches 24,500 today) = 0.82" →
-"24,500 CE / 24,500 PE: 82% chance of being tested before today's EOD".
-No Greeks engine, no IV, no PCR — those are higher tiers later. Single
-translator module reused across all 5 indexes via a config dict of
-(index_name, lot_size, strike_step). Acceptance: the daily-brief schema
-(NEXT UP #2) carries an options-language sub-section per index, fed
-from this translator.
+(Items 1, 4 above remain owed by Codex. Items 2, 3, 5 are complete —
+see new queue A/B/C/D below.)
 
 ---
 
