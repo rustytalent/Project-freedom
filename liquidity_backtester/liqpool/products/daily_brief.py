@@ -42,6 +42,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .outcome_log import (
+    OutcomeLogWriter,
+    PredictionRecord,
+    make_prediction_id,
+)
+from .strike_translator import (
+    INDEX_CONFIGS,
+    is_known_index,
+    premium_regime_for_buyers_and_sellers,
+    theta_danger_score,
+    translate_proximity,
+)
+
 SCHEMA_VERSION = "1.0"
 
 
@@ -522,20 +535,53 @@ def generate_brief(report: Any,
                    indexes_covered: Optional[List[str]] = None,
                    model_bundle_version: str = "unknown_bundle",
                    feature_version: str = "42_features_v3",
+                   outcome_log_writer: Optional[OutcomeLogWriter] = None,
+                   index_data: Optional[Dict[str, Dict[str, Any]]] = None,
                    ) -> BriefDocument:
     """Top-level: produce a BriefDocument from a fitted report bundle.
 
     ``trading_date_ist`` is the IST calendar date the brief targets,
-    formatted YYYY-MM-DD. ``indexes_covered`` is the list of index
-    symbols the brief is meant to address; for v1 these populate the
-    metadata block but the index_regime + options_suitability sections
-    are stubbed as ``_status: "pending"`` because the multi-asset
-    bundle does not yet carry index OHLCV.
+    formatted YYYY-MM-DD.
+
+    ``indexes_covered`` populates the metadata block. When ``index_data``
+    is also passed AND an entry exists for an index in ``indexes_covered``,
+    the options_suitability section is populated via the
+    ``strike_translator`` (level-to-strike + theta-danger / premium
+    regime). When ``index_data`` is missing for an index, the
+    options_suitability stays a ``pending`` stub for that index only.
+
+    ``outcome_log_writer`` — when provided, every prediction the brief
+    makes is logged via the writer with a deterministic prediction_id
+    for later resolution joining. When omitted, predictions are not
+    logged (used for synthetic / test runs).
+
+    ``index_data`` schema per index::
+
+        {
+          "NIFTY50": {
+            "previous_close": 24521.30,
+            "expected_gap_atr": 0.42,
+            "vol_regime": "normal",
+            "vol_regime_zscore_20d": 0.34,
+            "directional_bias": "mild_up",
+            "expected_range_today_atr": 1.6,
+            "path_efficiency_30": 0.55,
+            "direction_changes_30": 12.0,
+            "proximity_predictions": [
+              {"level": 24500, "p_test_today": 0.78,
+               "p_test_within_60min": 0.34,
+               "side_from_open": "below", "key_level_type": "demand_pool"},
+              ...
+            ],
+          },
+          ...
+        }
 
     The function NEVER raises on missing report attributes. Missing
     data flows through to ``_status: "pending"`` sections.
     """
     indexes_covered = indexes_covered or []
+    index_data = index_data or {}
     as_of_ist = f"{trading_date_ist}T09:15:00+05:30"
 
     metadata = BriefMetadata(
@@ -574,33 +620,287 @@ def generate_brief(report: Any,
             operator_note="confidence_notes_unavailable",
         )
 
-    # v1 stubs — fully spec-compliant placeholders so downstream
-    # consumers see stable shape.
-    index_regime_stub = {
-        "_status": "pending",
-        "_reason": "index_ohlcv_not_wired_into_bundle",
-        "_v1_will_add_when": "multi_asset_run.py ingests index data",
-    }
-    options_suitability_stub = {
-        "_status": "pending",
-        "_reason": "level_to_strike_translator_not_yet_built",
-        "_blocking_item": "COORDINATION_NEXT_UP_5",
-    }
-    yesterday_audit_stub = {
-        "_status": "pending",
-        "_reason": "outcome_log_not_yet_wired",
-        "_blocking_item": "COORDINATION_NEXT_UP_3",
-    }
+    # Index regime stays a stub block per-index until index OHLCV is
+    # wired into the bundle. When index_data carries it, the per-index
+    # block can populate; until then we surface the partial shape.
+    index_regime_payload: Dict[str, Any] = {}
+    for idx_name in indexes_covered:
+        idx_payload = index_data.get(idx_name)
+        if idx_payload is None:
+            index_regime_payload[idx_name] = {
+                "_status": "pending",
+                "_reason": "index_data_not_provided_for_this_index",
+            }
+            continue
+        index_regime_payload[idx_name] = {
+            "previous_close": idx_payload.get("previous_close"),
+            "expected_gap_atr": idx_payload.get("expected_gap_atr"),
+            "vol_regime": idx_payload.get("vol_regime"),
+            "vol_regime_zscore_20d": idx_payload.get("vol_regime_zscore_20d"),
+            "today_session_character_prediction": idx_payload.get(
+                "today_session_character_prediction"),
+            "trap_risk_score": idx_payload.get("trap_risk_score"),
+            "trap_pattern_active": idx_payload.get("trap_pattern_active"),
+        }
+
+    # options_suitability section — populated per index via the
+    # strike translator when index_data is available. Indexes without
+    # data fall through to a per-index pending block, so the rest of
+    # the structure is still consumable.
+    options_suitability_payload: Dict[str, Any] = {}
+    for idx_name in indexes_covered:
+        idx_payload = index_data.get(idx_name)
+        if idx_payload is None or not is_known_index(idx_name):
+            options_suitability_payload[idx_name] = {
+                "_status": "pending",
+                "_reason": ("index_data_not_provided_for_this_index"
+                             if idx_payload is None
+                             else "index_not_in_strike_grid_config"),
+            }
+            continue
+        prox_predictions = idx_payload.get("proximity_predictions") or []
+        try:
+            strike_levels = translate_proximity(prox_predictions, idx_name)
+        except Exception:
+            strike_levels = []
+        theta_score = theta_danger_score(
+            path_efficiency_30=float(
+                idx_payload.get("path_efficiency_30") or 0.5),
+            direction_changes_30=float(
+                idx_payload.get("direction_changes_30") or 0.0),
+            vol_regime_zscore_20d=float(
+                idx_payload.get("vol_regime_zscore_20d") or 0.0),
+        )
+        regime_pair = premium_regime_for_buyers_and_sellers(theta_score)
+        options_suitability_payload[idx_name] = {
+            "directional_bias": idx_payload.get("directional_bias", "neutral"),
+            "expected_range_today_atr": idx_payload.get(
+                "expected_range_today_atr"),
+            "expected_range_today_points": idx_payload.get(
+                "expected_range_today_points"),
+            "movement_quality_prediction": idx_payload.get(
+                "movement_quality_prediction"),
+            "theta_danger_score": theta_score,
+            "strike_levels_in_play": [
+                {
+                    "strike": s.strike,
+                    "p_test_today": s.p_test_today,
+                    "p_test_within_60min": s.p_test_within_60min,
+                    "side_from_open": s.side_from_open,
+                    "key_level_type": s.key_level_type,
+                    "underlying_level": s.underlying_level,
+                }
+                for s in strike_levels
+            ],
+            **regime_pair,
+            "session_recommendation": "context_only_no_directional_call",
+        }
+    if not options_suitability_payload:
+        options_suitability_payload = {
+            "_status": "pending",
+            "_reason": "no_indexes_covered",
+        }
+
+    # Yesterday audit — populated from the joined outcome log if a
+    # writer was provided. We compute the previous IST calendar date by
+    # subtracting one calendar day; this is approximate (weekends and
+    # holidays will miss), but the writer returns an empty frame in
+    # those cases and we fall back to the pending stub.
+    yesterday_audit_payload: Dict[str, Any]
+    if outcome_log_writer is not None:
+        try:
+            prev_ist = (pd.Timestamp(trading_date_ist)
+                        - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            joined = outcome_log_writer.read_joined(prev_ist)
+            if joined is None or joined.empty:
+                yesterday_audit_payload = {
+                    "_status": "pending",
+                    "_reason": "no_predictions_logged_for_previous_date",
+                    "_previous_ist": prev_ist,
+                }
+            else:
+                from .outcome_log import calibration_by_bucket
+                cal = calibration_by_bucket(joined)
+                yesterday_audit_payload = {
+                    "yesterday_brief_id": (
+                        joined["brief_id"].iloc[0]
+                        if "brief_id" in joined.columns else "unknown"),
+                    "predictions_made": int(len(joined)),
+                    "predictions_resolved": int(joined["resolved"].sum()
+                                                  if "resolved" in joined.columns
+                                                  else 0),
+                    "hit_rate_by_confidence_bucket": cal.to_dict(orient="records")
+                        if not cal.empty else [],
+                }
+        except Exception as exc:
+            yesterday_audit_payload = {
+                "_status": "pending",
+                "_reason": f"yesterday_audit_compute_failed_{type(exc).__name__}",
+            }
+    else:
+        yesterday_audit_payload = {
+            "_status": "pending",
+            "_reason": "outcome_log_writer_not_provided",
+            "_blocking_item": "COORDINATION_NEXT_UP_3",
+        }
+
+    # Log predictions to the outcome log writer (the flywheel).
+    if outcome_log_writer is not None:
+        _log_brief_predictions(
+            outcome_log_writer,
+            metadata=metadata,
+            watchlist=watchlist,
+            avoid_list=avoid_list,
+            options_suitability=options_suitability_payload,
+            model_bundle_version=model_bundle_version,
+            feature_version=feature_version,
+        )
 
     return BriefDocument(
         schema_version=SCHEMA_VERSION,
         brief_metadata=metadata,
-        index_regime=index_regime_stub,
+        index_regime=index_regime_payload or {
+            "_status": "pending",
+            "_reason": "no_indexes_covered",
+        },
         sector_regime=sector_regime,
         top_watchlist=watchlist,
-        options_suitability=options_suitability_stub,
+        options_suitability=options_suitability_payload,
         avoid_list=avoid_list,
         key_zones=key_zones,
         confidence_notes=confidence_notes,
-        yesterday_audit=yesterday_audit_stub,
+        yesterday_audit=yesterday_audit_payload,
     )
+
+
+def _log_brief_predictions(writer: OutcomeLogWriter,
+                            *,
+                            metadata: BriefMetadata,
+                            watchlist: List[WatchlistEntry],
+                            avoid_list: List[AvoidEntry],
+                            options_suitability: Dict[str, Any],
+                            model_bundle_version: str,
+                            feature_version: str) -> None:
+    """Emit one PredictionRecord per call the brief makes, then commit.
+
+    Predictions get logged for three call types:
+      * proximity (one per watchlist entry's key level)
+      * avoidance (one per avoid_list entry)
+      * options_strike (one per strike_levels_in_play entry per index)
+
+    Each gets a deterministic prediction_id (via ``make_prediction_id``)
+    so the end-of-day resolver can find and update them.
+    """
+    common = dict(
+        brief_id=metadata.brief_id,
+        generated_at_utc=metadata.generated_at_utc,
+        trading_date_ist=metadata.trading_date_ist,
+        model_bundle_version=model_bundle_version,
+        feature_version=feature_version,
+    )
+
+    # 1) Proximity predictions from the watchlist.
+    for entry in watchlist:
+        pid = make_prediction_id(
+            brief_id=metadata.brief_id,
+            symbol=entry.symbol,
+            prediction_type="proximity",
+            detail_token=f"level_{entry.key_level:.2f}_today",
+        )
+        writer.write_prediction(PredictionRecord(
+            prediction_id=pid,
+            instrument_kind="equity",
+            symbol=entry.symbol,
+            prediction_type="proximity",
+            target_description={
+                "kind": "level_touch",
+                "level": float(entry.key_level),
+                "level_type": entry.key_level_type,
+                "side_from_open": (
+                    "above" if entry.side == "short" else "below"),
+                "horizon_label": "today",
+            },
+            predicted_value=float(entry.p_touch_today),
+            predicted_value_kind="calibrated_probability",
+            confidence_bucket=entry.model_confidence_bucket,
+            raw_score_diagnostic=float(entry.p_touch_today),
+            regime_tags_at_prediction={
+                "sector": entry.sector,
+                "regime_tags": entry.regime_tags,
+            },
+            **common,
+        ))
+
+    # 2) Avoidance predictions.
+    for avoid in avoid_list:
+        pid = make_prediction_id(
+            brief_id=metadata.brief_id,
+            symbol=avoid.symbol,
+            prediction_type="avoidance",
+            detail_token=avoid.reason[:40],
+        )
+        writer.write_prediction(PredictionRecord(
+            prediction_id=pid,
+            instrument_kind=("basket" if avoid.symbol.startswith("ALL_")
+                              else "equity"),
+            symbol=avoid.symbol,
+            prediction_type="avoidance",
+            target_description={
+                "kind": "avoid_today",
+                "reason": avoid.reason,
+            },
+            predicted_value=1.0,         # we recommend avoid with conviction
+            predicted_value_kind="boolean",
+            confidence_bucket=avoid.model_confidence,
+            raw_score_diagnostic=1.0,
+            regime_tags_at_prediction={"regime_tags": avoid.regime_tags},
+            **common,
+        ))
+
+    # 3) Options-strike predictions per index.
+    if isinstance(options_suitability, dict):
+        for idx_name, idx_block in options_suitability.items():
+            if not isinstance(idx_block, dict):
+                continue
+            for strike_entry in idx_block.get("strike_levels_in_play",
+                                                []) or []:
+                if not isinstance(strike_entry, dict):
+                    continue
+                strike = strike_entry.get("strike")
+                if strike is None:
+                    continue
+                pid = make_prediction_id(
+                    brief_id=metadata.brief_id,
+                    symbol=idx_name,
+                    prediction_type="options_strike",
+                    detail_token=f"strike_{int(strike)}_today",
+                )
+                writer.write_prediction(PredictionRecord(
+                    prediction_id=pid,
+                    instrument_kind="index",
+                    symbol=idx_name,
+                    prediction_type="options_strike",
+                    target_description={
+                        "kind": "strike_test",
+                        "strike": float(strike),
+                        "side_from_open": strike_entry.get(
+                            "side_from_open", "above"),
+                        "underlying_level": strike_entry.get(
+                            "underlying_level"),
+                        "horizon_label": "today",
+                    },
+                    predicted_value=float(
+                        strike_entry.get("p_test_today", 0.0)),
+                    predicted_value_kind="calibrated_probability",
+                    confidence_bucket=_confidence_bucket(
+                        float(strike_entry.get("p_test_today", 0.0))),
+                    raw_score_diagnostic=float(
+                        strike_entry.get("p_test_today", 0.0)),
+                    regime_tags_at_prediction={
+                        "key_level_type": strike_entry.get(
+                            "key_level_type", "unknown"),
+                    },
+                    **common,
+                ))
+
+    writer.commit()

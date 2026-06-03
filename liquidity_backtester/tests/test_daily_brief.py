@@ -316,5 +316,141 @@ class RenderEmailTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Integration: outcome log + strike translator wired into brief generator
+# ---------------------------------------------------------------------------
+
+class BriefWithIndexDataTests(unittest.TestCase):
+    """When the caller passes index_data + indexes_covered, the
+    options_suitability section is populated by the strike translator.
+    """
+
+    def _index_data(self) -> Dict[str, Any]:
+        return {
+            "NIFTY50": {
+                "previous_close": 24521.30,
+                "vol_regime": "normal",
+                "vol_regime_zscore_20d": 0.34,
+                "directional_bias": "mild_up",
+                "expected_range_today_atr": 1.6,
+                "path_efficiency_30": 0.40,    # chop-ish
+                "direction_changes_30": 12.0,
+                "proximity_predictions": [
+                    {"level": 24500, "p_test_today": 0.78,
+                     "p_test_within_60min": 0.34,
+                     "side_from_open": "below",
+                     "key_level_type": "demand_pool"},
+                    {"level": 24735, "p_test_today": 0.22,
+                     "p_test_within_60min": 0.05,
+                     "side_from_open": "above",
+                     "key_level_type": "supply_pool"},
+                ],
+            },
+        }
+
+    def test_options_suitability_populated_when_index_data_passed(self) -> None:
+        report = _two_asset_report()
+        brief = generate_brief(
+            report,
+            trading_date_ist="2026-06-03",
+            indexes_covered=["NIFTY50"],
+            index_data=self._index_data(),
+        )
+        suit = brief.options_suitability
+        self.assertIn("NIFTY50", suit)
+        nifty = suit["NIFTY50"]
+        self.assertEqual(nifty["directional_bias"], "mild_up")
+        self.assertIn("strike_levels_in_play", nifty)
+        self.assertEqual(len(nifty["strike_levels_in_play"]), 2)
+        self.assertEqual(nifty["strike_levels_in_play"][0]["strike"], 24500.0)
+        self.assertIn("regime_for_premium_buyers", nifty)
+
+    def test_options_suitability_per_index_stub_for_missing_data(self) -> None:
+        # NIFTY50 has data, BANKNIFTY does not -> per-index stub for BANKNIFTY.
+        report = _two_asset_report()
+        brief = generate_brief(
+            report,
+            trading_date_ist="2026-06-03",
+            indexes_covered=["NIFTY50", "BANKNIFTY"],
+            index_data=self._index_data(),
+        )
+        self.assertIn("NIFTY50", brief.options_suitability)
+        self.assertEqual(
+            brief.options_suitability["BANKNIFTY"]["_status"], "pending")
+
+
+class BriefWithOutcomeLogTests(unittest.TestCase):
+    """When the caller passes an OutcomeLogWriter, the generator logs
+    one PredictionRecord per call (watchlist + avoid + strike).
+    """
+
+    def test_writer_logs_proximity_predictions_from_watchlist(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report(p_touch=0.40)
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            preds = writer.read_predictions("2026-06-03")
+            # 2 watchlist entries + at least 1 avoid (ALL_BASKET fires
+            # when watchlist exists but no setup AND when watchlist empty;
+            # here watchlist non-empty so ALL_BASKET should NOT fire).
+            prox_count = (preds["prediction_type"] == "proximity").sum()
+            self.assertGreaterEqual(int(prox_count), 2,
+                "should log one proximity prediction per watchlist entry")
+
+    def test_writer_logs_avoid_basket_when_no_setup(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report(p_touch=0.05)    # below threshold
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            preds = writer.read_predictions("2026-06-03")
+            avoid_rows = preds[preds["prediction_type"] == "avoidance"]
+            self.assertGreater(len(avoid_rows), 0)
+            self.assertIn("ALL_BASKET", set(avoid_rows["symbol"]))
+
+    def test_writer_logs_options_strike_predictions(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report()
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                indexes_covered=["NIFTY50"],
+                index_data=BriefWithIndexDataTests()._index_data(),
+                outcome_log_writer=writer,
+            )
+            preds = writer.read_predictions("2026-06-03")
+            strike_rows = preds[preds["prediction_type"] == "options_strike"]
+            self.assertGreater(len(strike_rows), 0)
+            self.assertIn("NIFTY50", set(strike_rows["symbol"]))
+
+    def test_yesterday_audit_renders_pending_when_no_history(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report()
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            # No history written for 2026-06-02 -> pending.
+            self.assertEqual(brief.yesterday_audit["_status"], "pending")
+
+
 if __name__ == "__main__":
     unittest.main()
