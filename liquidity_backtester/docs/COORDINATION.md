@@ -15,7 +15,7 @@ add your own or hand off via a NEXT UP item.
 
 | Owner | Branch | Description | Started | Status |
 |-------|--------|-------------|---------|--------|
-| (none currently) | | | | |
+| Codex | claude/liquidity-pool-backtester-1uskb | Task B: wire Daily Brief artifacts into multi_asset_run.py + Task A outcome backfill partition fix | 2026-06-03 | Ready to push |
 
 ---
 

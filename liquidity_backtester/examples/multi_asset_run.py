@@ -47,6 +47,9 @@ from liqpool.policy_labels import (
 )
 from liqpool.policy_model import PolicyOutcomeModelSuite, PolicyReturnModelSuite
 from liqpool.pools import build_pools, project_to_base
+from liqpool.products.brief_renderer import render_email
+from liqpool.products.daily_brief import generate_brief
+from liqpool.products.outcome_log import OutcomeLogWriter
 from liqpool.sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
                              sector_execution_filter,
                              sector_correlation_matrix, detect_rotation, per_sector_oos,
@@ -59,6 +62,33 @@ from liqpool.stratified import _headline_factor
 
 def _bundle_path(model_dir: str) -> Path:
     return Path(model_dir).expanduser() / "multi_asset_report.pkl"
+
+
+def _next_trading_date_after_latest_bar(report) -> str:
+    """Return the next weekday IST date after the latest asset bar."""
+    latest_ist = None
+    for ad in getattr(report, "assets", {}).values():
+        base = getattr(ad, "base_df", None)
+        if base is None or base.empty:
+            continue
+        ts = pd.Timestamp(base.index[-1])
+        if ts.tzinfo is not None:
+            ts_ist = ts.tz_convert("Asia/Kolkata")
+        else:
+            ts_ist = ts + pd.Timedelta(hours=5, minutes=30)
+        if latest_ist is None or ts_ist > latest_ist:
+            latest_ist = ts_ist
+    if latest_ist is None:
+        return pd.Timestamp.utcnow().tz_convert("Asia/Kolkata").strftime("%Y-%m-%d")
+    target = latest_ist.normalize() + pd.Timedelta(days=1)
+    while target.weekday() >= 5:
+        target += pd.Timedelta(days=1)
+    return target.strftime("%Y-%m-%d")
+
+
+def _brief_bundle_label(model_dir: str) -> str:
+    label = Path(model_dir).expanduser().name
+    return label or "multi_asset_bundle"
 
 
 def _save_model_bundle(report, model_dir: str, args, cfg: Config) -> None:
@@ -1917,6 +1947,21 @@ def main():
     }
     live_plan_path = out / "live_plan.json"
     live_plan_path.write_text(json.dumps(live_plan, indent=2, default=str))
+    brief_writer = OutcomeLogWriter(root=str(out / "outcome_log"))
+    brief_target_date = _next_trading_date_after_latest_bar(report)
+    daily_brief = generate_brief(
+        report,
+        trading_date_ist=brief_target_date,
+        indexes_covered=[],
+        model_bundle_version=_brief_bundle_label(args.model_dir),
+        outcome_log_writer=brief_writer,
+    )
+    daily_brief_json_path = out / "daily_brief.json"
+    daily_brief_text_path = out / "daily_brief.txt"
+    daily_brief_json_path.write_text(
+        json.dumps(daily_brief.to_dict(), indent=2, default=str)
+    )
+    daily_brief_text_path.write_text(render_email(daily_brief))
     track_a_pretouch_path = out / "track_a_pretouch_setups.csv"
     pd.DataFrame(track_a_pretouch, columns=TRACK_A_OUTPUT_COLUMNS).to_csv(
         track_a_pretouch_path, index=False,
@@ -2051,6 +2096,8 @@ def main():
     print(f"\nartifacts: {out_json}")
     print(f"           {research_json}")
     print(f"           {live_plan_path}")
+    print(f"           {daily_brief_json_path}  ← Daily Research Brief JSON")
+    print(f"           {daily_brief_text_path}  ← Daily Research Brief email text")
     print(f"           {track_a_pretouch_path}  ← Phase 4 Track A pre-touch research setups")
     print(f"           {sector_intel_path}  ← Track 5 will ingest this for live decisions")
     if audit_csv_path is not None:

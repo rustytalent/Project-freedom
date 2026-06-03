@@ -56,7 +56,7 @@ def _pred(prediction_id: str = "PRED_X",
 def _reso(prediction_id: str = "PRED_X",
           trading_date_ist: str = "2026-06-03",
           outcome: bool = True) -> ResolutionRecord:
-    r = ResolutionRecord(
+    return ResolutionRecord(
         prediction_id=prediction_id,
         resolved_at_utc="2026-06-03T10:30:00Z",
         resolution_method=("level_touched" if outcome
@@ -66,12 +66,8 @@ def _reso(prediction_id: str = "PRED_X",
         resolution_details={"touched_at_bar_offset": 12 if outcome else None},
         had_data_gap=False,
         resolution_quality="clean",
+        trading_date_ist=trading_date_ist,
     )
-    # Attach the prediction's trading date — the writer reads this
-    # to know which partition the resolution belongs in.
-    r_dict = r.__dict__
-    r_dict["trading_date_ist"] = trading_date_ist
-    return r
 
 
 class WriterPartitionTests(unittest.TestCase):

@@ -262,10 +262,13 @@ def run_backfill(bundle_path: Path,
 
     writer = OutcomeLogWriter(root=str(output_root))
     total_predictions = 0
-    for trading_date in target_dates:
+    total_resolutions = 0
+    for i, trading_date in enumerate(target_dates, start=1):
+        LOGGER.info("[%d/%d] generating brief predictions for %s",
+                    i, len(target_dates), trading_date)
         # Generate the brief for this historical date. The brief
         # internally logs predictions via the writer.
-        brief = generate_brief(
+        generate_brief(
             report,
             trading_date_ist=trading_date,
             model_bundle_version=str(bundle_path.stem),
@@ -274,7 +277,11 @@ def run_backfill(bundle_path: Path,
         # Read back the just-written predictions to drive resolution.
         preds = writer.read_predictions(trading_date)
         if preds.empty:
+            LOGGER.info("[%d/%d] %s produced 0 predictions",
+                        i, len(target_dates), trading_date)
             continue
+        total_predictions += int(len(preds))
+        date_resolutions = 0
         for _, prow in preds.iterrows():
             reso = _resolve_prediction_row(prow, report)
             if reso is None:
@@ -282,13 +289,19 @@ def run_backfill(bundle_path: Path,
             reso.prediction_id = prow["prediction_id"]
             # Tag the resolution with the prediction's IST trading date
             # so the writer can partition correctly.
-            d = reso.__dict__
-            d["trading_date_ist"] = trading_date
+            reso.trading_date_ist = trading_date
             writer.write_resolution(reso)
-            total_predictions += 1
-        writer.commit()
+            date_resolutions += 1
+        commit_counts = writer.commit()
+        total_resolutions += date_resolutions
+        LOGGER.info(
+            "[%d/%d] %s predictions=%d resolutions=%d committed=%s",
+            i, len(target_dates), trading_date, len(preds),
+            date_resolutions, commit_counts,
+        )
     return {"trading_dates_processed": len(target_dates),
-            "resolutions_written": total_predictions}
+            "predictions_read": total_predictions,
+            "resolutions_written": total_resolutions}
 
 
 # ---------------------------------------------------------------------------

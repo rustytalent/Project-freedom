@@ -97,6 +97,7 @@ class ResolutionRecord:
     resolution_details: Dict[str, Any]
     had_data_gap: bool
     resolution_quality: str         # clean | suspect | data_gap
+    trading_date_ist: Optional[str] = None
     correction_of_resolution_id: Optional[str] = None
     schema_version: str = SCHEMA_VERSION
 
@@ -205,6 +206,9 @@ class OutcomeLogWriter:
         if "trading_date_ist" not in frame.columns:
             today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             frame["trading_date_ist"] = today_utc
+        elif frame["trading_date_ist"].isna().any():
+            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            frame["trading_date_ist"] = frame["trading_date_ist"].fillna(today_utc)
         total = 0
         for date_value, group in frame.groupby("trading_date_ist"):
             partition_dir = self.root / "resolutions" / f"trading_date_ist={date_value}"
