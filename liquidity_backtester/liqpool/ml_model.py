@@ -220,7 +220,8 @@ class PoolRespectModel:
             embargo_bars: int = 78,
             base_period_seconds: float = 300.0,
             validation_method: str = "random_stratified",
-            regularization_preset: str = "default") -> "PoolRespectModel":
+            regularization_preset: str = "default",
+            sample_weight: Optional[np.ndarray] = None) -> "PoolRespectModel":
         import lightgbm as lgb
         from sklearn.isotonic import IsotonicRegression
         from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
@@ -276,7 +277,16 @@ class PoolRespectModel:
 
         params = _lgb_params(seed, regularization_preset)
         self.hyperparameters = dict(params)
-        dtrain = lgb.Dataset(X_tr, label=y_tr, feature_name=self.feature_names)
+        # Optional per-sample weight (e.g. time-decay). Skip when not
+        # provided or wrong-length so the back-compat path is identical
+        # to pre-feature behaviour.
+        w_tr = None
+        if sample_weight is not None:
+            sample_weight = np.asarray(sample_weight, dtype=float)
+            if len(sample_weight) == len(X):
+                w_tr = sample_weight[train_idx]
+        dtrain = lgb.Dataset(X_tr, label=y_tr, weight=w_tr,
+                              feature_name=self.feature_names)
         des = lgb.Dataset(X_es, label=y_es, reference=dtrain, feature_name=self.feature_names)
 
         self._gbm = lgb.train(
@@ -549,7 +559,9 @@ class SectorMoERespectModel:
             validation_method: str = "purged_embargoed_walk_forward",
             regularization_preset: str = "default",
             bucket_shrinkage_max: float = 1.0,
-            train_sector_experts: bool = True) -> "SectorMoERespectModel":
+            train_sector_experts: bool = True,
+            sample_decay_halflife_days: Optional[float] = None,
+            ) -> "SectorMoERespectModel":
         """Fit the global Q model and (optionally) per-sector experts.
 
         ``train_sector_experts`` controls whether the per-sector expert
@@ -573,6 +585,18 @@ class SectorMoERespectModel:
         if min_sector_oos_n is not None:
             self.min_sector_oos_n = int(min_sector_oos_n)
 
+        # Time-decay sample weights: recent samples weighted higher.
+        # When the kwarg is None or <= 0, time_decay_weights returns
+        # uniform 1.0s — identical to the no-decay baseline.
+        from .sample_weights import time_decay_weights
+        sample_w = None
+        if (sample_decay_halflife_days is not None
+                and sample_decay_halflife_days > 0
+                and sample_start_times is not None):
+            sample_w = time_decay_weights(
+                sample_times=sample_start_times,
+                half_life_days=float(sample_decay_halflife_days),
+            )
         self.global_model = PoolRespectModel().fit(
             X, y, val_frac=val_frac, seed=seed,
             sample_start_times=sample_start_times,
@@ -581,6 +605,7 @@ class SectorMoERespectModel:
             base_period_seconds=base_period_seconds,
             validation_method=validation_method,
             regularization_preset=regularization_preset,
+            sample_weight=sample_w,
         )
         self._fit_bucket_if_possible(self.global_model, X_oos, oos_pools, oos_results,
                                      min_bucket_n=10,

@@ -1,6 +1,6 @@
 """Configuration dataclasses for detection params, factor weights, and runtime."""
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 
 @dataclass
@@ -108,6 +108,15 @@ class Config:
     # False, every sector's status is reported as "experts_disabled" in
     # the OOS audit and the blended Q is simply the global model.
     train_sector_experts: bool = False
+
+    # Time-decay sample weighting half-life (in days). When set,
+    # training rows are weighted by exp(-ln(2) * age_days / halflife)
+    # so older samples contribute less to the loss. Standard finml
+    # discipline (Lopez de Prado AFML ch 4) for handling regime drift.
+    # None = uniform weights (back-compat). Reasonable starting value:
+    # 180 days (6-month half-life). Set lower for faster-decaying
+    # research; longer for swing horizons.
+    sample_decay_halflife_days: Optional[float] = None
 
     # Two-tier reaction / break thresholds (in ATR units).
     #   weak_reaction_atr  : enough reverse move post-touch to count as a 'mild' respect.
