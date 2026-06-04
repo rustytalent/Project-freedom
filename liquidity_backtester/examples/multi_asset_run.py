@@ -570,7 +570,9 @@ def main():
     ap.add_argument("--slippage-bps", type=float, default=1.0,
                     help="Assumed slippage in bps per side")
     ap.add_argument("--cost-quantity", type=int, default=1,
-                    help="Quantity used for flat-charge cost estimates in reports")
+                    help="Legacy v1 quantity used when notional sizing is disabled")
+    ap.add_argument("--execution-notional-inr", type=float, default=100_000.0,
+                    help="Per-trade notional used by V2 execution/policy labels. Set 0 to use --cost-quantity.")
     ap.add_argument("--skip-execution-backtest", action="store_true",
                     help="Skip Phase 2B OOS execution-mode backtest artifacts")
     ap.add_argument("--execution-backtest-split", default="oos", choices=("oos", "train"),
@@ -604,6 +606,8 @@ def main():
                     help="Skip Phase 3C execution-policy label artifacts")
     ap.add_argument("--policy-label-split", default="oos", choices=("oos", "train", "final"),
                     help="Pool split used for execution-policy triple-barrier labels")
+    ap.add_argument("--policy-execution-version", default="v2", choices=("v1", "v2"),
+                    help="Execution simulator used for policy labels. v2 matches MIS/notional/slippage audits.")
     ap.add_argument("--skip-policy-model", action="store_true",
                     help="Skip Phase 3D policy outcome model diagnostics")
     ap.add_argument("--policy-model-min-trades", type=int, default=80,
@@ -1363,16 +1367,22 @@ def main():
         except Exception as e:
             print(f"  [execution_backtest] skipped: {e}")
 
+    resolved_raw_1m_dir = args.raw_1m_dir
+    if not resolved_raw_1m_dir and args.data_dir:
+        data_dir = Path(args.data_dir).expanduser()
+        sibling_raw = data_dir.parent / "raw_1m"
+        if sibling_raw.exists():
+            resolved_raw_1m_dir = str(sibling_raw)
+    execution_notional_inr = (
+        float(args.execution_notional_inr)
+        if args.execution_notional_inr and args.execution_notional_inr > 0
+        else None
+    )
+
     # ---- Phase 4: execution simulator v2 ----
     if args.run_execution_backtest_v2 and not args.skip_execution_backtest:
         print("\n================ EXECUTION BACKTEST V2 ================")
         try:
-            raw_1m_dir = args.raw_1m_dir
-            if not raw_1m_dir and args.data_dir:
-                data_dir = Path(args.data_dir).expanduser()
-                sibling_raw = data_dir.parent / "raw_1m"
-                if sibling_raw.exists():
-                    raw_1m_dir = str(sibling_raw)
             v2_cfg = ExecutionV2Config(
                 fill_policy=args.fill_policy,
                 use_1m_resolution=args.use_1m_resolution,
@@ -1380,12 +1390,13 @@ def main():
                 base_slippage_bps=args.v2_base_slippage_bps,
                 exchange=args.execution_exchange,
                 quantity=args.cost_quantity,
+                notional_inr=execution_notional_inr,
             )
             execution_v2_trades, execution_v2_summary = build_execution_backtest_v2_for_report(
                 report,
                 cfg,
                 v2_cfg,
-                raw_1m_dir=raw_1m_dir,
+                raw_1m_dir=resolved_raw_1m_dir,
                 split=args.execution_backtest_split,
             )
             execution_v2_delta = compare_execution_summaries_v1_v2(
@@ -1407,7 +1418,7 @@ def main():
                           f"{row['win_rate']:>6.1%} "
                           f"{row['net_expectancy_r']:>+7.2f} "
                           f"{pf_s:>7} ₹{row['max_drawdown']:>9.0f}")
-                if args.use_1m_resolution and not raw_1m_dir:
+                if args.use_1m_resolution and not resolved_raw_1m_dir:
                     print("  Warning: --use-1m-resolution requested, but no raw_1m directory "
                           "was found; v2 used 5m fallback where needed.")
         except Exception as e:
@@ -1471,6 +1482,15 @@ def main():
     policy_label_summary = pd.DataFrame()
     policy_feature_store_rows = 0
     policy_feature_store_root = None
+    policy_v2_cfg = ExecutionV2Config(
+        fill_policy=args.fill_policy,
+        use_1m_resolution=args.use_1m_resolution,
+        slippage_model=args.slippage_model,
+        base_slippage_bps=args.v2_base_slippage_bps,
+        exchange=args.execution_exchange,
+        quantity=args.cost_quantity,
+        notional_inr=execution_notional_inr,
+    )
     if not args.skip_policy_labels:
         print("\n================ POLICY LABELS ================")
         try:
@@ -1479,13 +1499,21 @@ def main():
                 cfg,
                 cost_cfg,
                 quantity=args.cost_quantity,
+                execution_version=args.policy_execution_version,
+                v2_cfg=policy_v2_cfg,
+                raw_1m_dir=resolved_raw_1m_dir,
                 split=args.policy_label_split,
             )
             policy_label_summary = summarise_policy_labels(policy_labels)
             if policy_label_summary.empty:
                 print("  (no policy labels generated)")
             else:
+                sizing_s = (
+                    f"notional ₹{execution_notional_inr:,.0f}"
+                    if execution_notional_inr is not None else f"quantity {args.cost_quantity}"
+                )
                 print(f"  Split: {args.policy_label_split.upper()}  "
+                      f"exec={args.policy_execution_version.upper()} {sizing_s}  "
                       "target = net return under explicit execution policy")
                 print(f"  {'mode':<22} {'rows':>8} {'trades':>8} {'trade%':>7} "
                       f"{'win':>7} {'mean_R':>8} {'PF':>7} {'no_trade':>9}")
@@ -1528,7 +1556,11 @@ def main():
                 policy_labels if args.policy_label_split == "train" else
                 build_policy_labels_for_report(
                     report, cfg, cost_cfg,
-                    quantity=args.cost_quantity, split="train",
+                    quantity=args.cost_quantity,
+                    execution_version=args.policy_execution_version,
+                    v2_cfg=policy_v2_cfg,
+                    raw_1m_dir=resolved_raw_1m_dir,
+                    split="train",
                 )
             )
         if oos_policy_labels is None:
@@ -1536,7 +1568,11 @@ def main():
                 policy_labels if args.policy_label_split == "oos" else
                 build_policy_labels_for_report(
                     report, cfg, cost_cfg,
-                    quantity=args.cost_quantity, split="oos",
+                    quantity=args.cost_quantity,
+                    execution_version=args.policy_execution_version,
+                    v2_cfg=policy_v2_cfg,
+                    raw_1m_dir=resolved_raw_1m_dir,
+                    split="oos",
                 )
             )
         return train_policy_labels, oos_policy_labels

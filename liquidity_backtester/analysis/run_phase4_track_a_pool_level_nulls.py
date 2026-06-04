@@ -51,12 +51,14 @@ try:  # noqa: E402
         Geometry,
         _load_symbol_1m,
         _simulate_one,
+        _target_notional,
     )
 except ModuleNotFoundError:  # pragma: no cover - test import path
     from analysis.run_phase4_track_a_pretouch_sweep import (
         Geometry,
         _load_symbol_1m,
         _simulate_one,
+        _target_notional,
     )
 
 
@@ -327,6 +329,7 @@ def simulate_candidate_frame(
     base_slippage_bps: float,
     exchange: str,
     quantity: int,
+    notional_inr: Optional[float],
 ) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
     for symbol, sdf in candidates.groupby("symbol", sort=True):
@@ -356,6 +359,7 @@ def simulate_candidate_frame(
                     base_slippage_bps=base_slippage_bps,
                     exchange=exchange,
                     quantity=quantity,
+                    notional_inr=notional_inr,
                 )
                 if trade is not None:
                     rows.append(trade)
@@ -405,6 +409,7 @@ def _simulate_and_summarize(command: Dict, candidates: pd.DataFrame, config: Map
         base_slippage_bps=float(config["base_slippage_bps"]),
         exchange=str(config["exchange"]),
         quantity=int(config["quantity"]),
+        notional_inr=_target_notional(config.get("notional_inr")),
     )
     row = summarize_trades(trades)
     row.update({
@@ -465,6 +470,7 @@ def _config_from_args(args: argparse.Namespace) -> Dict:
         "base_slippage_bps": float(args.base_slippage_bps),
         "exchange": args.exchange,
         "quantity": int(args.quantity),
+        "notional_inr": _target_notional(args.notional_inr),
         "max_candidates": args.max_candidates,
     }
 
@@ -612,6 +618,11 @@ def _summary_rows(df: pd.DataFrame, pocket: str) -> List[Dict]:
 def build_report(summary: pd.DataFrame, args: argparse.Namespace) -> str:
     decision, reason = decide(summary)
     resolution = "1m" if args.use_1m_resolution else "5m"
+    sizing = (
+        f"target_notional_inr={float(args.notional_inr):g}"
+        if _target_notional(args.notional_inr) is not None else
+        f"fixed quantity={int(args.quantity)}"
+    )
     lines = [
         "# Phase 4 Track A Pool-Level Synthetic Nulls",
         "",
@@ -622,6 +633,7 @@ def build_report(summary: pd.DataFrame, args: argparse.Namespace) -> str:
         f"- Trials per stochastic null: `{args.trials}`",
         f"- Workers requested: `{args.workers}`",
         f"- Replay resolution: `{resolution}`",
+        f"- Sizing: `{sizing}`",
         f"- Raw 1m dir: `{args.raw_1m_dir or ''}`",
         "- Scope: generated synthetic pool levels from the existing Track A candidate artifact; model scores are not recomputed for fake pools.",
         "",
@@ -673,6 +685,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-slippage-bps", type=float, default=2.0)
     parser.add_argument("--exchange", default="NSE")
     parser.add_argument("--quantity", type=int, default=1)
+    parser.add_argument(
+        "--notional-inr",
+        type=float,
+        default=100_000.0,
+        help="Target per-trade notional. Set 0 to use fixed --quantity instead.",
+    )
     parser.add_argument("--seed", type=int, default=20260601)
     parser.add_argument("--max-candidates", type=int, default=None, help="Smoke helper: cap candidate rows per task.")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)

@@ -11,7 +11,8 @@ pool-policy pair:
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,11 @@ from .execution_backtest import (
     _headline_factor,
     _reaction_label,
     simulate_pool_trade,
+)
+from .execution_simulator_v2 import (
+    ExecutionV2Config,
+    _load_symbol_1m,
+    simulate_pool_trade_v2,
 )
 from .pools import Pool
 from .sectors import sector_of
@@ -82,24 +88,50 @@ def policy_label_rows_for_asset(
     cost_cfg: ZerodhaEquityCostConfig,
     modes: Iterable[str] = EXECUTION_MODES,
     quantity: int = 1,
+    execution_version: str = "v2",
+    v2_cfg: Optional[ExecutionV2Config] = None,
+    intrabar_1m: Optional[pd.DataFrame] = None,
     split: str = "oos",
 ) -> List[Dict]:
+    if execution_version not in {"v1", "v2"}:
+        raise ValueError("execution_version must be 'v1' or 'v2'")
+    if execution_version == "v2" and v2_cfg is None:
+        v2_cfg = ExecutionV2Config(notional_inr=100_000.0)
     sector = sector_of(symbol)
     rows: List[Dict] = []
     for mode in modes:
         for pool_idx, (pool, result) in enumerate(zip(pools, results)):
             row = _base_row(symbol, sector, mode, pool_idx, pool, result, split)
-            trade = simulate_pool_trade(
-                mode=mode,
-                symbol=symbol,
-                sector=sector,
-                df_base=df_base,
-                pool=pool,
-                result=result,
-                cfg=cfg,
-                cost_cfg=cost_cfg,
-                quantity=quantity,
-            )
+            row.update({
+                "execution_version": execution_version,
+                "fill_policy": getattr(v2_cfg, "fill_policy", None) if v2_cfg else None,
+                "slippage_model": getattr(v2_cfg, "slippage_model", None) if v2_cfg else None,
+                "notional_inr": getattr(v2_cfg, "notional_inr", None) if v2_cfg else None,
+            })
+            if execution_version == "v2":
+                trade = simulate_pool_trade_v2(
+                    mode=mode,
+                    symbol=symbol,
+                    sector=sector,
+                    df_base=df_base,
+                    pool=pool,
+                    result=result,
+                    cfg=cfg,
+                    v2_cfg=v2_cfg,
+                    intrabar_1m=intrabar_1m,
+                )
+            else:
+                trade = simulate_pool_trade(
+                    mode=mode,
+                    symbol=symbol,
+                    sector=sector,
+                    df_base=df_base,
+                    pool=pool,
+                    result=result,
+                    cfg=cfg,
+                    cost_cfg=cost_cfg,
+                    quantity=quantity,
+                )
             if trade is None:
                 row.update({
                     "generated_trade": 0,
@@ -143,6 +175,8 @@ def policy_label_rows_for_asset(
                     "policy_return_inr": float(d["net_pnl"]),
                     "gross_pnl": float(d["gross_pnl"]),
                     "total_cost": float(d["total_cost"]),
+                    "statutory_cost": float(d.get("statutory_cost", d["total_cost"])),
+                    "slippage_cost": float(d.get("slippage_cost", 0.0)),
                     "risk_inr": float(d["risk_inr"]),
                     "entry_at": d["entry_at"],
                     "exit_at": d["exit_at"],
@@ -156,6 +190,8 @@ def policy_label_rows_for_asset(
                     "time_barrier": 1 if d["exit_reason"] == "time_exit" else 0,
                     "censored": 0,
                     "no_trade_reason": "",
+                    "resolution_source": d.get("resolution_source", "5m"),
+                    "entry_reason": d.get("entry_reason", ""),
                 })
             rows.append(row)
     return rows
@@ -166,9 +202,16 @@ def build_policy_labels_for_report(
     cfg: Config,
     cost_cfg: ZerodhaEquityCostConfig,
     quantity: int = 1,
+    execution_version: str = "v2",
+    v2_cfg: Optional[ExecutionV2Config] = None,
+    raw_1m_dir: str | Path | None = None,
     modes: Iterable[str] = EXECUTION_MODES,
     split: str = "oos",
 ) -> pd.DataFrame:
+    if execution_version not in {"v1", "v2"}:
+        raise ValueError("execution_version must be 'v1' or 'v2'")
+    if execution_version == "v2" and v2_cfg is None:
+        v2_cfg = ExecutionV2Config(notional_inr=100_000.0)
     rows: List[Dict] = []
     for symbol, ad in report.assets.items():
         if split == "train":
@@ -181,6 +224,9 @@ def build_policy_labels_for_report(
             pools = ad.walkforward.oos_pools
             results = ad.walkforward.oos_results
         asset_cfg = getattr(ad, "final_cfg", None) or cfg
+        intrabar_1m = None
+        if execution_version == "v2" and v2_cfg and v2_cfg.use_1m_resolution:
+            intrabar_1m = _load_symbol_1m(symbol, raw_1m_dir)
         rows.extend(policy_label_rows_for_asset(
             symbol=symbol,
             df_base=ad.base_df,
@@ -190,6 +236,9 @@ def build_policy_labels_for_report(
             cost_cfg=cost_cfg,
             modes=modes,
             quantity=quantity,
+            execution_version=execution_version,
+            v2_cfg=v2_cfg,
+            intrabar_1m=intrabar_1m,
             split=split,
         ))
     return pd.DataFrame(rows)

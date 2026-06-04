@@ -243,6 +243,7 @@ def _resolve_avoidance(symbol: str, trading_date: str,
 def run_backfill(bundle_path: Path,
                   output_root: Path,
                   days: int = 90,
+                  skip_existing: bool = False,
                   dry_run: bool = False) -> Dict[str, int]:
     """Backfill predictions + resolutions for the last ``days`` IST dates
     in the bundle. Returns a counts dict."""
@@ -263,7 +264,21 @@ def run_backfill(bundle_path: Path,
     writer = OutcomeLogWriter(root=str(output_root))
     total_predictions = 0
     total_resolutions = 0
+    skipped_existing = 0
     for i, trading_date in enumerate(target_dates, start=1):
+        pred_path = (
+            output_root / "predictions" / f"trading_date_ist={trading_date}"
+            / "predictions.parquet"
+        )
+        reso_path = (
+            output_root / "resolutions" / f"trading_date_ist={trading_date}"
+            / "resolutions.parquet"
+        )
+        if skip_existing and pred_path.exists() and reso_path.exists():
+            skipped_existing += 1
+            LOGGER.info("[%d/%d] skipping %s; prediction/resolution partitions exist",
+                        i, len(target_dates), trading_date)
+            continue
         LOGGER.info("[%d/%d] generating brief predictions for %s",
                     i, len(target_dates), trading_date)
         # Generate the brief for this historical date. The brief
@@ -275,13 +290,18 @@ def run_backfill(bundle_path: Path,
             outcome_log_writer=writer,
             retrospective=True,
         )
+        # Flush prediction rows before reading the partition back. The
+        # previous implementation read from disk while predictions were
+        # still buffered, which could accidentally resolve stale rows from
+        # an earlier run.
+        pred_commit = writer.commit()
         # Read back the just-written predictions to drive resolution.
         preds = writer.read_predictions(trading_date)
         if preds.empty:
             LOGGER.info("[%d/%d] %s produced 0 predictions",
                         i, len(target_dates), trading_date)
             continue
-        total_predictions += int(len(preds))
+        total_predictions += int(pred_commit.get("predictions", 0))
         date_resolutions = 0
         for _, prow in preds.iterrows():
             reso = _resolve_prediction_row(prow, report)
@@ -293,14 +313,15 @@ def run_backfill(bundle_path: Path,
             reso.trading_date_ist = trading_date
             writer.write_resolution(reso)
             date_resolutions += 1
-        commit_counts = writer.commit()
+        reso_commit = writer.commit()
         total_resolutions += date_resolutions
         LOGGER.info(
-            "[%d/%d] %s predictions=%d resolutions=%d committed=%s",
-            i, len(target_dates), trading_date, len(preds),
-            date_resolutions, commit_counts,
+            "[%d/%d] %s predictions=%d resolutions=%d committed=%s/%s",
+            i, len(target_dates), trading_date, int(pred_commit.get("predictions", 0)),
+            date_resolutions, pred_commit, reso_commit,
         )
     return {"trading_dates_processed": len(target_dates),
+            "trading_dates_skipped_existing": skipped_existing,
             "predictions_read": total_predictions,
             "resolutions_written": total_resolutions}
 
@@ -321,6 +342,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="How many trailing IST trading dates to backfill")
     parser.add_argument("--dry-run", action="store_true",
                         help="List dates that would be backfilled, write nothing")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip dates whose prediction and resolution partitions already exist")
     return parser.parse_args(argv)
 
 
@@ -329,7 +352,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     counts = run_backfill(args.bundle, args.output_root,
-                            days=args.days, dry_run=args.dry_run)
+                            days=args.days,
+                            skip_existing=args.skip_existing,
+                            dry_run=args.dry_run)
     print(f"backfill result: {counts}")
     return 0
 

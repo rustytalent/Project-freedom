@@ -41,8 +41,14 @@ from liqpool.execution_simulator_v2 import (  # noqa: E402
     resolve_intrabar_path,
 )
 from liqpool.indicators import atr  # noqa: E402
-from q_audit_common import fnum, markdown_table, pct  # noqa: E402
-from q_rescale import exact_top_mask  # noqa: E402
+try:  # noqa: E402
+    from q_audit_common import fnum, markdown_table, pct
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from analysis.q_audit_common import fnum, markdown_table, pct
+try:  # noqa: E402
+    from q_rescale import exact_top_mask
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from analysis.q_rescale import exact_top_mask
 
 
 DEFAULT_MODEL_REPORT = Path("output_models/core25_phase4_v2_neutral/multi_asset_report.pkl")
@@ -106,6 +112,22 @@ def _parse_symbols(raw: str) -> Optional[set[str]]:
     if not raw:
         return None
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _target_notional(raw: Optional[float]) -> Optional[float]:
+    if raw is None:
+        return None
+    value = float(raw)
+    return value if np.isfinite(value) and value > 0 else None
+
+
+def _quantity_for_entry(entry_price: float, *, quantity: int, notional_inr: Optional[float]) -> int:
+    if notional_inr is not None:
+        price = abs(float(entry_price))
+        if not np.isfinite(price) or price <= 0:
+            return max(1, int(quantity))
+        return max(1, int(float(notional_inr) // price))
+    return max(1, int(quantity))
 
 
 def _load_report(path: Path):
@@ -433,6 +455,7 @@ def _simulate_one(
     base_slippage_bps: float,
     exchange: str,
     quantity: int,
+    notional_inr: Optional[float],
 ) -> Optional[Dict]:
     idx = pd.DatetimeIndex(base_df.index)
     decision_idx = int(row["bar_idx"])
@@ -538,16 +561,21 @@ def _simulate_one(
 
     entry_exec = _slipped_price(entry_ref, direction, "entry", entry_slip)
     exit_exec = _slipped_price(exit_ref, direction, "exit", exit_slip)
+    trade_quantity = _quantity_for_entry(
+        entry_exec,
+        quantity=quantity,
+        notional_inr=notional_inr,
+    )
     buy_price, sell_price = _buy_sell_prices(direction, entry_exec, exit_exec)
-    costs = compute_zerodha_intraday_costs(buy_price, sell_price, quantity, exchange=exchange)
+    costs = compute_zerodha_intraday_costs(buy_price, sell_price, trade_quantity, exchange=exchange)
     if direction == "UP":
-        gross_ref = (exit_ref - entry_ref) * quantity
-        slip_cost = max(0.0, (entry_exec - entry_ref) + (exit_ref - exit_exec)) * quantity
-        risk = (entry_exec - stop) * quantity
+        gross_ref = (exit_ref - entry_ref) * trade_quantity
+        slip_cost = max(0.0, (entry_exec - entry_ref) + (exit_ref - exit_exec)) * trade_quantity
+        risk = (entry_exec - stop) * trade_quantity
     else:
-        gross_ref = (entry_ref - exit_ref) * quantity
-        slip_cost = max(0.0, (entry_ref - entry_exec) + (exit_exec - exit_ref)) * quantity
-        risk = (stop - entry_exec) * quantity
+        gross_ref = (entry_ref - exit_ref) * trade_quantity
+        slip_cost = max(0.0, (entry_ref - entry_exec) + (exit_exec - exit_ref)) * trade_quantity
+        risk = (stop - entry_exec) * trade_quantity
     total_cost = float(costs["total_cost_inr"] + slip_cost)
     net = float(gross_ref - total_cost)
     risk = float(max(risk, 1e-9))
@@ -577,6 +605,9 @@ def _simulate_one(
         "exit_reference": float(exit_ref),
         "entry": float(entry_exec),
         "exit": float(exit_exec),
+        "quantity": int(trade_quantity),
+        "entry_notional_inr": float(abs(entry_exec) * trade_quantity),
+        "target_notional_inr": float(notional_inr) if notional_inr is not None else np.nan,
         "stop": float(stop),
         "target": float(target),
         "exit_reason": exit_reason,
@@ -614,6 +645,7 @@ def simulate_trades(
     base_slippage_bps: float,
     exchange: str,
     quantity: int,
+    notional_inr: Optional[float],
 ) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     chunk_dir = out_dir / "pretouch_trade_chunks"
@@ -653,6 +685,7 @@ def simulate_trades(
                     base_slippage_bps=base_slippage_bps,
                     exchange=exchange,
                     quantity=quantity,
+                    notional_inr=notional_inr,
                 )
                 if trade is not None:
                     rows.append(trade)
@@ -672,10 +705,31 @@ def simulate_trades(
     return trades
 
 
-def load_existing_trades(out_dir: Path) -> Optional[pd.DataFrame]:
+def _sizing_matches(trades: pd.DataFrame, *, quantity: int, notional_inr: Optional[float]) -> bool:
+    if trades.empty:
+        return True
+    if notional_inr is not None:
+        if "target_notional_inr" not in trades.columns:
+            return False
+        observed = pd.to_numeric(trades["target_notional_inr"], errors="coerce").dropna()
+        if observed.empty:
+            return False
+        return bool(np.allclose(observed.to_numpy(dtype=float), float(notional_inr), rtol=0.0, atol=0.01))
+    if "target_notional_inr" in trades.columns:
+        observed = pd.to_numeric(trades["target_notional_inr"], errors="coerce").dropna()
+        if not observed.empty:
+            return False
+    if "quantity" not in trades.columns:
+        return False
+    observed_qty = pd.to_numeric(trades["quantity"], errors="coerce").dropna()
+    return bool(not observed_qty.empty and (observed_qty.astype(int) == int(quantity)).all())
+
+
+def load_existing_trades(out_dir: Path, *, quantity: int, notional_inr: Optional[float]) -> Optional[pd.DataFrame]:
     trade_path = out_dir / "pretouch_sweep_trades.parquet"
     if trade_path.exists():
-        return pd.read_parquet(trade_path)
+        trades = pd.read_parquet(trade_path)
+        return trades if _sizing_matches(trades, quantity=quantity, notional_inr=notional_inr) else None
     chunk_dir = out_dir / "pretouch_trade_chunks"
     if not chunk_dir.exists():
         return None
@@ -683,6 +737,8 @@ def load_existing_trades(out_dir: Path) -> Optional[pd.DataFrame]:
     if not paths:
         return None
     trades = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
+    if not _sizing_matches(trades, quantity=quantity, notional_inr=notional_inr):
+        return None
     trades.to_parquet(trade_path, index=False)
     return trades
 
@@ -912,6 +968,11 @@ def build_report(
     passing = summary[summary["passes_min_filters"]].copy() if not summary.empty else pd.DataFrame()
     by_mean = passing.sort_values("mean_r", ascending=False) if not passing.empty else summary.sort_values("mean_r", ascending=False)
     by_dsr = passing.sort_values("dsr", ascending=False) if not passing.empty else summary.sort_values("dsr", ascending=False)
+    sizing = (
+        f"target_notional_inr={float(args.notional_inr):g}"
+        if _target_notional(args.notional_inr) is not None else
+        f"fixed quantity={int(args.quantity)}"
+    )
     lines = [
         "# Phase 4 Track A Pre-Touch Directional Sweep",
         "",
@@ -931,6 +992,7 @@ def build_report(
         f"- Model report: `{args.model_report}`",
         f"- Feature store: `{args.feature_store}`",
         f"- Raw 1m dir: `{args.raw_1m_dir or ''}`",
+        f"- Sizing: `{sizing}`",
         f"- Candidate rows after floor gates: `{meta.get('candidate_rows', 0):,}`",
         f"- Joined proximity rows: `{meta.get('joined_rows', 0):,}`",
         f"- Dropped rows without direction labels: `{meta.get('dropped_no_direction', 0):,}`",
@@ -981,6 +1043,12 @@ def main() -> None:
     parser.add_argument("--base-slippage-bps", type=float, default=2.0)
     parser.add_argument("--exchange", default="NSE")
     parser.add_argument("--quantity", type=int, default=1)
+    parser.add_argument(
+        "--notional-inr",
+        type=float,
+        default=100_000.0,
+        help="Target per-trade notional. Set 0 to use fixed --quantity instead.",
+    )
     parser.add_argument("--dsr-trials", type=int, default=550)
     parser.add_argument("--min-trades", type=int, default=200)
     parser.add_argument("--min-direction-trades", type=int, default=50)
@@ -1001,6 +1069,7 @@ def main() -> None:
     raw_1m_dir = Path(args.raw_1m_dir).expanduser() if args.raw_1m_dir else None
     out_dir = Path(args.out_dir)
     data_timestamps_utc = not bool(args.data_timestamps_local_ist)
+    notional_inr = _target_notional(args.notional_inr)
 
     report = _load_report(model_report)
     min_touch = _parse_csv_floats(args.min_p_touch)
@@ -1043,7 +1112,10 @@ def main() -> None:
             key=lambda g: (g.target_fraction, g.stop_atr_mult, g.max_hold_bars),
         )
 
-    trades = load_existing_trades(out_dir) if args.reuse_trades else None
+    trades = (
+        load_existing_trades(out_dir, quantity=args.quantity, notional_inr=notional_inr)
+        if args.reuse_trades else None
+    )
     if trades is None:
         trades = simulate_trades(
             candidates,
@@ -1058,6 +1130,7 @@ def main() -> None:
             base_slippage_bps=args.base_slippage_bps,
             exchange=args.exchange,
             quantity=args.quantity,
+            notional_inr=notional_inr,
         )
 
     summary = summarize_cells(
