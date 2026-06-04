@@ -15,7 +15,7 @@ add your own or hand off via a NEXT UP item.
 
 | Owner | Branch | Description | Started | Status |
 |-------|--------|-------------|---------|--------|
-| Codex | claude/liquidity-pool-backtester-1uskb | Task B: wire Daily Brief artifacts into multi_asset_run.py + Task A outcome backfill partition fix | 2026-06-03 | Ready to push |
+| (none currently) | | | | |
 
 ---
 
@@ -61,6 +61,18 @@ Strategic decisions (recorded for posterity, no commit attached):
 2026-06-03 [opus]  6877bce — CLEANUP-2: SectorMoE per-sector experts default OFF (Config.train_sector_experts=False); saves ~40% Q training time with no measurable AUC impact
 2026-06-03 [opus]  a6aab91 — PROX-DIST-FIX: pass real distance + state + Q to predict_one (was 1.0 placeholder causing 98% calibration error)
 2026-06-04 [opus]  (this)  — ROADMAP-T0: docs/RESEARCH_ROADMAP.md + time-decay sample weighting (Q model only, opt-in via Config.sample_decay_halflife_days) + analysis/pack_artifacts.py (3-file consolidation for chat-upload)
+2026-06-04 [codex] 6856af1 — PRODUCT: wire `multi_asset_run.py` to emit
+                            `daily_brief.json` / `daily_brief.txt`; fix
+                            outcome-log backfill resolution partitioning.
+2026-06-04 [user+codex VPS proof] — Task A backfill complete on
+                            `core25_head_alpha_710362b`: 90 prediction
+                            partitions, 90 resolution partitions, 1260
+                            predictions, 1260 resolutions.
+2026-06-04 [user+codex VPS proof] — Task B artifact integration complete:
+                            `output_predict_brief_710362b_fast/`
+                            contains Daily Brief JSON/text and outcome-log
+                            prediction parquet. Copy/calibration hardening
+                            remains before customer delivery.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
