@@ -5,17 +5,23 @@ this repo: read these two documents BEFORE making any changes or proposing
 plans. They are the shared context that prior sessions agreed on, and they
 prevent the cross-session drift that has previously caused broken commits.
 
-1. `docs/COMPANY_MAP.md` — the architectural map of the project, the
-   two-axis taxonomy (Stack × Horizon), and which layers feed which
-   commercial product. This is the long-lived "what we are building"
-   reference.
+1. `docs/MASTER_PLAN.md` — **THE PRIMARY OPERATING DOCUMENT.** Read
+   this BEFORE the others. Contains:
+     * §3 Parallel Streams (the work board — find your assigned stream)
+     * §5 Deviation Log (recent direction changes that override older docs)
+     * §6 Velocity expectations
+     * §7 Operating discipline between Opus, Codex, User
+   The sequential `NEXT UP` queue in COORDINATION.md is now deprecated
+   in favor of MASTER_PLAN §3's parallel streams.
 
-2. `docs/COORDINATION.md` — the live coordination board. Sections:
-   `IN FLIGHT` (work currently owned by an agent), `RECENTLY DECIDED`
-   (decisions made in the last few sessions with rationale), `NEXT UP`
-   (the priority queue with owner + acceptance criteria), `OPEN
-   QUESTIONS FOR USER`. Update it on every commit you make so the next
-   agent knows the state.
+2. `docs/COMPANY_MAP.md` — the architectural map of the project, the
+   two-axis taxonomy (Stack × Horizon), and which layers feed which
+   commercial product. Long-lived "what we are building" reference.
+
+3. `docs/COORDINATION.md` — the live tactical log. Sections:
+   `IN FLIGHT`, `RECENTLY DECIDED` (commit log + strategic decisions).
+   The `NEXT UP` queue is superseded by MASTER_PLAN §3; do not rely on it
+   for prioritization. Append commit summaries to RECENTLY DECIDED.
 
 ## Operating rules between Opus and Codex
 

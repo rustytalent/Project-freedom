@@ -134,6 +134,16 @@ Strategic decisions (recorded for posterity, no commit attached):
      causal_rolling (no bfill), align_daily_to_intraday (daily-options
      features lagged 1 day onto intraday equity, no same-day leakage).
      405 passing total.
+2026-06-04 [opus] (this) — MASTER-PLAN-DOC: shipped docs/MASTER_PLAN.md
+     as the new canonical operating document. Architecture-first
+     reorganisation replacing the sequential NEXT UP queue with 8
+     parallel streams (A-H). Includes layer matrix, decision tree,
+     deviation log (D1-D7), velocity rules, operating discipline.
+     AGENTS.md updated to point at MASTER_PLAN first.
+     RATIONALE (deviation D6): user called out my depth-first habit;
+     30+ work items can run in parallel, only ~3 are gated by Stream B
+     (audit-patch branch hygiene chokepoint). User laptop unavailable
+     so Stream B blocked for hours; Streams A, C, G, H can run during.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
