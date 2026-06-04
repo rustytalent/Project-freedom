@@ -461,8 +461,30 @@ def _parallel_null_worker(task) -> NullResult:
     raise ValueError(f"unknown null test {test_name!r}")
 
 
+def _null_results_frame(null_results: List[NullResult]) -> pd.DataFrame:
+    columns = [
+        "alpha_name",
+        "test_name",
+        "actual_mean_R",
+        "null_mean_R_mean",
+        "null_mean_R_std",
+        "null_p_value",
+        "n_trials",
+        "actual_n_trades",
+    ]
+    if not null_results:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame([nr.__dict__ for nr in null_results], columns=columns)
+
+
+def _write_null_results(null_results: List[NullResult], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _null_results_frame(null_results).to_csv(path, index=False)
+
+
 def _run_parallel_null_tests(report, alphas, config: EvaluatorConfig,
-                             null_trials: int, workers: int) -> List[NullResult]:
+                             null_trials: int, workers: int,
+                             progress_path: Optional[Path] = None) -> List[NullResult]:
     global _PARALLEL_REPORT, _PARALLEL_ALPHAS, _PARALLEL_CONFIG
     _PARALLEL_REPORT = report
     _PARALLEL_ALPHAS = alphas
@@ -481,8 +503,19 @@ def _run_parallel_null_tests(report, alphas, config: EvaluatorConfig,
         return []
     ctx = mp.get_context("fork")
     n_workers = max(1, min(int(workers), len(tasks)))
+    results: List[NullResult] = []
     with ctx.Pool(processes=n_workers) as pool:
-        return list(pool.imap_unordered(_parallel_null_worker, tasks))
+        for done, result in enumerate(pool.imap_unordered(_parallel_null_worker, tasks), start=1):
+            results.append(result)
+            print(
+                f"[arsenal] null {done}/{len(tasks)} "
+                f"{result.alpha_name}:{result.test_name} "
+                f"p={result.null_p_value:.3f} actual_R={result.actual_mean_R:+.3f}",
+                flush=True,
+            )
+            if progress_path is not None:
+                _write_null_results(results, progress_path)
+    return results
 
 
 def _print_per_alpha(summary: pd.DataFrame) -> None:
@@ -823,21 +856,34 @@ def main() -> int:
     null_results: List[NullResult] = []
     if not args.skip_null_tests:
         print(f"\n[arsenal] running null tests ({args.null_trials} trials each)...")
+        null_progress_path = out_dir / "null_tests.partial.csv"
         if int(args.workers) > 1 and len(alphas) > 1:
             null_results = _run_parallel_null_tests(
-                report, alphas, config, args.null_trials, int(args.workers)
+                report, alphas, config, args.null_trials, int(args.workers),
+                progress_path=null_progress_path,
             )
         else:
+            total_tasks = max(1, len(alphas) * 2)
+            done_tasks = 0
             for alpha in alphas:
                 t = time_shuffle_null(alpha, report, config,
                                       n_trials=args.null_trials, seed=17)
+                done_tasks += 1
                 s = sign_flip_null(alpha, report, config,
                                     n_trials=max(50, args.null_trials // 2),
                                     seed=23)
+                done_tasks += 1
                 null_results.append(t)
                 null_results.append(s)
-        null_df = pd.DataFrame([nr.__dict__ for nr in null_results])
-        null_df.to_csv(out_dir / "null_tests.csv", index=False)
+                print(
+                    f"[arsenal] null {done_tasks}/{total_tasks} "
+                    f"{alpha.name}:time_shuffle/sign_flip "
+                    f"p={t.null_p_value:.3f}/{s.null_p_value:.3f}",
+                    flush=True,
+                )
+                _write_null_results(null_results, null_progress_path)
+        _write_null_results(null_results, out_dir / "null_tests.csv")
+        print(f"[arsenal] null tests wrote {out_dir / 'null_tests.csv'}", flush=True)
     _print_null_tests(null_results)
 
     print("\n================ VERDICT ================")
