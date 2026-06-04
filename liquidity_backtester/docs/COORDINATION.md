@@ -73,7 +73,7 @@ Strategic decisions (recorded for posterity, no commit attached):
                             contains Daily Brief JSON/text and outcome-log
                             prediction parquet. Copy/calibration hardening
                             remains before customer delivery.
-2026-06-04 [codex] bf5cffb — EXEC-GEOM: configurable V2 geometry,
+2026-06-04 [codex] 1e9a9de — EXEC-GEOM: configurable V2 geometry,
                             `break_confirmed`, `sweep_reclaim`, reclaim
                             tests, and consolidated
                             `analysis/run_geometry_mode_sweep.py`.
