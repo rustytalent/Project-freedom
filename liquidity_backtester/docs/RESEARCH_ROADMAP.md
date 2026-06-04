@@ -481,6 +481,22 @@ These rules govern HOW we work, regardless of which tier.
 * **Copy-trading** — outside the SEBI-safe product corridor.
 * **Tipster-style "buy X at Y stop Z" outputs** — never. Hard architectural
   constraint enforced at render time.
+* **Post-touch cash-equity MIS self-trading at current cost structure**
+  — empirically dead per the 2026-06-04 geometry-mode sweep (commit
+  1e9a9de). All 18 cells across {6 geometries} × {3 modes} negative;
+  best (2.5/2.5 / touch_confirmed) at mean_R = -0.324R. The model
+  ranks correctly (R1 spearman > 0.10, reaction AUC 0.78), but the
+  cost arithmetic on small-ATR cash-equity moves consumes any gross
+  edge that exists. Reclaim mode: gross_R only -0.052R but cost_R
+  +0.906R — 17× cost-to-gross ratio.
+  Implication: do not retry post-touch geometry tweaks unless one of
+  three structural changes has been made: (a) cost regime drops
+  dramatically (e.g. broker waives brokerage), (b) trade is moved to
+  options where ATR move → multi-R premium move, (c) trade is moved
+  to a substantially larger-ATR instrument class.
+  The proximity model itself is unaffected — predictions remain
+  calibrated and valuable as RESEARCH product output to customers
+  whose execution cost structure differs from ours.
 
 ---
 

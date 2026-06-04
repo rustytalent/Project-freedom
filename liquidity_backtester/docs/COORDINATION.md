@@ -79,6 +79,27 @@ Strategic decisions (recorded for posterity, no commit attached):
                             `analysis/run_geometry_mode_sweep.py`.
 2026-06-04 [codex] (this) — EXEC-GEOM-FIX: geometry/mode sweep defaults
                             to ₹1L notional sizing instead of qty=1.
+2026-06-04 [opus + user STRATEGIC] — Post-touch cash-equity MIS
+                            self-trading at current cost structure is
+                            EMPIRICALLY DEAD. Geometry-mode sweep
+                            (commit 1e9a9de + 12d2628) returned
+                            any_positive_EV_cell=false across 18 cells.
+                            Best 2.5/2.5 still -0.324R; reclaim mode
+                            gross_R -0.052 / cost_R +0.906 = 17x cost-
+                            to-gross ratio. Pivot AWAY from post-touch
+                            execution rescue. Toward: pre-touch
+                            journey alpha measurement (Task 2 next),
+                            top-decile R1 filter (Task 1 next), options
+                            translation (deferred), Daily Brief
+                            customer launch (priority).
+                            Roadmap item moved to "Explicitly declined"
+                            with full reasoning. Future cycles must not
+                            re-litigate without a structural cost change.
+2026-06-04 [opus] (this) — POSTMORTEM-DOC: record post-touch death in
+                            RESEARCH_ROADMAP.md + sample brief artifact +
+                            strategy-diagnosis product spec shipped as
+                            three parallel docs while Codex runs the
+                            top-decile + journey-alpha-NetR experiments.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
