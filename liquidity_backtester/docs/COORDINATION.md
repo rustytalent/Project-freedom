@@ -100,6 +100,40 @@ Strategic decisions (recorded for posterity, no commit attached):
                             strategy-diagnosis product spec shipped as
                             three parallel docs while Codex runs the
                             top-decile + journey-alpha-NetR experiments.
+2026-06-04 [opus METHODOLOGY RULINGS — audit-assigned to Opus]:
+  1. Historical backfill = RETROSPECTIVE-CALIBRATION-ONLY, explicitly
+     labelled. Not full point-in-time for v1. Backfilled predictions
+     carry is_retrospective=True; the brief's Yesterday Audit says
+     "calibration estimated on retrospective replay" until live forward
+     predictions accumulate. (Codex: add the flag.)
+  2. Exact level zones = exact for licensed/paid research customers;
+     fuzzed/abstracted for public/demo. Gate on customer_tier in
+     service/scoring.py. Exact levels to a licensed customer in a
+     research context is analytics, not advice.
+  3. Production Arsenal registry = `default` (5 statistically-defensible
+     alphas) for the daily cron; `research`/`all` only on explicit
+     --registry. Provenance printed in every report.
+  4. Validation gate before paper/live = hard 4-step sequence, no
+     skipping: (a) beats holdout, (b) beats >=3 of 4 nulls on the SAME
+     evaluation slice at Bonferroni-adjusted p, (c) clears 1.5x cost
+     stress, (d) 20 sessions of paper outcome-log confirmation before
+     any real capital.
+2026-06-04 [opus + codex AUDIT] — Combined alpha/product/infra audit
+     surfaced P0/P1/P2 methodology-contract breaks. Codex reports 4
+     patch batches (06e4b83, 34ceb5b, 828d120, cd9f384): registry modes,
+     V2 notional policy labels, backfill prediction-ordering fix,
+     null-test partial CSV, geometry-sweep resume, fail-closed
+     service/broker, causal opening-range + sector rotation.
+     FLAG: those 4 commits are NOT yet visible on this remote
+     (HEAD c488483). Confirm they are on the branch the next training
+     run uses, or the audit fixes won't apply. Old Track A/B/pocket
+     conclusions made under qty=1 / V1 policy labels are STALE.
+2026-06-04 [opus] (this) — WAREHOUSE-READER: liqpool/warehouse.py +
+     16 tests. Typed/validated/lookahead-safe reader over the 10-layer
+     Kite Drive warehouse. IST->UTC-naive bridge, missing-IV handling,
+     causal_rolling (no bfill), align_daily_to_intraday (daily-options
+     features lagged 1 day onto intraday equity, no same-day leakage).
+     405 passing total.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated
