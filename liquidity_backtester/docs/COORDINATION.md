@@ -144,6 +144,23 @@ Strategic decisions (recorded for posterity, no commit attached):
      30+ work items can run in parallel, only ~3 are gated by Stream B
      (audit-patch branch hygiene chokepoint). User laptop unavailable
      so Stream B blocked for hours; Streams A, C, G, H can run during.
+2026-06-04 [opus] (this) — STREAM-C-1: liqpool/detectors/sweep.py +
+     11 tests. Two new manipulation-aware detectors wired into
+     detect_all():
+       * liquidity_sweeps — wick pierces a confirmed swing by >= 0.20 ATR
+         AND same bar closes back inside. Source: SWEEP_H@tf / SWEEP_L@tf.
+       * stop_run_reclaims — price CLOSES past the swing on >=1 bar
+         (registers as a break to less-sophisticated observers) AND THEN
+         closes back inside within sweep_reclaim_window bars. Source:
+         SR_H@tf / SR_L@tf. Higher base strength than wick-only sweep.
+     Both are CAUSAL: known_at = close of the reclaim-confirmation bar,
+     never earlier. Pinned by a no-lookahead test that truncates the
+     dataframe at the reclaim bar and verifies the same detection.
+     Sweep_min_atr, reclaim_window, strength_cap, stop_run_close_atr
+     are read from DetectionParams via getattr (back-compat with older
+     Configs). 416 tests passing. enforced_failures=0.
+     Per MASTER_PLAN §3 Stream C this is commit 1 of 3 — next:
+     multi-bar imbalance + premium/discount midpoint.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated

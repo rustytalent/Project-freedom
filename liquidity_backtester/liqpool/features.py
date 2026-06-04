@@ -355,6 +355,9 @@ def volume_nodes(df: pd.DataFrame, params: DetectionParams, tf: str) -> List[Lev
 def detect_all(df: pd.DataFrame, params: DetectionParams, tf: str = "base",
                include_orb: bool = True) -> List[LevelCandidate]:
     """Run every detector on a single timeframe's OHLCV and return the merged candidate list."""
+    # Lazy import so the detectors subpackage stays optional and the
+    # existing features module has no circular-import surprises.
+    from .detectors.sweep import liquidity_sweeps, stop_run_reclaims
     cands: List[LevelCandidate] = []
     cands.extend(swing_candidates(df, params, tf))
     cands.extend(equal_levels(df, params, tf))
@@ -362,6 +365,9 @@ def detect_all(df: pd.DataFrame, params: DetectionParams, tf: str = "base",
     cands.extend(order_blocks(df, params, tf))
     cands.extend(in_candle_imbalance(df, params, tf))
     cands.extend(volume_nodes(df, params, tf))
+    # Manipulation-aware sweep detectors (audit/brain-dump Stream C).
+    cands.extend(liquidity_sweeps(df, params, tf))
+    cands.extend(stop_run_reclaims(df, params, tf))
     if include_orb and tf == "base":
         cands.extend(orb_levels(df, params))
     return cands
