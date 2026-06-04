@@ -49,6 +49,31 @@ _WORKER_REPORT = None
 _WORKER_CFG = None
 
 
+def _write_json(path: Path, payload: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _progress_path(args) -> Path:
+    if args.progress_out:
+        return Path(args.progress_out).expanduser()
+    out_path = Path(args.out).expanduser()
+    return out_path.with_suffix(f"{out_path.suffix}.partial" if out_path.suffix else ".partial.json")
+
+
+def _load_resume_geometry_rows(path: Path) -> List[Dict]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    rows = payload.get("geometry_sweep_results", [])
+    return [dict(row) for row in rows if isinstance(row, dict) and row.get("geometry")]
+
+
 def _normal_p_gt_zero(mean_r: float, se_r: float) -> float:
     if not np.isfinite(mean_r) or not np.isfinite(se_r) or se_r <= 0:
         return 1.0 if mean_r <= 0 else 0.0
@@ -214,11 +239,16 @@ def _reclaim_population(report, split: str) -> Dict:
 
 
 def _geometry_sweep(report, cfg: Config, args) -> Tuple[List[Dict], Dict[str, pd.DataFrame]]:
-    rows: List[Dict] = []
+    progress_out = _progress_path(args)
+    rows: List[Dict] = _load_resume_geometry_rows(progress_out) if args.resume else []
+    completed = {str(row.get("geometry")) for row in rows}
     trade_frames: Dict[str, pd.DataFrame] = {}
     for stop_mult, target_mult in GEOMETRY_GRID:
         label = f"stop_{stop_mult:g}_target_{target_mult:g}"
-        print(f"[geometry] replaying {label}")
+        if label in completed:
+            print(f"[geometry] skipping {label} from resume cache", flush=True)
+            continue
+        print(f"[geometry] replaying {label}", flush=True)
         v2_cfg = ExecutionV2Config(
             fill_policy=args.fill_policy,
             use_1m_resolution=args.use_1m_resolution,
@@ -242,12 +272,20 @@ def _geometry_sweep(report, cfg: Config, args) -> Tuple[List[Dict], Dict[str, pd
             "target_atr": float(target_mult),
         })
         rows.append(summary)
+        _write_json(progress_out, {
+            "stage": "geometry_sweep",
+            "completed_geometries": len(rows),
+            "total_geometries": len(GEOMETRY_GRID),
+            "last_geometry": label,
+            "geometry_sweep_results": sorted(rows, key=lambda r: r["mean_R"], reverse=True),
+        })
+        print(f"[geometry] wrote progress {progress_out}", flush=True)
     rows.sort(key=lambda r: r["mean_R"], reverse=True)
     return rows, trade_frames
 
 
 def _mode_matrix(report, cfg: Config, args) -> Tuple[Dict, pd.DataFrame]:
-    print("[modes] replaying respect/break/reclaim matrix")
+    print("[modes] replaying respect/break/reclaim matrix", flush=True)
     v2_cfg = ExecutionV2Config(
         fill_policy=args.fill_policy,
         use_1m_resolution=args.use_1m_resolution,
@@ -321,7 +359,16 @@ def run(args) -> Dict:
     cfg = getattr(report, "config", None) or Config()
 
     geometry_rows, _ = _geometry_sweep(report, cfg, args)
-    matrix, mode_trades = _mode_matrix(report, cfg, args)
+    if args.skip_mode_matrix:
+        print("[modes] skipped by --skip-mode-matrix", flush=True)
+        matrix, mode_trades = {}, pd.DataFrame()
+    else:
+        matrix, mode_trades = _mode_matrix(report, cfg, args)
+        _write_json(_progress_path(args), {
+            "stage": "mode_matrix_complete",
+            "geometry_sweep_results": geometry_rows,
+            "per_factor_mode_matrix": matrix,
+        })
     reclaim_pop = _reclaim_population(report, args.split)
     reclaim_trades = (
         mode_trades[mode_trades["mode"] == "sweep_reclaim"]
@@ -361,8 +408,7 @@ def run(args) -> Dict:
     }
 
     out_path = Path(args.out).expanduser()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out, indent=2, default=str))
+    _write_json(out_path, out)
     _print_geometry(geometry_rows)
     _print_matrix(matrix)
     print("\n=== HEADLINE FINDINGS ===")
@@ -377,6 +423,12 @@ def parse_args(argv: Optional[Sequence[str]] = None):
                     help="Path to multi_asset_report.pkl")
     ap.add_argument("--raw-1m-dir", default=None)
     ap.add_argument("--out", default="output_core25_head_alpha_710362b/geometry_mode_sweep.json")
+    ap.add_argument("--progress-out", default="",
+                    help="Incremental JSON path. Default is --out plus .partial.")
+    ap.add_argument("--resume", action="store_true",
+                    help="Reuse completed geometry rows from --progress-out/default partial JSON.")
+    ap.add_argument("--skip-mode-matrix", action="store_true",
+                    help="Run only the geometry sweep; skip respect/break/reclaim matrix.")
     ap.add_argument("--split", default="oos", choices=("oos", "train"))
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--quantity", type=int, default=1)
