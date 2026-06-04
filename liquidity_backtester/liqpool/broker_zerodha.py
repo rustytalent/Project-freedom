@@ -49,6 +49,8 @@ class ZerodhaConfig:
     """MIS = intraday margin (Indian retail leverage). CNC = cash-and-carry (long-term)."""
     variety: str = "regular"
     exchange_default: str = "NSE"
+    fail_closed_on_read_error: bool = True
+    """In live mode, broker read failures raise instead of returning empty fallbacks."""
 
 
 @dataclass
@@ -81,6 +83,13 @@ class ZerodhaBroker:
             self._kite.set_access_token(self.config.access_token)
         return self._kite
 
+    def _read_failure(self, method: str, exc: Exception, fallback):
+        msg = f"[zerodha] {method} failed: {exc}"
+        print(msg)
+        if self.config.fail_closed_on_read_error and not self.config.dry_run:
+            raise RuntimeError(msg) from exc
+        return fallback
+
     # ------------------------------------------------------------------
     # READ-ONLY  (work in both dry and live modes)
     # ------------------------------------------------------------------
@@ -90,15 +99,13 @@ class ZerodhaBroker:
         try:
             return list(self._conn().positions().get("net", []))
         except Exception as e:
-            print(f"[zerodha] get_positions failed: {e}")
-            return []
+            return self._read_failure("get_positions", e, [])
 
     def get_holdings(self) -> List[Dict]:
         try:
             return list(self._conn().holdings())
         except Exception as e:
-            print(f"[zerodha] get_holdings failed: {e}")
-            return []
+            return self._read_failure("get_holdings", e, [])
 
     def get_ltp(self, instruments: List[str]) -> Dict[str, float]:
         """`instruments` = ["NSE:HDFCBANK", "NSE:ICICIBANK", ...]. Returns {sym: ltp}.
@@ -107,22 +114,19 @@ class ZerodhaBroker:
             resp = self._conn().ltp(instruments)
             return {k: float(v.get("last_price", 0.0)) for k, v in resp.items()}
         except Exception as e:
-            print(f"[zerodha] get_ltp failed: {e}")
-            return {}
+            return self._read_failure("get_ltp", e, {})
 
     def get_orders(self) -> List[Dict]:
         try:
             return list(self._conn().orders())
         except Exception as e:
-            print(f"[zerodha] get_orders failed: {e}")
-            return []
+            return self._read_failure("get_orders", e, [])
 
     def get_margins(self) -> Dict:
         try:
             return dict(self._conn().margins())
         except Exception as e:
-            print(f"[zerodha] get_margins failed: {e}")
-            return {}
+            return self._read_failure("get_margins", e, {})
 
     # ------------------------------------------------------------------
     # WRITE  (gated by dry_run + confirm)

@@ -97,6 +97,18 @@ class WriterPartitionTests(unittest.TestCase):
             self.assertEqual(len(df), 2)
             self.assertEqual(set(df["prediction_id"]), {"PRED_A", "PRED_B"})
 
+    def test_commit_is_idempotent_by_prediction_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w1 = OutcomeLogWriter(root=tmp)
+            w1.write_prediction(_pred(prediction_id="PRED_A", predicted_value=0.70))
+            w1.commit()
+            w2 = OutcomeLogWriter(root=tmp)
+            w2.write_prediction(_pred(prediction_id="PRED_A", predicted_value=0.80))
+            w2.commit()
+            df = w2.read_predictions("2026-06-03")
+            self.assertEqual(len(df), 1)
+            self.assertAlmostEqual(float(df.iloc[0]["predicted_value"]), 0.80)
+
     def test_resolution_lands_in_prediction_date_partition(self):
         with tempfile.TemporaryDirectory() as tmp:
             w = OutcomeLogWriter(root=tmp)
@@ -107,6 +119,14 @@ class WriterPartitionTests(unittest.TestCase):
             resos = w.read_resolutions("2026-06-03")
             self.assertEqual(len(resos), 1)
             self.assertEqual(resos.iloc[0]["prediction_id"], "PRED_RESO")
+
+    def test_resolution_requires_trading_date_ist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = OutcomeLogWriter(root=tmp)
+            w.write_resolution(_reso(prediction_id="PRED_BAD_DATE",
+                                      trading_date_ist=None))
+            with self.assertRaises(ValueError):
+                w.commit()
 
     def test_multiple_dates_partition_separately(self):
         with tempfile.TemporaryDirectory() as tmp:

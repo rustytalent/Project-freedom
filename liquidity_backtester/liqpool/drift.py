@@ -9,7 +9,7 @@ Metrics watched:
   - Mean per-asset overfit gap
   - Direction model OOS AUC
   - Direction top-quartile-confidence accuracy
-  - Proximity model OOS AUC (h=78)
+  - Proximity model OOS AUC by active horizon
   - ML feature importance stability (Spearman rank correlation vs baseline)
 
 State is persisted to `drift_state.json` so we can compare current run to history.
@@ -53,8 +53,11 @@ class DriftMetrics:
     mean_overfit_gap: float
     direction_auc: float
     direction_top_quartile_confidence: float
-    proximity_auc_h78: float
     n_oos_pools: int
+    proximity_auc_h78: float = 0.0
+    """Legacy compatibility field for older h=78 bundles/baselines."""
+    proximity_auc_by_horizon: Dict[str, float] = field(default_factory=dict)
+    """Active proximity horizons, e.g. {"12": 0.78, "36": 0.82, "60": 0.85}."""
     feature_importance_top10: Dict[str, float] = field(default_factory=dict)
     """Top-10 features by gain, name → gain. Used for rank-correlation stability check."""
 
@@ -102,11 +105,15 @@ def extract_drift_metrics(report) -> DriftMetrics:
             fi_top10[name] = float(gain)
 
     proximity_auc_h78 = 0.0
+    proximity_auc_by_horizon: Dict[str, float] = {}
     if tr is not None and tr.proximity_per_horizon:
         for s in tr.proximity_per_horizon:
+            horizon = int(getattr(s, "horizon", 0) or 0)
+            auc = float(getattr(s, "auc", 0.0) or 0.0)
+            if horizon > 0:
+                proximity_auc_by_horizon[str(horizon)] = auc
             if s.horizon == 78:
-                proximity_auc_h78 = float(s.auc)
-                break
+                proximity_auc_h78 = auc
 
     return DriftMetrics(
         run_timestamp=pd.Timestamp.utcnow().isoformat(),
@@ -115,8 +122,9 @@ def extract_drift_metrics(report) -> DriftMetrics:
         mean_overfit_gap=float(report.mean_overfit_gap),
         direction_auc=float(tr.direction_auc) if tr else 0.0,
         direction_top_quartile_confidence=float(tr.direction_top_quartile_acc) if tr else 0.0,
-        proximity_auc_h78=proximity_auc_h78,
         n_oos_pools=int(report.total_oos_pools),
+        proximity_auc_h78=proximity_auc_h78,
+        proximity_auc_by_horizon=proximity_auc_by_horizon,
         feature_importance_top10=fi_top10,
     )
 
@@ -151,7 +159,15 @@ def check_drift(current: DriftMetrics, baseline: Optional[DriftMetrics],
               thresholds.min_top_quartile_confidence,
               f"Top-quartile-confidence accuracy {current.direction_top_quartile_confidence:.1%}"
               f" below {thresholds.min_top_quartile_confidence:.0%} threshold", "warning")
-    if current.proximity_auc_h78 < thresholds.min_proximity_auc:
+    proximity_by_h = getattr(current, "proximity_auc_by_horizon", {}) or {}
+    if proximity_by_h:
+        for horizon, auc in sorted(proximity_by_h.items(), key=lambda kv: int(kv[0])):
+            if float(auc) < thresholds.min_proximity_auc:
+                alert(f"proximity_auc_h{horizon}", float(auc),
+                      thresholds.min_proximity_auc,
+                      f"Proximity h={horizon} AUC {float(auc):.3f} below "
+                      f"{thresholds.min_proximity_auc:.2f} threshold", "critical")
+    elif current.proximity_auc_h78 < thresholds.min_proximity_auc:
         alert("proximity_auc_h78", current.proximity_auc_h78,
               thresholds.min_proximity_auc,
               f"Proximity h=78 AUC {current.proximity_auc_h78:.3f} below "
@@ -218,7 +234,15 @@ def print_drift_report(report: DriftReport, file=None) -> None:
     print(f"  Direction AUC:            {report.current.direction_auc:.3f}", file=file)
     print(f"  Direction top-qrt-conf:   {report.current.direction_top_quartile_confidence:.1%}",
           file=file)
-    print(f"  Proximity AUC h=78:       {report.current.proximity_auc_h78:.3f}", file=file)
+    proximity_by_h = getattr(report.current, "proximity_auc_by_horizon", {}) or {}
+    if proximity_by_h:
+        horizon_bits = ", ".join(
+            f"h={h}: {float(v):.3f}"
+            for h, v in sorted(proximity_by_h.items(), key=lambda kv: int(kv[0]))
+        )
+        print(f"  Proximity AUCs:           {horizon_bits}", file=file)
+    else:
+        print(f"  Proximity AUC h=78:       {report.current.proximity_auc_h78:.3f}", file=file)
     print(f"  OOS pools tested:         {report.current.n_oos_pools}", file=file)
 
     if report.baseline is not None:

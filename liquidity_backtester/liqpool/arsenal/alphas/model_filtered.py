@@ -497,12 +497,25 @@ class ProximityFilteredPoolAlpha(Alpha):
                             index=df_base.index)
         day_key = pd.Series([(ts + pd.Timedelta(hours=5, minutes=30)).date()
                              for ts in df_base.index], index=df_base.index)
-        mask = (
-            (minutes >= 9 * 60 + 15)
-            & (minutes < 10 * 60 + 15)
-        )
-        opening_high = df_base["high"].where(mask).groupby(day_key).transform("max").ffill()
-        opening_low = df_base["low"].where(mask).groupby(day_key).transform("min").ffill()
+        open_start = 9 * 60 + 15
+        open_end = 10 * 60 + 15
+        opening_high = pd.Series(np.nan, index=df_base.index, dtype=float)
+        opening_low = pd.Series(np.nan, index=df_base.index, dtype=float)
+
+        # Causal opening range: before 10:15, a decision only sees the
+        # high/low accumulated so far; after 10:15, the completed range
+        # is frozen for the rest of that IST session.
+        for _, idxs in day_key.groupby(day_key).groups.items():
+            day_idx = pd.Index(idxs)
+            day_minutes = minutes.loc[day_idx]
+            or_mask = (day_minutes >= open_start) & (day_minutes < open_end)
+            or_idx = day_minutes.index[or_mask.to_numpy()]
+            if len(or_idx) == 0:
+                continue
+            opening_high.loc[or_idx] = df_base.loc[or_idx, "high"].expanding().max().values
+            opening_low.loc[or_idx] = df_base.loc[or_idx, "low"].expanding().min().values
+            opening_high.loc[day_idx] = opening_high.loc[day_idx].ffill()
+            opening_low.loc[day_idx] = opening_low.loc[day_idx].ffill()
         return opening_high, opening_low
 
     def _distance_score(self, dist_atr: float) -> float:
@@ -519,31 +532,64 @@ class ProximityFilteredPoolAlpha(Alpha):
             return 0.55
         return 0.25
 
+    @staticmethod
+    def _truncate_asof(df: pd.DataFrame, asof_ts: pd.Timestamp) -> pd.DataFrame:
+        """Return rows known by asof_ts, tolerating tz-aware/naive mismatch."""
+        ts = pd.Timestamp(asof_ts)
+        try:
+            return df.loc[df.index <= ts]
+        except TypeError:
+            ts_cmp = ts.tz_localize(None) if ts.tzinfo is not None else ts
+            idx = df.index
+            if getattr(idx, "tz", None) is not None:
+                idx_cmp = idx.tz_localize(None)
+            else:
+                idx_cmp = idx
+            return df.loc[idx_cmp <= ts_cmp]
+
+    @staticmethod
+    def _ist_date_key(ts_like: Any) -> str:
+        ts = pd.Timestamp(ts_like)
+        if ts.tzinfo is not None:
+            return str(ts.tz_convert("Asia/Kolkata").date())
+        return str((ts + pd.Timedelta(hours=5, minutes=30)).date())
+
     def _sector_score(self, sector: str, trade_side: str,
-                      report: Any) -> Tuple[float, str]:
+                      report: Any, asof_ts: Optional[pd.Timestamp] = None
+                      ) -> Tuple[float, str]:
         if not self.use_sector_rotation:
             return 0.50, "neutral"
-        cache = getattr(report, "_arsenal_sector_rotation_cache", None)
+        cache_attr = "_arsenal_sector_rotation_cache_by_date" if asof_ts is not None else "_arsenal_sector_rotation_cache"
+        cache = getattr(report, cache_attr, None)
         if cache is None:
+            cache = {}
+            try:
+                setattr(report, cache_attr, cache)
+            except Exception:
+                pass
+        cache_key = self._ist_date_key(asof_ts) if asof_ts is not None else "full_history"
+        if cache_key not in cache:
             try:
                 from liqpool.sectors import compute_sector_metrics, detect_rotation
-                asset_dfs = {
-                    sym: ad.base_df for sym, ad in report.assets.items()
-                    if getattr(ad, "base_df", None) is not None
-                }
+                asset_dfs = {}
+                for sym, ad in report.assets.items():
+                    df = getattr(ad, "base_df", None)
+                    if df is None or df.empty:
+                        continue
+                    if asof_ts is not None:
+                        df = self._truncate_asof(df, pd.Timestamp(asof_ts))
+                    if len(df) >= 20:
+                        asset_dfs[sym] = df
                 rotation = detect_rotation(compute_sector_metrics(asset_dfs))
-                cache = {
+                cache[cache_key] = {
                     "rotation_in": set(rotation.get("rotation_in", []) or []),
                     "rotation_out": set(rotation.get("rotation_out", []) or []),
                 }
             except Exception:
-                cache = {"rotation_in": set(), "rotation_out": set()}
-            try:
-                setattr(report, "_arsenal_sector_rotation_cache", cache)
-            except Exception:
-                pass
-        rotation_in = cache.get("rotation_in", set())
-        rotation_out = cache.get("rotation_out", set())
+                cache[cache_key] = {"rotation_in": set(), "rotation_out": set()}
+        rotation = cache.get(cache_key, {"rotation_in": set(), "rotation_out": set()})
+        rotation_in = rotation.get("rotation_in", set())
+        rotation_out = rotation.get("rotation_out", set())
         if trade_side == "long":
             if sector in rotation_in:
                 return 1.0, "with_rotation_in"
@@ -577,6 +623,7 @@ class ProximityFilteredPoolAlpha(Alpha):
                     trade_side: str,
                     state: Dict[str, float],
                     report: Any,
+                    asof_ts: Optional[pd.Timestamp] = None,
                     ) -> Tuple[float, Dict[str, Any]]:
         prox_score = float(p_touch)
         if self.use_multi_horizon and p_touch_by_h:
@@ -593,7 +640,9 @@ class ProximityFilteredPoolAlpha(Alpha):
         if self.use_direction_score and p_direction_to_pool is not None:
             direction_score = float(np.clip(p_direction_to_pool, 0.0, 1.0))
         distance_score = self._distance_score(dist_atr)
-        sector_score, sector_tag = self._sector_score(sector, trade_side, report)
+        sector_score, sector_tag = self._sector_score(
+            sector, trade_side, report, asof_ts=asof_ts
+        )
         vol_score, vol_tag = self._vol_score(state)
 
         weights = {
@@ -798,6 +847,7 @@ class ProximityFilteredPoolAlpha(Alpha):
                         trade_side=trade_side,
                         state=state,
                         report=report,
+                        asof_ts=pd.Timestamp(ts),
                     )
                     threshold = self.min_score if self.min_score is not None else self.DEFAULT_MIN_SCORE
                     if score < threshold:

@@ -7,9 +7,13 @@ server-side and the response carries only opaque, allow-listed records.
 
 Configuration (environment variables):
   * ``GFEED_API_KEYS`` — comma-separated ``key:customer_id`` pairs. If unset, a
-    single ``demo-key:demo`` pair is used (local development only).
+    single ``demo-key:demo`` pair is used only outside production.
   * ``GFEED_RAW_DIR`` — predict-output directory to ingest via RawFeedScorer.
-    If unset, a deterministic StubScorer is used (no real data).
+    If unset, a deterministic StubScorer is used only outside production.
+  * ``GFEED_ENV`` — set to ``production`` to fail closed when required serving
+    inputs are missing.
+  * ``GFEED_ALLOW_DEV_DEFAULTS`` — set to 1/true/yes to explicitly allow demo
+    API keys and the stub scorer in non-production environments.
   * ``GFEED_RATE_PER_MIN`` — max requests per customer per minute (default 120).
 
 Run locally:
@@ -37,15 +41,33 @@ app = FastAPI(
 )
 
 
+def _is_truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _production_mode() -> bool:
+    return os.environ.get("GFEED_ENV", "").strip().lower() in {"prod", "production"}
+
+
+def _allow_dev_defaults() -> bool:
+    return (not _production_mode()) or _is_truthy_env("GFEED_ALLOW_DEV_DEFAULTS")
+
+
 def _load_api_keys() -> dict[str, str]:
     raw = os.environ.get("GFEED_API_KEYS", "").strip()
     if not raw:
+        if not _allow_dev_defaults():
+            raise RuntimeError(
+                "GFEED_API_KEYS is required when GFEED_ENV=production"
+            )
         return {"demo-key": "demo"}
     keys: dict[str, str] = {}
     for pair in raw.split(","):
         if ":" in pair:
             k, cust = pair.split(":", 1)
             keys[k.strip()] = cust.strip()
+    if not keys:
+        raise RuntimeError("GFEED_API_KEYS was provided but no key:customer pairs parsed")
     return keys
 
 
@@ -53,6 +75,10 @@ def _build_scorer():
     raw_dir = os.environ.get("GFEED_RAW_DIR", "").strip()
     if raw_dir:
         return RawFeedScorer(raw_dir)
+    if not _allow_dev_defaults():
+        raise RuntimeError(
+            "GFEED_RAW_DIR is required when GFEED_ENV=production"
+        )
     return StubScorer()
 
 
@@ -85,7 +111,14 @@ def require_customer(x_api_key: str | None = Header(default=None)) -> str:
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok", "scorer": type(SCORER).__name__}
+    scorer_name = type(SCORER).__name__
+    return {
+        "status": "ok",
+        "mode": "production" if _production_mode() else "development",
+        "scorer": scorer_name,
+        "using_stub_scorer": isinstance(SCORER, StubScorer),
+        "using_demo_key": "demo-key" in API_KEYS,
+    }
 
 
 @app.get("/v1/levels")

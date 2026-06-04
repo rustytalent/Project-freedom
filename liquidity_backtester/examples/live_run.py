@@ -550,6 +550,12 @@ def cmd_monitor(args):
 
     journal = TradeJournal(args.journal)
     broker = broker_from_env(dry_run=not args.live) if args.use_broker else None
+    if broker is not None and args.auto_confirm:
+        if args.default_quantity is None or int(args.default_quantity) <= 0:
+            raise SystemExit(
+                "--default-quantity must be an explicit positive integer when "
+                "--use-broker and --auto-confirm are enabled"
+            )
 
     end_at = pd.Timestamp.utcnow() + pd.Timedelta(hours=args.duration_hours)
     print(f"[monitor] starting live loop until {end_at} "
@@ -575,7 +581,7 @@ def cmd_monitor(args):
             ts = ev.symbol.replace(".NS", "").replace(".BO", "")
             order_side = "BUY" if ev.side == "buy" else "SELL"
             result = broker.place_bracket_order(
-                tradingsymbol=ts, side=order_side, quantity=args.default_quantity,
+                tradingsymbol=ts, side=order_side, quantity=int(args.default_quantity),
                 entry_price=ev.entry_price, stop=ev.stop, target=ev.target,
                 confirm=args.live,
             )
@@ -583,7 +589,7 @@ def cmd_monitor(args):
                   f"dry_run={result.dry_run}")
             if not result.error:
                 journal.log_order_placed(symbol=ev.symbol, order_id=result.order_id,
-                                          side=order_side, quantity=args.default_quantity,
+                                          side=order_side, quantity=int(args.default_quantity),
                                           entry_price=ev.entry_price, stop=ev.stop,
                                           target=ev.target, dry_run=result.dry_run)
 
@@ -671,8 +677,8 @@ def main():
                     help="LIVE order placement on trigger (default dry-run)")
     n.add_argument("--auto-confirm", action="store_true",
                     help="auto-place orders on trigger (no prompt)")
-    n.add_argument("--default-quantity", type=int, default=1,
-                    help="quantity for triggered orders (when --use-broker --live)")
+    n.add_argument("--default-quantity", type=int, default=None,
+                    help="explicit quantity for triggered orders when broker auto-confirm is enabled")
     n.set_defaults(func=cmd_monitor)
 
     # `eod`: end-of-day reconcile

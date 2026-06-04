@@ -419,6 +419,27 @@ class ProximityFilteredPoolAlphaTests(unittest.TestCase):
         )
         self.assertEqual(sigs, [])
 
+    def test_opening_range_is_causal_before_range_completes(self):
+        df = _bars_ist(20, "09:15", base_price=100.0)
+        df["high"] = np.linspace(100.0, 119.0, len(df))
+        df["low"] = np.linspace(99.0, 80.0, len(df))
+        # A future spike inside the opening window must not be visible
+        # to earlier decision bars.
+        df.iloc[10, df.columns.get_loc("high")] = 999.0
+        df.iloc[10, df.columns.get_loc("low")] = 1.0
+        alpha = ProximityFilteredPoolAlpha()
+        opening_high, opening_low = alpha._opening_range(df)
+
+        self.assertAlmostEqual(float(opening_high.iloc[1]),
+                               float(df["high"].iloc[:2].max()))
+        self.assertLess(float(opening_high.iloc[1]), 999.0)
+        self.assertAlmostEqual(float(opening_low.iloc[1]),
+                               float(df["low"].iloc[:2].min()))
+        self.assertGreater(float(opening_low.iloc[1]), 1.0)
+        # By 10:15 IST the completed 09:15-10:10 range is frozen.
+        self.assertAlmostEqual(float(opening_high.iloc[12]), 999.0)
+        self.assertAlmostEqual(float(opening_low.iloc[12]), 1.0)
+
     def test_returns_empty_without_quality_model(self):
         df = self._bars()
         ad = _far_pools_for_journey(df)

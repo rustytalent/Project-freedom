@@ -44,6 +44,7 @@ from liqpool.arsenal import (
     EvaluatorConfig,
     NullResult,
     default_registry,
+    research_registry,
     sign_flip_null,
     time_shuffle_null,
 )
@@ -445,6 +446,45 @@ def _run_parallel_arsenal(report, alphas, config: EvaluatorConfig,
     return pd.concat(frames, ignore_index=True)
 
 
+def _parallel_null_worker(task) -> NullResult:
+    report = _PARALLEL_REPORT
+    config = _PARALLEL_CONFIG
+    if report is None or config is None:
+        raise RuntimeError("parallel null worker was not initialised")
+    alpha, test_name, n_trials, seed = task
+    if test_name == "time_shuffle":
+        return time_shuffle_null(alpha, report, config, n_trials=n_trials, seed=seed)
+    if test_name == "sign_flip":
+        return sign_flip_null(
+            alpha, report, config, n_trials=n_trials, seed=seed
+        )
+    raise ValueError(f"unknown null test {test_name!r}")
+
+
+def _run_parallel_null_tests(report, alphas, config: EvaluatorConfig,
+                             null_trials: int, workers: int) -> List[NullResult]:
+    global _PARALLEL_REPORT, _PARALLEL_ALPHAS, _PARALLEL_CONFIG
+    _PARALLEL_REPORT = report
+    _PARALLEL_ALPHAS = alphas
+    _PARALLEL_CONFIG = config
+    tasks = []
+    for i, alpha in enumerate(alphas):
+        seed_offset = i * 1009
+        tasks.append((alpha, "time_shuffle", int(null_trials), 17 + seed_offset))
+        tasks.append((
+            alpha,
+            "sign_flip",
+            max(50, int(null_trials) // 2),
+            23 + seed_offset,
+        ))
+    if not tasks:
+        return []
+    ctx = mp.get_context("fork")
+    n_workers = max(1, min(int(workers), len(tasks)))
+    with ctx.Pool(processes=n_workers) as pool:
+        return list(pool.imap_unordered(_parallel_null_worker, tasks))
+
+
 def _print_per_alpha(summary: pd.DataFrame) -> None:
     print("\n================ PER-ALPHA SUMMARY ================")
     if summary.empty:
@@ -565,7 +605,13 @@ def main() -> int:
     ap.add_argument("--model-dir", default="output_models/core25_latest")
     ap.add_argument("--alphas", default="",
                     help="comma-separated alpha names; empty = run all registered")
-    ap.add_argument("--notional-inr", type=float, default=50_000.0)
+    ap.add_argument("--registry", choices=["default", "research", "all"], default="default",
+                    help=(
+                        "alpha registry to run. default = production/interpretable alphas; "
+                        "research/all = default plus sparse experimental journey alphas"
+                    ))
+    ap.add_argument("--notional-inr", type=float, default=100_000.0,
+                    help="notional sizing passed into the MIS+cost evaluator")
     ap.add_argument("--null-trials", type=int, default=100)
     ap.add_argument("--skip-null-tests", action="store_true")
     ap.add_argument("--workers", type=int, default=1,
@@ -588,12 +634,13 @@ def main() -> int:
     print(f"[arsenal] loading bundle: {model_dir/'multi_asset_report.pkl'}")
     report = _load_bundle(model_dir)
 
-    registry = default_registry()
+    registry = research_registry() if args.registry in {"research", "all"} else default_registry()
     if args.alphas.strip():
         names = [n.strip() for n in args.alphas.split(",") if n.strip()]
         alphas = registry.subset(names)
     else:
         alphas = registry.all()
+    print(f"[arsenal] registry={args.registry} notional_inr={args.notional_inr:,.0f}")
     print(f"[arsenal] alphas: {[a.name for a in alphas]}")
     for a in alphas:
         print(f"  - {a.name}: {a.description}")
@@ -614,10 +661,15 @@ def main() -> int:
         trades, float(args.holdout_frac)
     )
     p_threshold = 0.05 if method_meta["used_holdout"] else 0.05 / n_alphas
+    multipliers = [float(x) for x in str(args.cost_multipliers).split(",") if x.strip()]
     method_meta.update({
         "n_alphas": n_alphas,
         "p_threshold": p_threshold,
         "bonferroni_applied": not bool(method_meta["used_holdout"]),
+        "registry": args.registry,
+        "notional_inr": float(args.notional_inr),
+        "min_target_to_cost_ratio": float(config.min_target_to_cost_ratio),
+        "cost_multipliers": multipliers,
     })
 
     trades_path = out_dir / "trades.parquet"
@@ -658,7 +710,6 @@ def main() -> int:
     high_corr = _high_correlation_pairs(duplicate_corr_base)
     high_corr_holdout = _high_correlation_pairs(alpha_corr_holdout)
     turnover = _per_alpha_turnover(trades)
-    multipliers = [float(x) for x in str(args.cost_multipliers).split(",") if x.strip()]
     cost_summary_all = _cost_multiplier_summary(trades, multipliers, p_threshold)
     cost_summary_holdout = _cost_multiplier_summary(
         holdout_trades if method_meta["used_holdout"] else trades,
@@ -772,14 +823,19 @@ def main() -> int:
     null_results: List[NullResult] = []
     if not args.skip_null_tests:
         print(f"\n[arsenal] running null tests ({args.null_trials} trials each)...")
-        for alpha in alphas:
-            t = time_shuffle_null(alpha, report, config,
-                                  n_trials=args.null_trials, seed=17)
-            s = sign_flip_null(alpha, report, config,
-                                n_trials=max(50, args.null_trials // 2),
-                                seed=23)
-            null_results.append(t)
-            null_results.append(s)
+        if int(args.workers) > 1 and len(alphas) > 1:
+            null_results = _run_parallel_null_tests(
+                report, alphas, config, args.null_trials, int(args.workers)
+            )
+        else:
+            for alpha in alphas:
+                t = time_shuffle_null(alpha, report, config,
+                                      n_trials=args.null_trials, seed=17)
+                s = sign_flip_null(alpha, report, config,
+                                    n_trials=max(50, args.null_trials // 2),
+                                    seed=23)
+                null_results.append(t)
+                null_results.append(s)
         null_df = pd.DataFrame([nr.__dict__ for nr in null_results])
         null_df.to_csv(out_dir / "null_tests.csv", index=False)
     _print_null_tests(null_results)

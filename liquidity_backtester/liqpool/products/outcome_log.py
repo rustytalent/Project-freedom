@@ -16,9 +16,11 @@ See ``docs/outcome_logging_schema.md`` for the full contract.
 
 Design notes:
 
-  * Append-only. We NEVER overwrite a partition. Corrections of an
+  * Append-only at the logical row level. Parquet v1 rewrites partition
+    files atomically because local parquet files are not row-appendable,
+    but stable ids make repeated runs idempotent. Corrections of an
     earlier resolution use ``correction_of_resolution_id`` and add a
-    new row; old rows stay for audit.
+    new logical row.
   * Schema evolution is additive-only. Adding a new field is fine; if
     the field is missing in an old partition, the reader fills NaN.
     Removing a field requires a schema version bump.
@@ -38,8 +40,8 @@ Design notes:
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -131,8 +133,10 @@ class OutcomeLogWriter:
         log.write_prediction(another_record)
         log.commit()                          # flush both to parquet
 
-    The writer NEVER overwrites a partition. If a partition file
-    already exists for the same IST date, new rows are APPENDED to it.
+    The writer atomically replaces a partition file with existing rows
+    plus new rows. If a partition already exists for the same IST date,
+    new rows are logically appended and repeated commits are de-duplicated
+    by stable ids.
     Schema evolution: missing-from-old / missing-from-new columns get
     filled with pandas NA on append.
     """
@@ -187,6 +191,8 @@ class OutcomeLogWriter:
         if not rows:
             return 0
         frame = pd.DataFrame(rows)
+        if date_field not in frame.columns or frame[date_field].isna().any():
+            raise ValueError(f"{table} rows require non-null {date_field}")
         total = 0
         for date_value, group in frame.groupby(date_field):
             partition_dir = self.root / table / f"trading_date_ist={date_value}"
@@ -198,27 +204,58 @@ class OutcomeLogWriter:
                                      sort=False)
             else:
                 merged = group
-            merged.to_parquet(path, index=False)
+            merged = self._dedupe_partition(table, merged)
+            self._atomic_write_parquet(merged, path)
             total += len(group)
         return total
+
+    @staticmethod
+    def _dedupe_partition(table: str, frame: pd.DataFrame) -> pd.DataFrame:
+        """Keep parquet partition rewrites idempotent.
+
+        Predictions have one authoritative row per prediction_id.
+        Resolutions have one base row per prediction_id plus optional
+        correction rows keyed by correction_of_resolution_id.
+        """
+        if frame.empty:
+            return frame
+        out = frame.copy()
+        if table == "predictions" and "prediction_id" in out.columns:
+            return out.drop_duplicates(["prediction_id"], keep="last")
+        if table == "resolutions" and "prediction_id" in out.columns:
+            if "correction_of_resolution_id" not in out.columns:
+                out["correction_of_resolution_id"] = pd.NA
+            out["_dedupe_correction_id"] = (
+                out["correction_of_resolution_id"].astype("string").fillna("")
+            )
+            out = out.drop_duplicates(
+                ["prediction_id", "_dedupe_correction_id"], keep="last"
+            )
+            return out.drop(columns=["_dedupe_correction_id"])
+        return out.drop_duplicates(keep="last")
+
+    @staticmethod
+    def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
+        """Write via same-directory temp file, then atomically replace."""
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            frame.to_parquet(tmp, index=False)
+            tmp.replace(path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
     def _flush_resolutions(self) -> int:
         """Resolutions partition by the prediction's trading date, which
         means we have to join to predictions to know where to write. v1
         keeps it simple: we store the prediction's IST date inside the
         resolution row (the brief generator passes it through) so the
-        join is just a column read. Falls back to today's UTC date if
-        the field is missing — defensive but should never happen in
-        normal operation."""
+        join is just a column read."""
         if not self._reso_buffer:
             return 0
         frame = pd.DataFrame(self._reso_buffer)
-        if "trading_date_ist" not in frame.columns:
-            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            frame["trading_date_ist"] = today_utc
-        elif frame["trading_date_ist"].isna().any():
-            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            frame["trading_date_ist"] = frame["trading_date_ist"].fillna(today_utc)
+        if "trading_date_ist" not in frame.columns or frame["trading_date_ist"].isna().any():
+            raise ValueError("resolution rows require non-null trading_date_ist")
         total = 0
         for date_value, group in frame.groupby("trading_date_ist"):
             partition_dir = self.root / "resolutions" / f"trading_date_ist={date_value}"
@@ -230,7 +267,8 @@ class OutcomeLogWriter:
                                      sort=False)
             else:
                 merged = group
-            merged.to_parquet(path, index=False)
+            merged = self._dedupe_partition("resolutions", merged)
+            self._atomic_write_parquet(merged, path)
             total += len(group)
         return total
 
