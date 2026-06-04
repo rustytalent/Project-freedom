@@ -226,6 +226,7 @@ def _geometry_sweep(report, cfg: Config, args) -> Tuple[List[Dict], Dict[str, pd
             base_slippage_bps=args.base_slippage_bps,
             exchange=args.exchange,
             quantity=args.quantity,
+            notional_inr=args.notional_inr,
             stop_atr_mult=stop_mult,
             target_atr_mult=target_mult,
         )
@@ -254,6 +255,7 @@ def _mode_matrix(report, cfg: Config, args) -> Tuple[Dict, pd.DataFrame]:
         base_slippage_bps=args.base_slippage_bps,
         exchange=args.exchange,
         quantity=args.quantity,
+        notional_inr=args.notional_inr,
     )
     trades = _simulate_report(
         report, cfg,
@@ -378,6 +380,8 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     ap.add_argument("--split", default="oos", choices=("oos", "train"))
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--quantity", type=int, default=1)
+    ap.add_argument("--notional-inr", type=float, default=100000.0,
+                    help="Target per-trade notional. Set 0 to use --quantity instead.")
     ap.add_argument("--exchange", default="NSE")
     ap.add_argument("--fill-policy", default="neutral",
                     choices=("generous", "neutral", "conservative"))
@@ -389,7 +393,10 @@ def parse_args(argv: Optional[Sequence[str]] = None):
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    run(parse_args(argv))
+    args = parse_args(argv)
+    if args.notional_inr is not None and args.notional_inr <= 0:
+        args.notional_inr = None
+    run(args)
     return 0
 
 

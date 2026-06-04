@@ -239,6 +239,57 @@ class ExecutionSimulatorV2Tests(unittest.TestCase):
         self.assertEqual(trade.exit_at, "2026-05-26 09:45:00")
         self.assertLess(trade.exit_reference, 120.0)
 
+    def test_v2_can_size_from_target_notional(self) -> None:
+        idx = pd.date_range("2026-05-26 04:30", periods=22, freq="5min")
+        df = pd.DataFrame({
+            "open": [105.0] * 22,
+            "high": [106.0] * 22,
+            "low": [104.0] * 22,
+            "close": [105.0] * 22,
+            "volume": [1000.0] * 22,
+        }, index=idx)
+        df.loc[idx[3], ["open", "high", "low", "close"]] = [1002.0, 1006.0, 999.5, 1002.0]
+        df.loc[idx[4], ["open", "high", "low", "close"]] = [1001.0, 1004.0, 1000.5, 1002.0]
+        pool = Pool(
+            side="low",
+            price_low=999.0,
+            price_high=1000.0,
+            formed_at=idx[0],
+            available_at=idx[0],
+            contributors=[],
+            score=1.0,
+            tfs=["base"],
+            asset="TEST",
+        )
+        result = PoolResult(
+            pool_idx=0,
+            side="low",
+            formed_at=pool.formed_at,
+            price_low=pool.price_low,
+            price_high=pool.price_high,
+            score=pool.score,
+            outcome="respected_strong",
+        )
+
+        trade = simulate_pool_trade_v2(
+            mode="blind_limit",
+            symbol="TEST",
+            sector="TEST",
+            df_base=df,
+            pool=pool,
+            result=result,
+            cfg=Config(test_horizon_bars=20),
+            v2_cfg=ExecutionV2Config(fill_policy="generous",
+                                     use_1m_resolution=False,
+                                     slippage_model="flat",
+                                     base_slippage_bps=0.0,
+                                     quantity=1,
+                                     notional_inr=100000.0),
+        )
+
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade.quantity, 100)
+
 
 if __name__ == "__main__":
     unittest.main()

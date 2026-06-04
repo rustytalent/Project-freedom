@@ -68,6 +68,7 @@ class ExecutionV2Config:
     base_slippage_bps: float = 2.0
     exchange: str = "NSE"
     quantity: int = 1
+    notional_inr: Optional[float] = None
     stop_atr_mult: float = 0.5
     target_atr_mult: float = 2.0
     reclaim_target_atr_mult: float = 0.5
@@ -77,6 +78,8 @@ class ExecutionV2Config:
             raise ValueError(f"unknown fill policy {self.fill_policy!r}")
         if self.slippage_model not in ("flat", "state_dependent"):
             raise ValueError(f"unknown slippage model {self.slippage_model!r}")
+        if self.notional_inr is not None and self.notional_inr <= 0:
+            raise ValueError("notional_inr must be positive when provided")
         if self.stop_atr_mult <= 0:
             raise ValueError("stop_atr_mult must be positive")
         if self.target_atr_mult <= 0:
@@ -700,7 +703,10 @@ def simulate_pool_trade_v2(
 
     entry_price = _slipped_price(entry_price_ref, direction, "entry", entry_slip)
     exit_price = _slipped_price(exit_price_ref, direction, "exit", exit_slip)
-    qty = max(int(v2_cfg.quantity), 1)
+    if v2_cfg.notional_inr is not None:
+        qty = max(int(float(v2_cfg.notional_inr) // max(abs(entry_price_ref), 1e-9)), 1)
+    else:
+        qty = max(int(v2_cfg.quantity), 1)
 
     if direction == "UP":
         gross_per_share = float(exit_price_ref - entry_price_ref)
