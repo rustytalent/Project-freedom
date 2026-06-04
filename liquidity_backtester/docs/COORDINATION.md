@@ -73,6 +73,10 @@ Strategic decisions (recorded for posterity, no commit attached):
                             contains Daily Brief JSON/text and outcome-log
                             prediction parquet. Copy/calibration hardening
                             remains before customer delivery.
+2026-06-04 [codex] bf5cffb — EXEC-GEOM: configurable V2 geometry,
+                            `break_confirmed`, `sweep_reclaim`, reclaim
+                            tests, and consolidated
+                            `analysis/run_geometry_mode_sweep.py`.
 2026-06-03 [user retrain core25_head_alpha @ 710362b — findings recorded by opus]:
   * vol_regime_zscore_20d is #1 direction feature (gain 4919) — PATH-CTX validated
   * days_to_monthly_expiry is #5 direction feature (gain 2658) — EXPIRY-CTX validated

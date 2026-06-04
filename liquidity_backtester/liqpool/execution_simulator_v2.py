@@ -68,12 +68,25 @@ class ExecutionV2Config:
     base_slippage_bps: float = 2.0
     exchange: str = "NSE"
     quantity: int = 1
+    stop_atr_mult: float = 0.5
+    target_atr_mult: float = 2.0
+    reclaim_target_atr_mult: float = 0.5
 
     def __post_init__(self) -> None:
         if self.fill_policy not in FILL_POLICIES:
             raise ValueError(f"unknown fill policy {self.fill_policy!r}")
         if self.slippage_model not in ("flat", "state_dependent"):
             raise ValueError(f"unknown slippage model {self.slippage_model!r}")
+        if self.stop_atr_mult <= 0:
+            raise ValueError("stop_atr_mult must be positive")
+        if self.target_atr_mult <= 0:
+            raise ValueError("target_atr_mult must be positive")
+        if self.reclaim_target_atr_mult <= 0:
+            raise ValueError("reclaim_target_atr_mult must be positive")
+
+
+V2_EXTRA_EXECUTION_MODES = ("break_confirmed", "sweep_reclaim")
+V2_EXECUTION_MODES = tuple(dict.fromkeys((*EXECUTION_MODES, *V2_EXTRA_EXECUTION_MODES)))
 
 
 @dataclass
@@ -401,6 +414,163 @@ def _exit_5m_fallback(
     return last_idx, float(df["close"].iloc[last_idx]), "time_exit"
 
 
+def _touches_pool(row: pd.Series, pool: Pool) -> bool:
+    return not (
+        float(row["high"]) < float(pool.price_low)
+        or float(row["low"]) > float(pool.price_high)
+    )
+
+
+def _inside_pool(pool: Pool, close: float) -> bool:
+    return float(pool.price_low) <= float(close) <= float(pool.price_high)
+
+
+def _close_break_atr(pool: Pool, close: float, atr_value: float) -> float:
+    a = max(float(atr_value), 1e-9)
+    if pool.side == "low" and close < float(pool.price_low):
+        return (float(pool.price_low) - float(close)) / a
+    if pool.side == "high" and close > float(pool.price_high):
+        return (float(close) - float(pool.price_high)) / a
+    return 0.0
+
+
+def _has_consecutive_run(indices: Sequence[int], n: int) -> bool:
+    if n <= 1:
+        return len(indices) >= 1
+    ordered = sorted(set(int(i) for i in indices))
+    streak = 1
+    for i in range(1, len(ordered)):
+        if ordered[i] == ordered[i - 1] + 1:
+            streak += 1
+            if streak >= n:
+                return True
+        else:
+            streak = 1
+    return False
+
+
+def _direction_for_mode(pool: Pool, mode: str) -> str:
+    if mode == "break_confirmed":
+        return "DOWN" if pool.side == "low" else "UP"
+    return "UP" if pool.side == "low" else "DOWN"
+
+
+def _levels_for_mode(
+    mode: str,
+    pool: Pool,
+    entry_reference: float,
+    atr_value: float,
+    v2_cfg: ExecutionV2Config,
+) -> Tuple[float, float]:
+    a = max(float(atr_value), 1e-9)
+    if mode == "break_confirmed":
+        if pool.side == "low":
+            return float(pool.price_high), float(pool.price_low - v2_cfg.target_atr_mult * a)
+        return float(pool.price_low), float(pool.price_high + v2_cfg.target_atr_mult * a)
+
+    direction = _direction_for_mode(pool, mode)
+    if direction == "UP":
+        return (
+            float(pool.price_low - v2_cfg.stop_atr_mult * a),
+            float(pool.price_high + v2_cfg.target_atr_mult * a),
+        )
+    return (
+        float(pool.price_high + v2_cfg.stop_atr_mult * a),
+        float(pool.price_low - v2_cfg.target_atr_mult * a),
+    )
+
+
+def _entry_for_break_confirmed(
+    pool: Pool,
+    df: pd.DataFrame,
+    atr_values: pd.Series,
+    start: int,
+    end: int,
+    cfg: Config,
+) -> Optional[Tuple[int, float, str]]:
+    outside_seen = False
+    first_touch_idx: Optional[int] = None
+    strong_breaks: List[int] = []
+    for j in range(start, end):
+        row = df.iloc[j]
+        in_zone = _touches_pool(row, pool)
+        if not in_zone:
+            outside_seen = True
+        if not in_zone or not outside_seen:
+            continue
+        if first_touch_idx is None:
+            first_touch_idx = j
+        close = float(row["close"])
+        if _close_break_atr(pool, close, float(atr_values.iloc[j])) >= cfg.strong_break_atr:
+            strong_breaks.append(j)
+            if _has_consecutive_run(strong_breaks, cfg.strong_break_confirm_bars):
+                return j, close, "break_confirmed_close"
+        if first_touch_idx is not None and (j - first_touch_idx) >= cfg.respect_within_bars:
+            return None
+    return None
+
+
+def _entry_for_sweep_reclaim(
+    pool: Pool,
+    df: pd.DataFrame,
+    atr_values: pd.Series,
+    start: int,
+    end: int,
+    cfg: Config,
+    v2_cfg: ExecutionV2Config,
+) -> Optional[Tuple[int, float, str, float, float]]:
+    outside_seen = False
+    first_touch_idx: Optional[int] = None
+    first_sweep_idx: Optional[int] = None
+    sweep_extreme: Optional[float] = None
+
+    for j in range(start, end):
+        row = df.iloc[j]
+        in_zone = _touches_pool(row, pool)
+        if not in_zone:
+            outside_seen = True
+        if not in_zone or not outside_seen:
+            continue
+
+        if first_touch_idx is None:
+            first_touch_idx = j
+
+        close = float(row["close"])
+        atr_value = float(atr_values.iloc[j])
+        if first_sweep_idx is None:
+            if _close_break_atr(pool, close, atr_value) >= cfg.strong_break_atr:
+                first_sweep_idx = j
+                sweep_extreme = (
+                    float(row["low"]) if pool.side == "low" else float(row["high"])
+                )
+            continue
+
+        # Maintain the extreme only through information available at or before
+        # this candidate reclaim bar.
+        if pool.side == "low":
+            sweep_extreme = min(float(sweep_extreme), float(row["low"]))
+        else:
+            sweep_extreme = max(float(sweep_extreme), float(row["high"]))
+
+        bars_since_sweep = j - first_sweep_idx
+        if bars_since_sweep > cfg.reclaim_within_bars:
+            return None
+        if bars_since_sweep > 0 and _inside_pool(pool, close):
+            a = max(float(atr_values.iloc[j]), 1e-9)
+            if pool.side == "low":
+                stop = float(sweep_extreme)
+                target = float(pool.price_high + v2_cfg.reclaim_target_atr_mult * a)
+            else:
+                stop = float(sweep_extreme)
+                target = float(pool.price_low - v2_cfg.reclaim_target_atr_mult * a)
+            return j, close, "sweep_reclaim_close", stop, target
+
+        if first_touch_idx is not None and (j - first_touch_idx) >= cfg.respect_within_bars:
+            return None
+
+    return None
+
+
 def simulate_pool_trade_v2(
     *,
     mode: str,
@@ -414,7 +584,7 @@ def simulate_pool_trade_v2(
     intrabar_1m: Optional[pd.DataFrame] = None,
     time_stop_bars: Optional[int] = None,
 ) -> Optional[ExecutionTradeV2]:
-    if mode not in EXECUTION_MODES:
+    if mode not in V2_EXECUTION_MODES:
         raise ValueError(f"unknown execution mode {mode!r}")
     if df_base.empty or result.outcome == "horizon_insufficient":
         return None
@@ -426,7 +596,21 @@ def simulate_pool_trade_v2(
         return None
 
     atr_values = atr(df_base, cfg.detect.atr_period).bfill()
-    entry_signal = _entry_for_mode(mode, pool, df_base, atr_values, start, end, cfg)
+    level_override: Optional[Tuple[float, float]] = None
+    if mode == "break_confirmed":
+        entry_signal = _entry_for_break_confirmed(pool, df_base, atr_values, start, end, cfg)
+    elif mode == "sweep_reclaim":
+        sweep_signal = _entry_for_sweep_reclaim(
+            pool, df_base, atr_values, start, end, cfg, v2_cfg,
+        )
+        if sweep_signal is None:
+            entry_signal = None
+        else:
+            signal_idx, entry_reference, entry_reason, stop, target = sweep_signal
+            entry_signal = (signal_idx, entry_reference, entry_reason)
+            level_override = (stop, target)
+    else:
+        entry_signal = _entry_for_mode(mode, pool, df_base, atr_values, start, end, cfg)
     if entry_signal is None:
         return None
     signal_idx, entry_reference, entry_reason = entry_signal
@@ -464,10 +648,14 @@ def simulate_pool_trade_v2(
     if entry_reason and entry_reason != "touch":
         fill_reason = f"{entry_reason}:{fill_reason}"
 
-    stop, target = _levels(pool, atr_at_entry)
+    stop, target = (
+        level_override
+        if level_override is not None
+        else _levels_for_mode(mode, pool, float(entry_price_ref), atr_at_entry, v2_cfg)
+    )
     max_hold = effective_time_stop
     last_idx = min(eod_bar_idx, entry_idx + max(1, int(max_hold)))
-    direction = "UP" if pool.side == "low" else "DOWN"
+    direction = _direction_for_mode(pool, mode)
     direction_sign = 1 if direction == "UP" else -1
     if direction == "UP" and not (stop < entry_price_ref < target):
         return None
