@@ -183,6 +183,13 @@ Strategic decisions (recorded for posterity, no commit attached):
     max T_2d 27% — exactly the kind of AVOID day the daily brief surfaces
   * Cost-realism filter NOT yet observable here (only fires in Arsenal evaluator,
     not bundle-level execution_backtest). Codex NEXT UP #1 still pending.
+2026-06-05 [codex] (this) — STREAM-B-RESOLVE-DOCS: reconciled the master
+    operating board with the actual pushed branch. The former local-only
+    Codex audit patches (`06e4b83`, `34ceb5b`, `828d120`, `cd9f384`) are
+    superseded by rebased remote commits `52c88df`, `ce1ed40`, `a876351`,
+    `ab7d57d`; local HEAD and origin both point at `ab7d57d`. Stream B is
+    resolved from branch-hygiene perspective. D/F/E are unblocked for
+    implementation/training, while Stream A remains open/not built.
 ```
 
 ---

@@ -45,13 +45,13 @@ count.
 - **User** — architect, customer-channel owner, final decision on
   product/strategy/pricing tradeoffs, dispatcher.
 
-**The one chokepoint right now:** Codex's 4 audit-patch commits
-(`06e4b83`, `34ceb5b`, `828d120`, `cd9f384`) are reportedly committed
-locally on Codex's machine but not visible on this remote (`HEAD c488483`
-at last sync). User's laptop is unavailable to push/merge them right
-now. Until that resolves, do not start any work stream that depends on
-those patches being in effect. The streams that are safe to run
-in parallel during this gap are explicitly marked in §3.
+**Current branch-hygiene status:** SUPERSEDED 2026-06-05. The former
+Stream B chokepoint is resolved on the remote branch. Codex's four
+audit-patch batches were rebased and pushed as `52c88df`, `ce1ed40`,
+`a876351`, and `ab7d57d`; local `HEAD` and
+`origin/claude/liquidity-pool-backtester-1uskb` both point at
+`ab7d57d`. Work that was blocked only by missing audit patches is now
+unblocked, but implementation/training acceptance criteria still apply.
 
 ---
 
@@ -90,12 +90,12 @@ report generation).
 | Stream | What | Layers | Owner | Status |
 |---|---|---|---|---|
 | **A** | Rupee-sizing experiment | L4 | Codex | unblocked, queued |
-| **B** | Audit-patch branch hygiene | L0–L5 | Codex + user | **CHOKEPOINT** — waiting on user laptop |
-| **C** | Detector batch v1 (liquidity sweep, stop-run-reclaim, etc.) | L1 | Opus | unblocked, can run now |
-| **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design unblocked; training waits on B |
-| **E** | Live broker hardening (order state machine) | L4 | Codex | waits on B |
-| **F** | Swing vertical slice (proximity at 5d/10d/20d + swing brief) | L2+L6 | Opus design, Codex training | design unblocked; training waits on B |
-| **G** | Yesterday-Audit retrospective flag | L5+L6 | Opus | unblocked, can run now |
+| **B** | Audit-patch branch hygiene | L0–L5 | Codex + user | ✅ RESOLVED — pushed/reconciled at `ab7d57d` |
+| **C** | Detector batch v1 (liquidity sweep, stop-run-reclaim, etc.) | L1 | Opus | ✅ done; importance verification on next retrain |
+| **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
+| **E** | Live broker hardening (order state machine) | L4 | Codex | partially hardened; full order lifecycle still queued |
+| **F** | Swing vertical slice (proximity at 5d/10d/20d + swing brief) | L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
+| **G** | Yesterday-Audit retrospective flag | L5+L6 | Opus | ✅ done |
 | **H** | Distribution + first 3 customers | L7 | User | unblocked, independent |
 
 ---
@@ -156,13 +156,13 @@ what was declined."
 | Reaction × 3 sub-targets | ✅ trained | strict 0.78, reclaim 0.73, break 0.78 |
 | R1 policy return regressor | ✅ trained | spearman 0.16-0.32 across 4 modes |
 | Time-decay sample weighting | ✅ shipped (opt-in) | Config default flip pending |
-| **Q multi-class target** (5-class vs binary) | T1.3 scoped | Stream B-dependent |
-| **Per-factor Q sub-models** (EQHL/FVG/OB/REJ) | T1.3 scoped | Stream B-dependent |
+| **Q multi-class target** (5-class vs binary) | T1.3 scoped; unblocked, not prioritized | future |
+| **Per-factor Q sub-models** (EQHL/FVG/OB/REJ) | T1.3 scoped; unblocked, not prioritized | future |
 | **Manipulation-aware direction model** | T1.1 scoped | Stream D |
 | **Sub-alpha library** (momentum.with_volume vs .fake_breakout) | T1.2 scoped | future |
-| **OptionsExpectedReturnModel** | new today, design pending | Stream D |
-| **Swing-horizon proximity** (5d/10d/20d) | scoped today | Stream F |
-| **Q on V2 notional labels** | per Codex 34ceb5b | Stream B |
+| **OptionsExpectedReturnModel** | design ✅ in `6f9ffd8`; training/wiring not built | Stream D |
+| **Swing-horizon proximity** (5d/10d/20d) | design ✅ in `6f9ffd8`; training not built | Stream F |
+| **Q on V2 notional labels** | ✅ pushed as `ce1ed40`; retrain verification still required | Stream B resolved |
 
 ### L3 — Signals / Alpha
 
@@ -173,8 +173,8 @@ what was declined."
 | proximity_journey + proximity_journey_baseline (attribution) | ✅ |
 | distance_5_8_journey, proximity_direction_soft, opening_range_to_pool, sector_rotation_journey | ✅ in research_registry (sparse) |
 | Avoidance alpha as first-class | partial in brief | Stream G |
-| **Options scoring alpha** (uses OptionsExpectedReturnModel) | design pending | Stream D |
-| **Swing alphas** | design pending | Stream F |
+| **Options scoring alpha** (uses OptionsExpectedReturnModel) | design ✅; implementation not built | Stream D |
+| **Swing alphas** | design ✅; implementation not built | Stream F |
 | **Path-dependent alpha** | T1.1 | Stream D parallel |
 | **Aqua-regia mixer** (regime-conditional alpha blend) | T2.1, post-edge | future |
 
@@ -189,8 +189,8 @@ what was declined."
 | **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | new today, NOT built | Stream A |
 | **Scale-out execution layer** (25/50/75 partial profit, options) | new today, NOT built | Stream D |
 | **Live broker order state machine** | partial; audit P1 | Stream E |
-| **Live broker fail-closed** | Codex 06e4b83 | Stream B-confirm |
-| **Live default-quantity required** | Codex 06e4b83 | Stream B-confirm |
+| **Live broker fail-closed** | ✅ pushed as `52c88df`; full state machine still open | Stream E |
+| **Live default-quantity required** | ✅ pushed as `52c88df` | Stream E |
 | **V2 ≡ Arsenal evaluator equivalence proof** | audit gap | future test commit |
 | **1-minute replay for triple-barrier** | audit P0 | future |
 | **Slippage extraction as dataset** | T4.1 moat | future |
@@ -203,10 +203,10 @@ what was declined."
 | Phase 3C leakage replay (noise-reduced) | ✅ |
 | 4 null tests | ✅ |
 | Outcome log writer (1260 rows logged) | ✅ |
-| Outcome log atomic-write + dedup | Codex 06e4b83 | Stream B |
-| Backfill ordering fix | Codex 828d120 | Stream B |
-| Drift monitor for h=12/36/60 | Codex 06e4b83 | Stream B |
-| **`is_retrospective` flag on backfilled predictions** | MY ruling, NOT built | Stream G |
+| Outcome log atomic-write + dedup | ✅ pushed as `52c88df` | Stream B resolved |
+| Backfill ordering fix | ✅ pushed as `ce1ed40` | Stream B resolved |
+| Drift monitor for h=12/36/60 | ✅ pushed as `52c88df` | Stream B resolved |
+| **`is_retrospective` flag on backfilled predictions** | ✅ shipped in `8c4f210` | Stream G done |
 | **Null tests on same evaluation slice as final claim** | audit P1 | future |
 | **DSR in reports** | underused | future |
 | **Moment null** | spec'd, not run | future |
@@ -219,8 +219,8 @@ what was declined."
 | Sample brief artifact | ✅ shipped |
 | Strategy Diagnosis spec | ✅ shipped |
 | 5-index options-suitability section | ✅ skeleton; needs Greeks-wire | Stream D |
-| **Daily brief with retrospective flag** | MY ruling, NOT in renderer | Stream G |
-| **Swing brief schema + generator** | NOT specced | Stream F |
+| **Daily brief with retrospective flag** | ✅ renderer disclosure shipped in `8c4f210` | Stream G done |
+| **Swing brief schema + generator** | schema specced in `6f9ffd8`; generator NOT built | Stream F |
 | **Options brief tiers (T1/T2/T3/T4)** | NOT specced | future |
 | **Hedging brief / portfolio overlay** | tier 3 | future |
 | **Newsletter (free distribution)** | NOT built | Stream H |
@@ -243,8 +243,9 @@ what was declined."
 ## §3. The Parallel Streams (the work board)
 
 Each stream is independently dispatchable. Owners are listed.
-Dependencies are explicit. The "during chokepoint?" column says whether
-this stream can SAFELY run while Stream B is blocked.
+Dependencies are explicit. The "during chokepoint?" column records
+whether the stream was safe during the former Stream B branch-hygiene
+blocker; Stream B itself is now resolved.
 
 ### Stream A — Rupee-sizing experiment
 
@@ -273,33 +274,34 @@ This is the one experiment that could legitimately reopen post-touch.
 
 ---
 
-### Stream B — Audit-patch branch hygiene (THE CHOKEPOINT)
+### Stream B — Audit-patch branch hygiene
 
 **Layers**: L0–L5 (spans the stack)
 **Owner**: Codex + user
-**Depends on**: user's laptop returning so the 4 patches can be pushed
-to the remote
-**During chokepoint?**: this IS the chokepoint
-**Status**: BLOCKED — user awaiting laptop
+**Depends on**: nothing — former laptop/remote chokepoint resolved
+**During chokepoint?**: n/a
+**Status**: ✅ RESOLVED — Codex audit patches are on the remote branch
 **Scope**:
-- Confirm Codex's 4 commits (`06e4b83`, `34ceb5b`, `828d120`, `cd9f384`)
-  are pushed to `claude/liquidity-pool-backtester-1uskb`.
-- Ensure my commits (`c488483`, `0b27e53`) are reconciled with them.
+- Confirm Codex's 4 rebased commits (`52c88df`, `ce1ed40`, `a876351`,
+  `ab7d57d`) are pushed to `claude/liquidity-pool-backtester-1uskb`.
+- Ensure Opus commits (`c488483`, `0b27e53`, `843b400`, `5d01d81`,
+  `8c4f210`, `ee92848`, `6f9ffd8`, `64ab9b5`) are reconciled with them.
 - Single branch, all patches in effect.
 
-**Acceptance**: `git log --oneline -12` on the branch shows all 6
-commits from both agents, no conflicts.
+**Acceptance**: `git log --oneline -12` on the branch shows both agents'
+commits, local `HEAD` equals `origin/claude/liquidity-pool-backtester-1uskb`,
+and there are no tracked-file conflicts. Verified 2026-06-05 at
+`ab7d57d`.
 
-**What's blocked behind it**:
-- Any retrain using V2-notional policy labels (Codex 34ceb5b).
-- Drift monitor fixes (Codex 06e4b83).
-- Outcome-log atomic write (Codex 06e4b83).
-- Backfill ordering fix (Codex 828d120).
-- Live broker fail-closed (Codex 06e4b83).
-- Geometry-sweep resume (Codex cd9f384).
-- All Stream D / E / F code work that touches L2/L4/L5.
+**What was unblocked by it**:
+- Retrains using V2-notional policy labels (`ce1ed40`).
+- Drift monitor fixes and outcome-log hardening (`52c88df`).
+- Backfill ordering fix (`ce1ed40`).
+- Live broker fail-closed/default-quantity hardening (`52c88df`).
+- Geometry-sweep resume (`ab7d57d`).
+- Stream D / E / F code work that touches L2/L4/L5.
 
-**ETA**: hours, dependent on user's laptop availability.
+**ETA**: done.
 
 ---
 
@@ -309,7 +311,7 @@ commits from both agents, no conflicts.
 **Owner**: Opus
 **Depends on**: nothing (pure feature additions, no model retraining
 needed to ship them; importance verification happens on the next retrain
-after Stream B clears)
+after Stream B's reconciled branch)
 **During chokepoint?**: YES — fully independent
 **Status**: all 3 commits ✅ DONE; feature-importance verification
 deferred to next post-B retrain
@@ -342,10 +344,10 @@ verification deferred to next post-B retrain.
 **Owner**: Opus (design); Codex (training, post-B)
 **Depends on**:
 - Warehouse Greeks parquet (✅ have it)
-- Stream B (for training the new head against V2 labels)
+- Stream B resolved; training now depends on Codex/VPS scheduling
 **During chokepoint?**: design portions YES, training portions NO
 **Status**: design ✅ DONE (`docs/options_expected_return_model_spec.md`);
-training awaits Stream B
+training unblocked/queued
 **Scope (this session, design only)**:
 - `OptionsExpectedReturnModel` specification: inputs (proximity h=12/36/60,
   direction, path_efficiency, vol_regime_zscore_20d, distance-to-strike,
@@ -361,7 +363,7 @@ training awaits Stream B
 - Wire the brief.
 
 **Acceptance**: design committed as spec doc this session. Training
-commit lands after Stream B closes.
+commit lands in a post-Stream-B training session.
 
 **ETA**: design 1 commit this session; training 2-3 commits post-B.
 
@@ -371,10 +373,11 @@ commit lands after Stream B closes.
 
 **Layers**: L4
 **Owner**: Codex
-**Depends on**: Stream B (so the partial patch `06e4b83` is unblocked
-for completion)
-**During chokepoint?**: NO
-**Status**: blocked by chokepoint
+**Depends on**: Stream B resolved; remaining work is implementation
+and reconciliation coverage
+**During chokepoint?**: n/a
+**Status**: partial — fail-closed/default-quantity landed in `52c88df`;
+full order lifecycle still queued
 **Scope**:
 - Order state machine (entry submitted → filled → SL/target placed →
   monitor → reconcile).
@@ -394,10 +397,10 @@ intent; broker read failures fail-closed; orphan-order tests pass.
 
 **Layers**: L2 + L6
 **Owner**: Opus (design); Codex (training, post-B)
-**Depends on**: Stream B (for the V2-notional retrain)
-**During chokepoint?**: design portions YES, training portions NO
+**Depends on**: Stream B resolved; training now depends on Codex/VPS scheduling
+**During chokepoint?**: n/a
 **Status**: design ✅ DONE (`docs/swing_vertical_spec.md`); training
-awaits Stream B
+unblocked/queued
 **Scope (this session, design only)**:
 - Swing horizons (5d, 10d, 20d) added to proximity model config.
 - Swing brief schema (different from intraday: longer T, no MIS cap,
@@ -485,7 +488,7 @@ ROOT — Build a market-intelligence operating system
 │   ├── [L2] Time-decay sample weighting                          ✅ shipped, default flip pending
 │   ├── [L2] Manipulation-aware direction model                   🔮 Stream D / future
 │   ├── [L2] Sub-alpha library                                    🔮 future
-│   ├── [L3] 11 alphas in registry (5 default + 4 research + 2 attribution) ✅ DONE
+│   ├── [L3] Alpha registries (5 production default; 4 sparse research) ✅ DONE
 │   ├── [L4] V2 simulator + cost realism                          ✅ DONE
 │   ├── [L4] RupeeTargetExecutionConfig                           🔄 Stream A — TODAY'S INSIGHT
 │   ├── [L4] Scale-out partial-profit (for options)               🔮 Stream D
@@ -531,7 +534,7 @@ ROOT — Build a market-intelligence operating system
 - 🔮 SCOPED / FUTURE
 - 📅 DECISION RECORDED
 - ❌ DECLINED with reason
-- ⚠️ BLOCKED (typically by Stream B chokepoint)
+- ⚠️ BLOCKED (by an explicitly named active dependency)
 
 ---
 
@@ -598,10 +601,10 @@ ROOT — Build a market-intelligence operating system
 - **Plan-change**: Fixed in commit `a6aab91`. Regression test added so
   the bug can never come back silently. 1260 backfilled predictions
   marked stale.
-- **Downstream**: re-backfill needed on bug-fixed HEAD. Calibration
-  numbers in upcoming briefs will be honest.
-- **Status**: RESOLVED, fix shipped, re-backfill queued for Stream B
-  unblock.
+- **Downstream**: re-backfill needed on bug-fixed + audit-patched HEAD.
+  Calibration numbers in upcoming briefs will be honest.
+- **Status**: RESOLVED, fix shipped, re-backfill queued on the reconciled
+  post-Stream-B branch.
 
 ### Deviation D4 — MFE > MAE finding suggested geometry was wrong direction
 
@@ -666,6 +669,26 @@ ROOT — Build a market-intelligence operating system
   "post-revenue T1.1" might land in week 2 not month 6.
 - **Status**: ADOPTED.
 
+### Deviation D8 — Stream B branch chokepoint resolved
+
+- **Branch from**: §0 / §3 assumption that Codex's audit-patch commits
+  were local-only and unavailable on the remote branch.
+- **Trigger**: 2026-06-05 branch check after Codex push/rebase. Local
+  `HEAD`, `origin/claude/liquidity-pool-backtester-1uskb`, and fetched
+  remote state all resolved to `ab7d57d`.
+- **Finding**: the old local commit names (`06e4b83`, `34ceb5b`,
+  `828d120`, `cd9f384`) are superseded by pushed rebased commits
+  `52c88df`, `ce1ed40`, `a876351`, and `ab7d57d`. The branch now
+  contains both Opus stream commits and Codex audit-patch commits.
+- **Plan-change**: Stream B marked RESOLVED. Stream D training, Stream E
+  implementation, and Stream F training are unblocked from branch-hygiene
+  perspective. Their own acceptance tests/retrains still gate product
+  readiness.
+- **Downstream**: all future retrains/sweeps should use `ab7d57d` or a
+  successor that includes it; do not cite the laptop chokepoint as an
+  active blocker.
+- **Status**: RESOLVED.
+
 ---
 
 ## §6. Velocity & Cadence
@@ -676,7 +699,7 @@ ROOT — Build a market-intelligence operating system
 - ~400 tests added (currently 405 passing)
 - ~5 retrains executed by Codex on the VPS
 - 4 major audit-patch batches (per Codex)
-- 8 strategic deviations (D1–D7 above) logged and resolved
+- 8 strategic deviations (D1–D8 above) logged and resolved
 
 **Honest implications for projection:**
 
@@ -694,12 +717,12 @@ What I previously called:
    marathons that introduce regressions.
 3. **Every commit appends to §5 Deviation Log if it's a course-change**,
    or to COORDINATION.md RECENTLY DECIDED if it's plan-adherent.
-4. **Status of the chokepoint (Stream B) is checked before EVERY new
-   stream-D/E/F commit.** Don't queue dependent work blind.
+4. **Status of any active chokepoint is checked before EVERY dependent
+   stream commit.** Don't queue dependent work blind.
 
 **5-day target (from today):**
 - Stream A result back (rupee-sizing verdict)
-- Stream B unblocked + reconciled
+- Stream B unblocked + reconciled ✅ (`ab7d57d`)
 - Streams C, G, H ship at least one commit each
 - Stream D + F design docs landed; training queued
 - One re-backfill + retrain on the bug-fixed + audit-patched branch
@@ -746,8 +769,8 @@ What I previously called:
   changes, makes pricing/strategy/product decisions.
 - Owns Stream H entirely (no engineering substitute exists for
   customer relationships).
-- Reports machine availability (e.g. laptop access for Stream B
-  unblock).
+- Reports machine availability or remote access constraints when they
+  block a stream.
 - Surfaces new ideas; Opus catches them in §2 layer matrix, §5 dev log,
   or §3 stream creation.
 
@@ -761,8 +784,8 @@ What I previously called:
 - **No silent backwards-incompatible changes**: schema changes, config
   defaults, public API → flag in commit message AND in §5.
 - **Branch policy**: all work on `claude/liquidity-pool-backtester-1uskb`
-  until Stream B reconciles. After reconciliation, single canonical
-  branch confirmed.
+  unless the user explicitly creates a replacement branch. Stream B has
+  reconciled; this branch is the canonical working branch as of `ab7d57d`.
 - **Push policy**: each agent pushes after every passing commit. Never
   hoard local commits.
 
@@ -775,7 +798,7 @@ What I previously called:
 | Q | Question | Blocks |
 |---|---|---|
 | Q1 | Confirm Stream A `RupeeTargetExecutionConfig` parameters: ₹600 floor, ₹6/share min move, max ₹2L notional, min ₹30k, stop=50% of target. Acceptable? | Stream A |
-| Q2 | When can Stream B be unblocked? (Laptop availability for Codex's 4 patch commits to be pushed) | EVERYTHING downstream of B |
+| Q2 | SUPERSEDED: Stream B is unblocked; Codex's rebased patch commits are pushed at `ab7d57d`. | none |
 | Q3 | For Stream H: first 3 pilot customer names + target send date for brief #1 | Stream H execution |
 | Q4 | Web-dashboard hosting decision: GitHub Pages + Vercel free tier confirmed acceptable, or other? | Stream H + future product |
 | Q5 | Options model — train on EOD-only data (current warehouse coverage Jan 2024 – Jun 2026), or wait until forward-captured intraday data accumulates? | Stream D training timing |
@@ -827,13 +850,15 @@ What I previously called:
 2. Mirror in §4 Decision Tree as a node update.
 3. If decision creates new work: §3 stream entry; §2 matrix update.
 
-**On user laptop returning (unblocking Stream B):**
-1. Codex pushes 4 audit patches.
-2. Reconcile with current HEAD (`0b27e53` or successor).
-3. Mark Stream B status as RESOLVED in §3.
-4. Unblock all dependent streams (D training, E, F training).
-5. Run a confirmation retrain to verify all audit fixes are in effect.
-6. Append a §5 entry for "B-unblock" with the date and reconciled SHA.
+**Stream B reconciliation (completed 2026-06-05):**
+1. Codex pushed the 4 audit patches as rebased commits
+   `52c88df`, `ce1ed40`, `a876351`, `ab7d57d`.
+2. Local `HEAD` and `origin/claude/liquidity-pool-backtester-1uskb`
+   both resolved to `ab7d57d`.
+3. Dependent streams (D training, E, F training) are unblocked from
+   branch-hygiene perspective.
+4. Remaining duty: run/record confirmation retrains and stream-specific
+   acceptance tests before claiming product readiness.
 
 ---
 
