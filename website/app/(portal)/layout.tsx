@@ -4,6 +4,7 @@ import { brand } from "@/lib/brand";
 const portalLinks: Array<{ href: string; label: string }> = [
   { href: "/portal", label: "Today" },
   { href: "/portal/brief/today", label: "Today's brief" },
+  { href: "/portal/artifacts", label: "Artifacts" },
   { href: "/portal/calibration", label: "Calibration" },
   { href: "/portal/account", label: "Account" },
 ];

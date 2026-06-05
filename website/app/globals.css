@@ -38,8 +38,73 @@
       linear-gradient(90deg, rgba(124, 155, 184, 0.04) 1px, transparent 1px);
     background-size: 48px 48px;
   }
+  /* Soft accent glow that washes the hero — calm, not flashy. */
+  .hero-glow {
+    background:
+      radial-gradient(
+        60% 50% at 20% 0%,
+        rgba(124, 155, 184, 0.10) 0%,
+        rgba(124, 155, 184, 0.0) 60%
+      ),
+      radial-gradient(
+        50% 40% at 90% 30%,
+        rgba(125, 169, 130, 0.06) 0%,
+        rgba(125, 169, 130, 0.0) 60%
+      );
+  }
   /* Mono-font tabular numerals for tables and data strips. */
   .tabnum {
     font-variant-numeric: tabular-nums;
+  }
+  /* Pulsing live-status dot. Used next to "freshly published" labels. */
+  .live-dot {
+    position: relative;
+    display: inline-flex;
+    width: 0.5rem;
+    height: 0.5rem;
+  }
+  .live-dot::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: #7da982;
+    border-radius: 9999px;
+    opacity: 0.6;
+    animation: live-ping 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+  .live-dot::after {
+    content: "";
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background-color: #7da982;
+    border-radius: 9999px;
+  }
+  @keyframes live-ping {
+    75%, 100% {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+  }
+  /* Fade-in on first paint — gentler than scroll-triggered animation
+     and accessibility-respecting via prefers-reduced-motion below. */
+  .fade-in-up {
+    animation: fade-in-up 350ms ease-out both;
+  }
+  @keyframes fade-in-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot::before,
+    .fade-in-up {
+      animation: none;
+    }
   }
 }
