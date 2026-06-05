@@ -227,6 +227,7 @@ what was declined."
 | Daily Research Brief (equity-intraday v1) | ✅ shipped, integrated |
 | Sample brief artifact | ✅ shipped |
 | Strategy Diagnosis spec | ✅ shipped |
+| **Customer delivery packer** | ✅ shipped in `analysis/pack_artifacts.py --customer-delivery`; emits brief artifacts, consolidated summaries, outcome-log summary, README, manifest, optional zip |
 | 5-index options-suitability section | ✅ skeleton; needs Greeks-wire | Stream D |
 | **Daily brief with retrospective flag** | ✅ renderer disclosure shipped in `8c4f210` | Stream G done |
 | **Public/demo exact-zone protection** | ✅ licensed tier gets exact zones; demo/public/sample tiers get deterministic abstract zones | product hardening |
@@ -518,6 +519,7 @@ ROOT — Build a market-intelligence operating system
 │
 ├── [Layer 6] Build the products
 │   ├── [L6] Daily Brief equity-intraday v1                       ✅ DONE
+│   ├── [L6] Customer delivery packer                              ✅ DONE
 │   ├── [L6] Public/demo feed exact-zone protection                ✅ DONE
 │   ├── [L6] Options-suitability section (Greeks-wired)           🔄 Stream D
 │   ├── [L6] Swing brief                                          🔄 Stream F

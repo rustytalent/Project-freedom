@@ -25,6 +25,14 @@ Append-only log of decisions. One line each.
 Format: `YYYY-MM-DD [agent] commit_sha — decision`
 
 ```
+2026-06-05 [codex] (this) — CUSTOMER-DELIVERY-PACK:
+                            extend `analysis/pack_artifacts.py` with
+                            `--customer-delivery` mode. The pack now
+                            emits Daily Brief JSON/text, consolidated
+                            audit summaries, compact outcome-log
+                            summary, README, manifest with hashes, and
+                            optional zip. Demo/public tiers rewrite
+                            exact brief levels before packaging.
 2026-06-05 [codex] (this) —
                             PUBLIC-FEED-TIER-GATE: implement the
                             2026-06-04 methodology ruling that exact
