@@ -1,0 +1,155 @@
+{
+  "schema_version": "1.0",
+  "brief_metadata": {
+    "brief_id": "BRIEF_2026_03_14",
+    "trading_date_ist": "2026-03-14",
+    "generated_at_utc": "2026-03-14T03:00:00Z",
+    "model_bundle_version": "core25_head_alpha",
+    "feature_version": "42_features_v3",
+    "session_status": "pre_open",
+    "reading_time_minutes": 6,
+    "indexes_covered": ["NIFTY50", "BANKNIFTY"]
+  },
+  "index_regime": {
+    "NIFTY50": {
+      "_status": "pending",
+      "_reason": "index_data_not_provided_in_sample"
+    },
+    "BANKNIFTY": {
+      "_status": "pending",
+      "_reason": "index_data_not_provided_in_sample"
+    }
+  },
+  "sector_regime": {
+    "as_of_ist": "2026-03-14T09:15:00+05:30",
+    "trending_up": ["BANKING", "FINANCIALS"],
+    "trending_down": ["IT", "PHARMA"],
+    "chopping": ["FMCG"],
+    "neutral": ["AUTO", "ENERGY", "METALS"],
+    "leadership_change_vs_yesterday": ["IT"]
+  },
+  "top_watchlist": [
+    {
+      "symbol": "LARGE_CAP_BANK_A",
+      "sector": "BANKING",
+      "side": "long",
+      "reason_tag": "proximity_high_p_touch_journey",
+      "key_level": 0,
+      "key_level_type": "demand_pool",
+      "p_touch_today": 0.62,
+      "p_touch_within_60min": 0.28,
+      "model_confidence_bucket": "high",
+      "regime_tags": ["banking_trending_up"],
+      "avoidance_note": null
+    },
+    {
+      "symbol": "NIFTY50",
+      "sector": "INDEX",
+      "side": "short",
+      "reason_tag": "proximity_high_p_touch_journey",
+      "key_level": 0,
+      "key_level_type": "supply_pool",
+      "p_touch_today": 0.47,
+      "p_touch_within_60min": 0.14,
+      "model_confidence_bucket": "moderate",
+      "regime_tags": [],
+      "avoidance_note": null
+    },
+    {
+      "symbol": "LARGE_CAP_IT_B",
+      "sector": "IT",
+      "side": "long",
+      "reason_tag": "proximity_high_p_touch_journey",
+      "key_level": 0,
+      "key_level_type": "demand_pool",
+      "p_touch_today": 0.41,
+      "p_touch_within_60min": 0.11,
+      "model_confidence_bucket": "moderate",
+      "regime_tags": ["it_trending_down"],
+      "avoidance_note": "long candidate fights bearish sector regime"
+    }
+  ],
+  "options_suitability": {
+    "NIFTY50": {
+      "directional_bias": "mild_down",
+      "expected_range_today_atr": 1.4,
+      "movement_quality_prediction": "moderate_chop",
+      "theta_danger_score": 0.62,
+      "strike_levels_in_play": [
+        {
+          "strike": 0,
+          "p_test_today": 0.51,
+          "p_test_within_60min": 0.17,
+          "side_from_open": "above",
+          "key_level_type": "supply_pool",
+          "underlying_level": 0
+        }
+      ],
+      "regime_for_premium_buyers": "neutral_to_unfavorable",
+      "regime_for_premium_sellers": "moderately_favorable",
+      "session_recommendation": "context_only_no_directional_call"
+    }
+  },
+  "avoid_list": [
+    {
+      "symbol": "ALL_IT",
+      "reason": "sector_trending_down_avoid_new_longs",
+      "regime_tags": ["it_trending_down"],
+      "model_confidence": "moderate"
+    },
+    {
+      "symbol": "LARGE_CAP_IT_B",
+      "reason": "long candidate fights bearish sector regime",
+      "regime_tags": ["it_trending_down"],
+      "model_confidence": "moderate"
+    }
+  ],
+  "confidence_notes": {
+    "calibrated_today": ["direction", "proximity_h12", "proximity_h36", "proximity_h60"],
+    "drifting_today": [],
+    "drift_reason": {},
+    "overall_brief_confidence": "high",
+    "operator_note": null
+  },
+  "yesterday_audit": {
+    "yesterday_brief_id": "BRIEF_2026_03_13",
+    "predictions_made": 14,
+    "predictions_resolved": 12,
+    "hit_rate_by_confidence_bucket": [
+      {
+        "prediction_type": "proximity",
+        "confidence_bucket": "very_high",
+        "n": 2,
+        "hit_rate": 0.5,
+        "mean_predicted_p": 0.84,
+        "calibration_error": 0.34
+      },
+      {
+        "prediction_type": "proximity",
+        "confidence_bucket": "high",
+        "n": 5,
+        "hit_rate": 0.8,
+        "mean_predicted_p": 0.71,
+        "calibration_error": -0.09
+      },
+      {
+        "prediction_type": "proximity",
+        "confidence_bucket": "moderate",
+        "n": 3,
+        "hit_rate": 0.33,
+        "mean_predicted_p": 0.55,
+        "calibration_error": 0.22
+      },
+      {
+        "prediction_type": "avoidance",
+        "confidence_bucket": "moderate",
+        "n": 2,
+        "hit_rate": 1.0,
+        "mean_predicted_p": 1.0,
+        "calibration_error": 0.0
+      }
+    ],
+    "retrospective_share": 0.35,
+    "is_retrospective_calibration": false
+  }
+}
