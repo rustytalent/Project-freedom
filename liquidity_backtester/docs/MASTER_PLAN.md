@@ -48,10 +48,18 @@ count.
 **Current branch-hygiene status:** SUPERSEDED 2026-06-05. The former
 Stream B chokepoint is resolved on the remote branch. Codex's four
 audit-patch batches were rebased and pushed as `52c88df`, `ce1ed40`,
-`a876351`, and `ab7d57d`; local `HEAD` and
-`origin/claude/liquidity-pool-backtester-1uskb` both point at
-`ab7d57d`. Work that was blocked only by missing audit patches is now
+`a876351`, and `ab7d57d`; subsequent work on the same branch as of
+this commit. Work that was blocked only by missing audit patches is now
 unblocked, but implementation/training acceptance criteria still apply.
+
+**Current commercial-surface status (added 2026-06-05):** the
+customer-facing website is scaffolded under `website/` (commit
+`f2f77ac`) — Next.js 15, 25 routes, real copy, mock-data calibration
+dashboard, byte-aligned brief renderer, §2 moat-test guarding against
+methodology leakage. `pnpm typecheck`/`lint`/`test`/`build` clean.
+Deploy target: Vercel + Supabase + Razorpay + Resend. Brand
+parameters (`BRAND_NAME`, domain, founder name) placeholder pending
+user decision. See `website/README.md` and Deviation D10.
 
 ---
 
@@ -729,6 +737,49 @@ ROOT — Build a market-intelligence operating system
   becoming an exact-level service. Licensed research customers still get
   exact reference zones in a non-recommendatory analytics context.
 - **Status**: RESOLVED.
+
+### Deviation D10 — Website shipped, distribution moved ahead of more engine work
+
+- **Branch from**: implicit plan that "engine first, then commercial"
+  — get every model retrain green, every detector verified, every
+  Greeks head trained, *then* build the customer-facing surface.
+- **Trigger**: 2026-06-05 (today). User had no laptop and asked the
+  remote session to scaffold the website per the Codex prompt
+  (`docs/website_codex_prompt.md`). What landed (commit `f2f77ac`):
+  a complete Next.js 15 codebase under `website/` — 25 routes (23
+  static, 2 dynamic), tipster-vocabulary guardrail ported to
+  TypeScript, §2 moat-test that grep-scans every file for forbidden
+  technique names, mock-data calibration dashboard, a real-shape
+  redacted sample brief, Razorpay/Resend/Supabase integration points
+  stubbed with bearer-token-validating engine ingest endpoint at
+  `/api/v1/briefs`.
+- **Finding**: the website is no longer a downstream output of the
+  engine — it is a usable distribution surface that exists *before*
+  any pilot conversation. A prospect can be sent
+  `https://<domain>/sample-brief` and `https://<domain>/track-record`
+  immediately. This collapses the friction of Stream H (first 3
+  pilots) substantially. Quantprove-style competitive pressure noted
+  in the prior session reinforces: commercial wedge from real
+  artifacts > more model iterations on already-calibrated heads.
+- **Plan-change**:
+  - Stream H (distribution + first 3 customers) is promoted to the
+    top of the active-priority stack alongside Stream D/F training,
+    not behind them.
+  - The website lives in `website/` of this repo for now because
+    GitHub MCP access is restricted to `rustytalent/project-freedom`.
+    When user is at laptop, recommended action is to split it into
+    its own repo for cleaner deploy isolation and to keep the
+    methodology repo private even as the website surface becomes
+    public-by-default. Until split, the `tests/moat.test.ts`
+    string-level grep guard is the moat defense.
+  - Deploy path is Vercel + Razorpay + Supabase + Resend; see
+    `website/README.md` for the keys-to-wire checklist.
+- **Downstream**: Stream H's first-3-pilots step can begin as soon as
+  the Vercel deploy is up. Brand parameters (`BRAND_NAME`, domain,
+  founder name) currently placeholder in `website/lib/brand.ts` —
+  finalising those is now a higher-priority decision than the next
+  retrain.
+- **Status**: ADOPTED, code shipped, deploy pending laptop+keys.
 
 ---
 
