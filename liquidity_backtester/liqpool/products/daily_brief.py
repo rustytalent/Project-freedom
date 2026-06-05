@@ -601,6 +601,8 @@ def generate_brief(report: Any,
                    outcome_log_writer: Optional[OutcomeLogWriter] = None,
                    index_data: Optional[Dict[str, Dict[str, Any]]] = None,
                    retrospective: bool = False,
+                   publish_to_website: bool = False,
+                   website_tier: str = "paid_intraday",
                    ) -> BriefDocument:
     """Top-level: produce a BriefDocument from a fitted report bundle.
 
@@ -625,6 +627,14 @@ def generate_brief(report: Any,
     tomorrow's Yesterday Audit can disclose whether yesterday's
     calibration came from retrospective replay rather than live history.
     Default False (live brief generation).
+
+    ``publish_to_website`` — when True AND the env vars
+    ``WEBSITE_BASE_URL`` + ``ENGINE_INGEST_TOKEN`` are both set, the
+    generated brief's JSON representation is POSTed to the website's
+    artifact endpoint at ``website_tier`` access. The push is fire-
+    and-forget: a network or auth failure logs a warning but never
+    raises, so a website outage cannot break brief generation. Default
+    False so existing test/backfill callers are unaffected.
 
     ``index_data`` schema per index::
 
@@ -838,7 +848,7 @@ def generate_brief(report: Any,
             retrospective=retrospective,
         )
 
-    return BriefDocument(
+    doc = BriefDocument(
         schema_version=SCHEMA_VERSION,
         brief_metadata=metadata,
         index_regime=index_regime_payload or {
@@ -853,6 +863,14 @@ def generate_brief(report: Any,
         confidence_notes=confidence_notes,
         yesterday_audit=yesterday_audit_payload,
     )
+
+    if publish_to_website:
+        _publish_brief_to_website(
+            doc, trading_date_ist=trading_date_ist,
+            tier=website_tier, retrospective=retrospective,
+        )
+
+    return doc
 
 
 def _log_brief_predictions(writer: OutcomeLogWriter,
@@ -988,3 +1006,64 @@ def _log_brief_predictions(writer: OutcomeLogWriter,
                 ))
 
     writer.commit()
+
+
+def _publish_brief_to_website(doc: "BriefDocument", *,
+                               trading_date_ist: str,
+                               tier: str,
+                               retrospective: bool) -> None:
+    """Fire-and-forget upload of the brief's JSON to the website.
+
+    Skipped silently when WEBSITE_BASE_URL / ENGINE_INGEST_TOKEN are
+    not configured — that's normal in dev, test, and backfill runs.
+    Any error is logged and swallowed; a website outage must NOT
+    break brief generation.
+    """
+    import json as _json
+    import logging as _logging
+    import os as _os
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    _log = _logging.getLogger(__name__)
+
+    base = _os.environ.get("WEBSITE_BASE_URL", "").strip()
+    token = _os.environ.get("ENGINE_INGEST_TOKEN", "").strip()
+    if not base or not token:
+        _log.info(
+            "skipping website publish: WEBSITE_BASE_URL or "
+            "ENGINE_INGEST_TOKEN not set")
+        return
+
+    # Lazy import so the test suite doesn't carry a hard dep on the
+    # pusher when publish_to_website is False (the default).
+    try:
+        from .artifact_pusher import push_artifact
+    except Exception as exc:                                 # pragma: no cover
+        _log.warning("artifact_pusher import failed: %s", exc)
+        return
+
+    payload = _json.dumps(doc.to_dict(), default=str, indent=2)
+    description = (
+        f"Daily Brief for IST {trading_date_ist} "
+        f"(retrospective replay)" if retrospective else
+        f"Daily Brief for IST {trading_date_ist}")
+    try:
+        with _tempfile.TemporaryDirectory() as td:
+            p = _Path(td) / f"brief-{trading_date_ist}.json"
+            p.write_text(payload, encoding="utf-8")
+            push_artifact(
+                path=p,
+                kind="daily_brief_email",  # JSON serialisation, text-oid
+                tier=tier,                  # type: ignore[arg-type]
+                trading_date_ist=trading_date_ist,
+                description=description,
+                meta={"retrospective": bool(retrospective)},
+            )
+        _log.info("published brief %s to website", trading_date_ist)
+    except Exception as exc:
+        _log.warning(
+            "website publish failed for brief %s: %s — "
+            "brief generation continuing",
+            trading_date_ist, exc,
+        )

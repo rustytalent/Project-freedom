@@ -677,5 +677,111 @@ class RetrospectiveAuditFlagTests(unittest.TestCase):
             self.assertNotIn("retrospective replay", text)
 
 
+# ---------------------------------------------------------------------------
+# Website auto-publish hook (opt-in, fire-and-forget)
+# ---------------------------------------------------------------------------
+
+class WebsitePublishHookTests(unittest.TestCase):
+    """When ``publish_to_website=True``, generate_brief uploads the brief
+    JSON to the website's artifact endpoint via push_artifact.
+
+    Pinned contracts:
+      * Default ``publish_to_website=False`` does NOT call push_artifact.
+      * Setting ``publish_to_website=True`` without env vars skips
+        silently (no network attempt, no exception).
+      * Setting ``publish_to_website=True`` with env vars triggers ONE
+        push_artifact call carrying the brief JSON as the artifact body.
+      * Network/auth failures inside push_artifact are caught and
+        swallowed — generate_brief still returns a valid BriefDocument.
+    """
+
+    def test_default_does_not_publish(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {
+            "WEBSITE_BASE_URL": "https://example.test",
+            "ENGINE_INGEST_TOKEN": "tkn",
+        }), mock.patch(
+            "liqpool.products.artifact_pusher.push_artifact"
+        ) as fake_push:
+            generate_brief(_two_asset_report(),
+                           trading_date_ist="2026-06-05")
+            fake_push.assert_not_called()
+
+    def test_opt_in_without_env_skips_silently(self) -> None:
+        import os
+        from unittest import mock
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("WEBSITE_BASE_URL", "ENGINE_INGEST_TOKEN")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch(
+                 "liqpool.products.artifact_pusher.push_artifact"
+             ) as fake_push:
+            doc = generate_brief(_two_asset_report(),
+                                  trading_date_ist="2026-06-05",
+                                  publish_to_website=True)
+            fake_push.assert_not_called()
+            self.assertEqual(doc.brief_metadata.trading_date_ist,
+                              "2026-06-05")
+
+    def test_opt_in_with_env_calls_push_artifact_once(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {
+            "WEBSITE_BASE_URL": "https://example.test",
+            "ENGINE_INGEST_TOKEN": "tkn",
+        }), mock.patch(
+            "liqpool.products.artifact_pusher.push_artifact",
+            return_value={"accepted": True, "id": "x"},
+        ) as fake_push:
+            generate_brief(_two_asset_report(),
+                            trading_date_ist="2026-06-05",
+                            publish_to_website=True)
+        self.assertEqual(fake_push.call_count, 1)
+        call = fake_push.call_args
+        self.assertEqual(call.kwargs["kind"], "daily_brief_email")
+        self.assertEqual(call.kwargs["tier"], "paid_intraday")
+        self.assertEqual(call.kwargs["trading_date_ist"], "2026-06-05")
+        self.assertIn("2026-06-05", call.kwargs["description"])
+        self.assertFalse(call.kwargs["meta"]["retrospective"])
+
+    def test_publish_failure_does_not_break_generation(self) -> None:
+        import os
+        from unittest import mock
+        from liqpool.products.artifact_pusher import ArtifactPushError
+        with mock.patch.dict(os.environ, {
+            "WEBSITE_BASE_URL": "https://example.test",
+            "ENGINE_INGEST_TOKEN": "tkn",
+        }), mock.patch(
+            "liqpool.products.artifact_pusher.push_artifact",
+            side_effect=ArtifactPushError("website down"),
+        ):
+            doc = generate_brief(_two_asset_report(),
+                                  trading_date_ist="2026-06-05",
+                                  publish_to_website=True)
+            # The brief still came back valid.
+            self.assertEqual(doc.brief_metadata.trading_date_ist,
+                              "2026-06-05")
+            self.assertEqual(doc.schema_version, "1.0")
+
+    def test_retrospective_flag_threads_through_to_meta(self) -> None:
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {
+            "WEBSITE_BASE_URL": "https://example.test",
+            "ENGINE_INGEST_TOKEN": "tkn",
+        }), mock.patch(
+            "liqpool.products.artifact_pusher.push_artifact",
+            return_value={"accepted": True, "id": "x"},
+        ) as fake_push:
+            generate_brief(_two_asset_report(),
+                            trading_date_ist="2026-06-05",
+                            publish_to_website=True,
+                            retrospective=True)
+        call = fake_push.call_args
+        self.assertTrue(call.kwargs["meta"]["retrospective"])
+        self.assertIn("retrospective", call.kwargs["description"])
+
+
 if __name__ == "__main__":
     unittest.main()
