@@ -358,6 +358,10 @@ def detect_all(df: pd.DataFrame, params: DetectionParams, tf: str = "base",
     # Lazy import so the detectors subpackage stays optional and the
     # existing features module has no circular-import surprises.
     from .detectors.sweep import liquidity_sweeps, stop_run_reclaims
+    from .detectors.imbalance import (
+        multi_bar_imbalances, premium_discount_midpoints)
+    from .detectors.volume import (
+        volume_weighted_swings, cumulative_delta_divergences)
     cands: List[LevelCandidate] = []
     cands.extend(swing_candidates(df, params, tf))
     cands.extend(equal_levels(df, params, tf))
@@ -365,9 +369,15 @@ def detect_all(df: pd.DataFrame, params: DetectionParams, tf: str = "base",
     cands.extend(order_blocks(df, params, tf))
     cands.extend(in_candle_imbalance(df, params, tf))
     cands.extend(volume_nodes(df, params, tf))
-    # Manipulation-aware sweep detectors (audit/brain-dump Stream C).
+    # Manipulation-aware sweep detectors (Stream C-1).
     cands.extend(liquidity_sweeps(df, params, tf))
     cands.extend(stop_run_reclaims(df, params, tf))
+    # Multi-bar imbalance + dealing-range equilibrium (Stream C-2).
+    cands.extend(multi_bar_imbalances(df, params, tf))
+    cands.extend(premium_discount_midpoints(df, params, tf))
+    # Volume-aware swings + cumulative-delta divergences (Stream C-3).
+    cands.extend(volume_weighted_swings(df, params, tf))
+    cands.extend(cumulative_delta_divergences(df, params, tf))
     if include_orb and tf == "base":
         cands.extend(orb_levels(df, params))
     return cands
