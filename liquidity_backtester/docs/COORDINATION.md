@@ -212,6 +212,16 @@ Strategic decisions (recorded for posterity, no commit attached):
     are rejected by sizing config, and targets must stay before the
     destination pool boundary unless `--rupee-target-allow-beyond-pool`
     is explicitly passed. VPS replay verdict still pending.
+2026-06-05 [user+codex VPS proof] — STREAM-A-PRETOUCH-RUPEE-RESULT:
+    both exact pre-touch rupee-target variants failed on
+    `core25_head_alpha_710362b`. Strict target-before-pool run:
+    decision `NOT_VIABLE`, only 51 candidates after floor gates, no
+    passing positive cell, best observed +1.126R from n=1. Beyond-pool
+    exploratory run: decision `NOT_VIABLE`, same 51 candidates, no
+    passing positive cell, best observed +1.438R from n=1; broader
+    cells remained negative (e.g. 1-3ATR all n=37 mean_R=-0.310).
+    Conclusion: cash-equity MIS rupee-floor execution is closed for
+    both post-touch and pre-touch wrappers under current data/costs.
 ```
 
 ---

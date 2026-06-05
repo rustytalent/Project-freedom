@@ -187,7 +187,7 @@ what was declined."
 | Geometry sweep (post-touch declined) | ✅ ran, declined |
 | Sweep_reclaim mode | ✅ shipped, declined |
 | **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | ✅ implemented + replayed; no accepted cells | Stream A |
-| **Pre-touch rupee-target replay** (exact target/stop/qty before journey path resolution) | ✅ implemented; VPS verdict pending | Stream A follow-up |
+| **Pre-touch rupee-target replay** (exact target/stop/qty before journey path resolution) | ✅ replayed; no accepted cells in strict or beyond-pool variants | Stream A follow-up |
 | **Scale-out execution layer** (25/50/75 partial profit, options) | new today, NOT built | Stream D |
 | **Live broker order state machine** | partial; audit P1 | Stream E |
 | **Live broker fail-closed** | ✅ pushed as `52c88df`; full state machine still open | Stream E |
