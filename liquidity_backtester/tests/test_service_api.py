@@ -41,14 +41,21 @@ def test_valid_key_returns_opaque_feed():
 
 
 def test_demo_key_uses_abstracted_geometry():
-    licensed = _client(GFEED_API_KEYS="k1:custA:licensed",
-                       GFEED_RATE_PER_MIN="100")
-    demo = _client(GFEED_API_KEYS="k1:custA:demo",
-                   GFEED_RATE_PER_MIN="100")
+    # NB: ``_client`` reloads ``service.app``, which rebinds the
+    # module-level ``API_KEYS`` dict that ``require_customer`` resolves
+    # via Python module-globals lookup. If we build both clients up
+    # front and only THEN make the requests, both clients observe the
+    # demo-tier auth registry (set by the second reload) and both
+    # responses come out abstracted. We therefore interleave: build,
+    # request, build, request.
     params = {"symbol": "X.NS", "date": "2026-05-29"}
     h = {"X-API-Key": "k1"}
+    licensed = _client(GFEED_API_KEYS="k1:custA:licensed",
+                       GFEED_RATE_PER_MIN="100")
     exact_zone = licensed.get("/v1/levels", params=params,
                               headers=h).json()["observations"][0]["level_zone"]
+    demo = _client(GFEED_API_KEYS="k1:custA:demo",
+                   GFEED_RATE_PER_MIN="100")
     demo_zone = demo.get("/v1/levels", params=params,
                          headers=h).json()["observations"][0]["level_zone"]
     assert exact_zone != demo_zone
