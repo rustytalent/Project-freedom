@@ -197,6 +197,13 @@ Strategic decisions (recorded for posterity, no commit attached):
     rupee-floor discipline (₹600 gross reward, ₹6/share minimum move,
     ₹30k-₹2L notional, stop=50% of target). Verdict still requires VPS
     replay on the saved bundle.
+2026-06-05 [user+codex VPS proof] — STREAM-A-RESULT: rupee-floor replay
+    completed on `core25_head_alpha_710362b` with 13,827 trades and
+    decision `RUPEE_TARGET_FAIL`. No accepted cell passed n>=200,
+    mean_R>0, p<0.05. Best overall mode remained negative:
+    break_mode -0.400R net despite +0.141R gross and +0.541R cost.
+    Post-touch cash-equity MIS is now closed under both ATR geometry
+    and user's rupee-floor variable sizing.
 ```
 
 ---

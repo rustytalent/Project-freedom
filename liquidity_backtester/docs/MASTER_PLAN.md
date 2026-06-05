@@ -89,7 +89,7 @@ report generation).
 
 | Stream | What | Layers | Owner | Status |
 |---|---|---|---|---|
-| **A** | Rupee-sizing experiment | L4 | Codex | implementation shipped; VPS replay pending |
+| **A** | Rupee-sizing experiment | L4 | Codex | ✅ done — failed to resurrect post-touch |
 | **B** | Audit-patch branch hygiene | L0–L5 | Codex + user | ✅ RESOLVED — pushed/reconciled at `ab7d57d` |
 | **C** | Detector batch v1 (liquidity sweep, stop-run-reclaim, etc.) | L1 | Opus | ✅ done; importance verification on next retrain |
 | **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
@@ -186,7 +186,7 @@ what was declined."
 | `min_target_to_cost_ratio` filter (3×) | ✅ |
 | Geometry sweep (post-touch declined) | ✅ ran, declined |
 | Sweep_reclaim mode | ✅ shipped, declined |
-| **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | ✅ implemented; replay pending | Stream A |
+| **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | ✅ implemented + replayed; no accepted cells | Stream A |
 | **Scale-out execution layer** (25/50/75 partial profit, options) | new today, NOT built | Stream D |
 | **Live broker order state machine** | partial; audit P1 | Stream E |
 | **Live broker fail-closed** | ✅ pushed as `52c88df`; full state machine still open | Stream E |
@@ -253,7 +253,7 @@ blocker; Stream B itself is now resolved.
 **Owner**: Codex (VPS, uses existing bundle)
 **Depends on**: nothing (uses existing 710362b bundle as-is)
 **During chokepoint?**: YES — independent of audit patches
-**Status**: implementation shipped; VPS replay pending
+**Status**: ✅ complete — failed to resurrect post-touch
 **Scope**:
 - Implement `RupeeTargetExecutionConfig` in V2 simulator:
   `required_reward_inr=600`, `min_per_share_move=6`, `max_notional=200000`,
@@ -264,9 +264,17 @@ blocker; Stream B itself is now resolved.
   sizing rule (replaces ATR-symmetric geometry).
 - Per-factor breakdown. p-values vs zero.
 
-**Acceptance**: any cell crosses zero with p < 0.05 on n ≥ 200 →
-post-touch resurrects at small-N selective scale. Otherwise → post-touch
-definitively closed under user's actual operating discipline.
+**Result**:
+- VPS replay on `core25_head_alpha_710362b`, 10 workers, 1m resolution:
+  13,827 trades.
+- Overall modes: break_mode `mean_R=-0.400` (n=401), respect_mode
+  `mean_R=-0.669` (n=10,853), reclaim_mode `mean_R=-0.973` (n=2,573).
+- No accepted cell passed `n >= 200`, `mean_R > 0`, `p < 0.05`.
+- The only positive factor/mode cell was `HVN / break_mode`, but it had
+  n=1 and is therefore diagnostic noise, not evidence.
+
+**Acceptance**: FAILED. Post-touch cash-equity MIS remains closed under
+the user's actual rupee-floor operating discipline.
 
 **ETA**: 30 min wall-clock.
 
@@ -492,7 +500,7 @@ ROOT — Build a market-intelligence operating system
 │   ├── [L2] Sub-alpha library                                    🔮 future
 │   ├── [L3] Alpha registries (5 production default; 4 sparse research) ✅ DONE
 │   ├── [L4] V2 simulator + cost realism                          ✅ DONE
-│   ├── [L4] RupeeTargetExecutionConfig                           🔄 Stream A — implementation shipped; replay pending
+│   ├── [L4] RupeeTargetExecutionConfig                           ✅ Stream A — replay failed; post-touch closed
 │   ├── [L4] Scale-out partial-profit (for options)               🔮 Stream D
 │   ├── [L4] Live broker hardening                                🔄 Stream E
 │   ├── [L5] 4 null tests + calibration + outcome log             ✅ DONE
@@ -586,9 +594,8 @@ ROOT — Build a market-intelligence operating system
   - Pivot: pre-touch journey alphas + options translation + swing.
 - **Downstream**: Stream A (rupee-sizing) became the experiment that
   could legitimately re-open this if user's actual operating discipline
-  changes the verdict.
-- **Status**: RESOLVED, pivot accepted, Stream A queued as the one
-  remaining post-touch re-test.
+  changed the verdict. It did not: the 2026-06-05 replay failed.
+- **Status**: RESOLVED, pivot accepted, Stream A completed negative.
 
 ### Deviation D3 — Brief generator had `dist_atr=1.0` placeholder
 
@@ -633,12 +640,20 @@ ROOT — Build a market-intelligence operating system
   was never simulated. Cost-realism filter ratio = 12× under user's
   sizing vs ~2× under ATR-symmetric. The whole "post-touch is dead"
   conclusion has an asterisk.
-- **Plan-change**: Stream A queued and implementation shipped.
-  `RupeeTargetExecutionConfig` added to L4 layer table. If Stream A
-  clears zero on any cell, post-touch resurrects at small-N selective scale.
-- **Downstream**: Stream A becomes highest-signal experiment in queue;
-  status of D2 ("declined") is provisional until Stream A runs.
-- **Status**: IMPLEMENTED, pending Stream A VPS replay result.
+- **Result**: 2026-06-05 VPS replay produced 13,827 trades under the
+  user's rupee-floor sizing. Overall break_mode had positive gross_R
+  (`+0.141R`) but cost_R (`+0.541R`) still pulled net_R to `-0.400R`.
+  Respect and reclaim modes were worse (`-0.669R` and `-0.973R`). No
+  cell with n >= 200 had positive mean_R at p < 0.05.
+- **Plan-change**: `RupeeTargetExecutionConfig` remains in L4 as a useful
+  execution research tool, but it does not reopen post-touch cash-equity
+  MIS. The post-touch self-trading branch is now closed under both
+  ATR-symmetric geometry and rupee-floor variable sizing.
+- **Downstream**: stop re-litigating post-touch cash equity unless the
+  instrument/cost regime changes structurally. Redirect private-alpha
+  research to pre-touch journey, options translation, swing horizons, and
+  productized Daily Brief / Outcome Log.
+- **Status**: RESOLVED, negative.
 
 ### Deviation D6 — Architecture-first thinking adopted
 
@@ -799,7 +814,7 @@ What I previously called:
 
 | Q | Question | Blocks |
 |---|---|---|
-| Q1 | SUPERSEDED: Stream A rupee-target parameters accepted and implemented. Replay result still pending. | none |
+| Q1 | SUPERSEDED: Stream A rupee-target replay completed negative; post-touch remains closed. | none |
 | Q2 | SUPERSEDED: Stream B is unblocked; Codex's rebased patch commits are pushed at `ab7d57d`. | none |
 | Q3 | For Stream H: first 3 pilot customer names + target send date for brief #1 | Stream H execution |
 | Q4 | Web-dashboard hosting decision: GitHub Pages + Vercel free tier confirmed acceptable, or other? | Stream H + future product |
@@ -821,10 +836,9 @@ What I previously called:
 - **Tipster-style "buy X at Y stop Z" outputs** — architectural; enforced
   at render time.
 - **Post-touch cash-equity MIS self-trading at current cost structure**
-  (under ATR-symmetric geometry) — empirically dead per geometry-mode
-  sweep. Re-evaluation requires (a) cost regime drops, (b) move to
-  options, OR (c) move to larger-ATR instrument class, OR (d) Stream A
-  rupee-sizing produces a positive cell.
+  — empirically dead under both ATR-symmetric geometry and Stream A
+  rupee-floor variable sizing. Re-evaluation requires (a) cost regime
+  drops, (b) move to options, OR (c) move to larger-ATR instrument class.
 - **Building a full Brain/Strategy Executor organ (T2)** before any one
   alpha clears costs — combining negative-edge signals into a more
   elaborate negative-edge system is a known failure mode.
