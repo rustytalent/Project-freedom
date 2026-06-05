@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import time
+import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -61,6 +62,41 @@ FILL_POLICIES: Dict[str, Dict[str, float | bool | str]] = {
 
 
 @dataclass(frozen=True)
+class RupeeTargetExecutionConfig:
+    """Position sizing rule that targets a minimum rupee reward per trade."""
+
+    required_reward_inr: float = 600.0
+    min_per_share_move: float = 6.0
+    max_notional: float = 200_000.0
+    min_notional: float = 30_000.0
+    stop_ratio: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.required_reward_inr <= 0:
+            raise ValueError("required_reward_inr must be positive")
+        if self.min_per_share_move <= 0:
+            raise ValueError("min_per_share_move must be positive")
+        if self.max_notional <= 0:
+            raise ValueError("max_notional must be positive")
+        if self.min_notional < 0:
+            raise ValueError("min_notional must be non-negative")
+        if self.min_notional > self.max_notional:
+            raise ValueError("min_notional cannot exceed max_notional")
+        if self.stop_ratio <= 0:
+            raise ValueError("stop_ratio must be positive")
+
+
+@dataclass(frozen=True)
+class _RupeeTargetPlan:
+    stop: float
+    target: float
+    quantity: int
+    target_move_inr: float
+    target_reward_inr: float
+    entry_notional_inr: float
+
+
+@dataclass(frozen=True)
 class ExecutionV2Config:
     fill_policy: str = "neutral"
     use_1m_resolution: bool = False
@@ -72,6 +108,7 @@ class ExecutionV2Config:
     stop_atr_mult: float = 0.5
     target_atr_mult: float = 2.0
     reclaim_target_atr_mult: float = 0.5
+    rupee_target: Optional[RupeeTargetExecutionConfig] = None
 
     def __post_init__(self) -> None:
         if self.fill_policy not in FILL_POLICIES:
@@ -86,6 +123,8 @@ class ExecutionV2Config:
             raise ValueError("target_atr_mult must be positive")
         if self.reclaim_target_atr_mult <= 0:
             raise ValueError("reclaim_target_atr_mult must be positive")
+        if self.rupee_target is not None and not isinstance(self.rupee_target, RupeeTargetExecutionConfig):
+            raise ValueError("rupee_target must be a RupeeTargetExecutionConfig")
 
 
 V2_EXTRA_EXECUTION_MODES = ("break_confirmed", "sweep_reclaim")
@@ -143,6 +182,10 @@ class ExecutionTradeV2:
     gst: float
     total_cost_bps: float
     breakeven_pct_move: float
+    sizing_mode: str = "fixed_qty"
+    entry_notional_inr: float = 0.0
+    target_move_inr: float = 0.0
+    target_reward_inr: float = 0.0
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -483,6 +526,45 @@ def _levels_for_mode(
     )
 
 
+def _rupee_target_plan(
+    entry_reference: float,
+    direction: str,
+    cfg: RupeeTargetExecutionConfig,
+) -> Optional[_RupeeTargetPlan]:
+    price = abs(float(entry_reference))
+    if not np.isfinite(price) or price <= 0:
+        return None
+
+    qty_min = max(int(math.ceil(float(cfg.min_notional) / price)), 1)
+    qty_max = int(math.floor(float(cfg.max_notional) / price))
+    if qty_max < qty_min or qty_max < 1:
+        return None
+
+    base_move = float(cfg.min_per_share_move)
+    reward_qty = int(math.ceil(float(cfg.required_reward_inr) / base_move))
+    qty = min(max(reward_qty, qty_min), qty_max)
+    if qty < 1:
+        return None
+
+    target_move = max(base_move, float(cfg.required_reward_inr) / float(qty))
+    stop_move = float(cfg.stop_ratio) * target_move
+    if direction == "UP":
+        stop = float(entry_reference - stop_move)
+        target = float(entry_reference + target_move)
+    else:
+        stop = float(entry_reference + stop_move)
+        target = float(entry_reference - target_move)
+
+    return _RupeeTargetPlan(
+        stop=stop,
+        target=target,
+        quantity=int(qty),
+        target_move_inr=float(target_move),
+        target_reward_inr=float(target_move * qty),
+        entry_notional_inr=float(price * qty),
+    )
+
+
 def _entry_for_break_confirmed(
     pool: Pool,
     df: pd.DataFrame,
@@ -651,14 +733,21 @@ def simulate_pool_trade_v2(
     if entry_reason and entry_reason != "touch":
         fill_reason = f"{entry_reason}:{fill_reason}"
 
-    stop, target = (
-        level_override
-        if level_override is not None
-        else _levels_for_mode(mode, pool, float(entry_price_ref), atr_at_entry, v2_cfg)
-    )
+    direction = _direction_for_mode(pool, mode)
+    rupee_plan: Optional[_RupeeTargetPlan] = None
+    if v2_cfg.rupee_target is not None:
+        rupee_plan = _rupee_target_plan(float(entry_price_ref), direction, v2_cfg.rupee_target)
+        if rupee_plan is None:
+            return None
+        stop, target = rupee_plan.stop, rupee_plan.target
+    else:
+        stop, target = (
+            level_override
+            if level_override is not None
+            else _levels_for_mode(mode, pool, float(entry_price_ref), atr_at_entry, v2_cfg)
+        )
     max_hold = effective_time_stop
     last_idx = min(eod_bar_idx, entry_idx + max(1, int(max_hold)))
-    direction = _direction_for_mode(pool, mode)
     direction_sign = 1 if direction == "UP" else -1
     if direction == "UP" and not (stop < entry_price_ref < target):
         return None
@@ -703,7 +792,9 @@ def simulate_pool_trade_v2(
 
     entry_price = _slipped_price(entry_price_ref, direction, "entry", entry_slip)
     exit_price = _slipped_price(exit_price_ref, direction, "exit", exit_slip)
-    if v2_cfg.notional_inr is not None:
+    if rupee_plan is not None:
+        qty = int(rupee_plan.quantity)
+    elif v2_cfg.notional_inr is not None:
         qty = max(int(float(v2_cfg.notional_inr) // max(abs(entry_price_ref), 1e-9)), 1)
     else:
         qty = max(int(v2_cfg.quantity), 1)
@@ -780,6 +871,23 @@ def simulate_pool_trade_v2(
         gst=float(costs["gst"]),
         total_cost_bps=float(total_cost / max(ref_turnover, 1e-9) * 10000.0),
         breakeven_pct_move=float(total_cost / max(abs(ref_buy) * qty, 1e-9) * 100.0),
+        sizing_mode=(
+            "rupee_target" if rupee_plan is not None
+            else "notional" if v2_cfg.notional_inr is not None
+            else "fixed_qty"
+        ),
+        entry_notional_inr=(
+            float(rupee_plan.entry_notional_inr)
+            if rupee_plan is not None else float(abs(entry_price_ref) * qty)
+        ),
+        target_move_inr=(
+            float(rupee_plan.target_move_inr)
+            if rupee_plan is not None else float(abs(target - entry_price_ref))
+        ),
+        target_reward_inr=(
+            float(rupee_plan.target_reward_inr)
+            if rupee_plan is not None else float(abs(target - entry_price_ref) * qty)
+        ),
     )
 
 

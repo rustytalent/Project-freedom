@@ -89,7 +89,7 @@ report generation).
 
 | Stream | What | Layers | Owner | Status |
 |---|---|---|---|---|
-| **A** | Rupee-sizing experiment | L4 | Codex | unblocked, queued |
+| **A** | Rupee-sizing experiment | L4 | Codex | implementation shipped; VPS replay pending |
 | **B** | Audit-patch branch hygiene | L0–L5 | Codex + user | ✅ RESOLVED — pushed/reconciled at `ab7d57d` |
 | **C** | Detector batch v1 (liquidity sweep, stop-run-reclaim, etc.) | L1 | Opus | ✅ done; importance verification on next retrain |
 | **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
@@ -186,7 +186,7 @@ what was declined."
 | `min_target_to_cost_ratio` filter (3×) | ✅ |
 | Geometry sweep (post-touch declined) | ✅ ran, declined |
 | Sweep_reclaim mode | ✅ shipped, declined |
-| **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | new today, NOT built | Stream A |
+| **`RupeeTargetExecutionConfig`** (₹600 floor, variable qty) | ✅ implemented; replay pending | Stream A |
 | **Scale-out execution layer** (25/50/75 partial profit, options) | new today, NOT built | Stream D |
 | **Live broker order state machine** | partial; audit P1 | Stream E |
 | **Live broker fail-closed** | ✅ pushed as `52c88df`; full state machine still open | Stream E |
@@ -253,11 +253,13 @@ blocker; Stream B itself is now resolved.
 **Owner**: Codex (VPS, uses existing bundle)
 **Depends on**: nothing (uses existing 710362b bundle as-is)
 **During chokepoint?**: YES — independent of audit patches
-**Status**: queued, prompt drafted, ready to dispatch
+**Status**: implementation shipped; VPS replay pending
 **Scope**:
 - Implement `RupeeTargetExecutionConfig` in V2 simulator:
   `required_reward_inr=600`, `min_per_share_move=6`, `max_notional=200000`,
   `min_notional=30000`, `stop_ratio=0.5`.
+- Add `analysis/run_stream_a_rupee_target.py` to replay respect/break/reclaim
+  modes under that rupee-floor sizing rule and emit JSON/CSV/Markdown verdicts.
 - Rerun touched-pool population on the existing bundle under this
   sizing rule (replaces ATR-symmetric geometry).
 - Per-factor breakdown. p-values vs zero.
@@ -490,7 +492,7 @@ ROOT — Build a market-intelligence operating system
 │   ├── [L2] Sub-alpha library                                    🔮 future
 │   ├── [L3] Alpha registries (5 production default; 4 sparse research) ✅ DONE
 │   ├── [L4] V2 simulator + cost realism                          ✅ DONE
-│   ├── [L4] RupeeTargetExecutionConfig                           🔄 Stream A — TODAY'S INSIGHT
+│   ├── [L4] RupeeTargetExecutionConfig                           🔄 Stream A — implementation shipped; replay pending
 │   ├── [L4] Scale-out partial-profit (for options)               🔮 Stream D
 │   ├── [L4] Live broker hardening                                🔄 Stream E
 │   ├── [L5] 4 null tests + calibration + outcome log             ✅ DONE
@@ -631,12 +633,12 @@ ROOT — Build a market-intelligence operating system
   was never simulated. Cost-realism filter ratio = 12× under user's
   sizing vs ~2× under ATR-symmetric. The whole "post-touch is dead"
   conclusion has an asterisk.
-- **Plan-change**: Stream A queued. `RupeeTargetExecutionConfig` added
-  to L4 layer table. If Stream A clears zero on any cell, post-touch
-  resurrects at small-N selective scale.
+- **Plan-change**: Stream A queued and implementation shipped.
+  `RupeeTargetExecutionConfig` added to L4 layer table. If Stream A
+  clears zero on any cell, post-touch resurrects at small-N selective scale.
 - **Downstream**: Stream A becomes highest-signal experiment in queue;
   status of D2 ("declined") is provisional until Stream A runs.
-- **Status**: OPEN, pending Stream A result.
+- **Status**: IMPLEMENTED, pending Stream A VPS replay result.
 
 ### Deviation D6 — Architecture-first thinking adopted
 
@@ -797,7 +799,7 @@ What I previously called:
 
 | Q | Question | Blocks |
 |---|---|---|
-| Q1 | Confirm Stream A `RupeeTargetExecutionConfig` parameters: ₹600 floor, ₹6/share min move, max ₹2L notional, min ₹30k, stop=50% of target. Acceptable? | Stream A |
+| Q1 | SUPERSEDED: Stream A rupee-target parameters accepted and implemented. Replay result still pending. | none |
 | Q2 | SUPERSEDED: Stream B is unblocked; Codex's rebased patch commits are pushed at `ab7d57d`. | none |
 | Q3 | For Stream H: first 3 pilot customer names + target send date for brief #1 | Stream H execution |
 | Q4 | Web-dashboard hosting decision: GitHub Pages + Vercel free tier confirmed acceptable, or other? | Stream H + future product |

@@ -190,6 +190,13 @@ Strategic decisions (recorded for posterity, no commit attached):
     `ab7d57d`; local HEAD and origin both point at `ab7d57d`. Stream B is
     resolved from branch-hygiene perspective. D/F/E are unblocked for
     implementation/training, while Stream A remains open/not built.
+2026-06-05 [codex] (this) — STREAM-A-RUPEE-TARGET: implemented
+    `RupeeTargetExecutionConfig` in V2 plus
+    `analysis/run_stream_a_rupee_target.py`. The new replay tests
+    respect/break/reclaim touched-pool modes under the user's actual
+    rupee-floor discipline (₹600 gross reward, ₹6/share minimum move,
+    ₹30k-₹2L notional, stop=50% of target). Verdict still requires VPS
+    replay on the saved bundle.
 ```
 
 ---
