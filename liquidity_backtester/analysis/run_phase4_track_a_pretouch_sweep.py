@@ -19,6 +19,7 @@ import math
 import pickle
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -33,9 +34,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from liqpool.execution_simulator_v2 import (  # noqa: E402
+    RupeeTargetExecutionConfig,
     _buy_sell_prices,
     _load_symbol_1m,
     _slipped_price,
+    build_rupee_target_plan,
     compute_slippage_bps,
     compute_zerodha_intraday_costs,
     resolve_intrabar_path,
@@ -128,6 +131,61 @@ def _quantity_for_entry(entry_price: float, *, quantity: int, notional_inr: Opti
             return max(1, int(quantity))
         return max(1, int(float(notional_inr) // price))
     return max(1, int(quantity))
+
+
+def _sizing_mode(
+    *,
+    notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig],
+) -> str:
+    if rupee_target is not None:
+        return "rupee_target"
+    return "notional" if notional_inr is not None else "fixed_qty"
+
+
+def _rupee_target_from_args(args: argparse.Namespace) -> Optional[RupeeTargetExecutionConfig]:
+    if not bool(getattr(args, "rupee_target", False)):
+        return None
+    return RupeeTargetExecutionConfig(
+        required_reward_inr=float(args.rupee_required_reward_inr),
+        min_per_share_move=float(args.rupee_min_per_share_move),
+        max_notional=float(args.rupee_max_notional),
+        min_notional=float(args.rupee_min_notional),
+        stop_ratio=float(args.rupee_stop_ratio),
+    )
+
+
+def _rupee_target_columns(cfg: RupeeTargetExecutionConfig) -> Dict[str, float]:
+    return {
+        "rupee_required_reward_inr": float(cfg.required_reward_inr),
+        "rupee_min_per_share_move": float(cfg.min_per_share_move),
+        "rupee_max_notional": float(cfg.max_notional),
+        "rupee_min_notional": float(cfg.min_notional),
+        "rupee_stop_ratio": float(cfg.stop_ratio),
+    }
+
+
+def _sizing_cache_tag(
+    *,
+    quantity: int,
+    notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig],
+    allow_beyond_pool: bool = False,
+) -> str:
+    if rupee_target is not None:
+        beyond = "beyond_pool" if allow_beyond_pool else "to_pool"
+        return (
+            "rupee"
+            f"_reward={rupee_target.required_reward_inr:g}"
+            f"_move={rupee_target.min_per_share_move:g}"
+            f"_maxnot={rupee_target.max_notional:g}"
+            f"_minnot={rupee_target.min_notional:g}"
+            f"_stop={rupee_target.stop_ratio:g}"
+            f"_{beyond}"
+        )
+    if notional_inr is not None:
+        return f"notional={float(notional_inr):g}"
+    return f"qty={int(quantity)}"
 
 
 def _load_report(path: Path):
@@ -456,6 +514,8 @@ def _simulate_one(
     exchange: str,
     quantity: int,
     notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig],
+    rupee_target_allow_beyond_pool: bool,
 ) -> Optional[Dict]:
     idx = pd.DatetimeIndex(base_df.index)
     decision_idx = int(row["bar_idx"])
@@ -483,18 +543,45 @@ def _simulate_one(
     price_low = float(row["price_low"])
     price_high = float(row["price_high"])
     pool_side = str(row["pool_side"])
+    target_move_inr = np.nan
+    target_reward_inr = np.nan
+    planned_entry_notional_inr = np.nan
     if pool_side == "above":
         direction = "UP"
         direction_sign = 1
-        target = entry_ref + geometry.target_fraction * (price_low - entry_ref)
-        stop = entry_ref - geometry.stop_atr_mult * atr_at_decision
+        if rupee_target is not None:
+            plan = build_rupee_target_plan(entry_ref, direction, rupee_target)
+            if plan is None:
+                return None
+            target = plan.target
+            stop = plan.stop
+            if not rupee_target_allow_beyond_pool and target > price_low:
+                return None
+            target_move_inr = plan.target_move_inr
+            target_reward_inr = plan.target_reward_inr
+            planned_entry_notional_inr = plan.entry_notional_inr
+        else:
+            target = entry_ref + geometry.target_fraction * (price_low - entry_ref)
+            stop = entry_ref - geometry.stop_atr_mult * atr_at_decision
         if not (stop < entry_ref < target):
             return None
     else:
         direction = "DOWN"
         direction_sign = -1
-        target = entry_ref - geometry.target_fraction * (entry_ref - price_high)
-        stop = entry_ref + geometry.stop_atr_mult * atr_at_decision
+        if rupee_target is not None:
+            plan = build_rupee_target_plan(entry_ref, direction, rupee_target)
+            if plan is None:
+                return None
+            target = plan.target
+            stop = plan.stop
+            if not rupee_target_allow_beyond_pool and target < price_high:
+                return None
+            target_move_inr = plan.target_move_inr
+            target_reward_inr = plan.target_reward_inr
+            planned_entry_notional_inr = plan.entry_notional_inr
+        else:
+            target = entry_ref - geometry.target_fraction * (entry_ref - price_high)
+            stop = entry_ref + geometry.stop_atr_mult * atr_at_decision
         if not (target < entry_ref < stop):
             return None
 
@@ -561,11 +648,20 @@ def _simulate_one(
 
     entry_exec = _slipped_price(entry_ref, direction, "entry", entry_slip)
     exit_exec = _slipped_price(exit_ref, direction, "exit", exit_slip)
-    trade_quantity = _quantity_for_entry(
-        entry_exec,
-        quantity=quantity,
-        notional_inr=notional_inr,
-    )
+    if rupee_target is not None:
+        plan = build_rupee_target_plan(entry_ref, direction, rupee_target)
+        if plan is None:
+            return None
+        trade_quantity = int(plan.quantity)
+    else:
+        trade_quantity = _quantity_for_entry(
+            entry_exec,
+            quantity=quantity,
+            notional_inr=notional_inr,
+        )
+        target_move_inr = abs(float(target - entry_ref))
+        target_reward_inr = target_move_inr * trade_quantity
+        planned_entry_notional_inr = abs(float(entry_ref)) * trade_quantity
     buy_price, sell_price = _buy_sell_prices(direction, entry_exec, exit_exec)
     costs = compute_zerodha_intraday_costs(buy_price, sell_price, trade_quantity, exchange=exchange)
     if direction == "UP":
@@ -606,8 +702,14 @@ def _simulate_one(
         "entry": float(entry_exec),
         "exit": float(exit_exec),
         "quantity": int(trade_quantity),
+        "sizing_mode": _sizing_mode(notional_inr=notional_inr, rupee_target=rupee_target),
         "entry_notional_inr": float(abs(entry_exec) * trade_quantity),
+        "planned_entry_notional_inr": float(planned_entry_notional_inr),
         "target_notional_inr": float(notional_inr) if notional_inr is not None else np.nan,
+        "target_move_inr": float(target_move_inr),
+        "target_reward_inr": float(target_reward_inr),
+        "rupee_target_allow_beyond_pool": bool(rupee_target_allow_beyond_pool),
+        **(_rupee_target_columns(rupee_target) if rupee_target is not None else {}),
         "stop": float(stop),
         "target": float(target),
         "exit_reason": exit_reason,
@@ -631,6 +733,61 @@ def _simulate_one(
     }
 
 
+def _simulate_symbol_trades(
+    *,
+    symbol: str,
+    candidates: pd.DataFrame,
+    base_df: pd.DataFrame,
+    atr_period: int,
+    raw_1m_dir: Optional[Path],
+    geometries: Sequence[Geometry],
+    data_timestamps_utc: bool,
+    session_exit_time: str,
+    use_1m_resolution: bool,
+    slippage_model: str,
+    base_slippage_bps: float,
+    exchange: str,
+    quantity: int,
+    notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig],
+    rupee_target_allow_beyond_pool: bool,
+) -> List[Tuple[Geometry, pd.DataFrame]]:
+    atr_values = atr(base_df, atr_period).bfill()
+    intrabar_1m = _load_symbol_1m(symbol, raw_1m_dir) if use_1m_resolution else None
+    frames: List[Tuple[Geometry, pd.DataFrame]] = []
+
+    for geometry in geometries:
+        rows = []
+        for _, row in candidates.iterrows():
+            trade = _simulate_one(
+                row,
+                base_df=base_df,
+                atr_values=atr_values,
+                intrabar_1m=intrabar_1m,
+                geometry=geometry,
+                data_timestamps_utc=data_timestamps_utc,
+                session_exit_time=session_exit_time,
+                use_1m_resolution=use_1m_resolution,
+                slippage_model=slippage_model,
+                base_slippage_bps=base_slippage_bps,
+                exchange=exchange,
+                quantity=quantity,
+                notional_inr=notional_inr,
+                rupee_target=rupee_target,
+                rupee_target_allow_beyond_pool=rupee_target_allow_beyond_pool,
+            )
+            if trade is not None:
+                rows.append(trade)
+        if rows:
+            frames.append((geometry, pd.DataFrame(rows)))
+    return frames
+
+
+def _simulate_symbol_trades_worker(payload: Dict) -> Tuple[str, List[Tuple[Geometry, pd.DataFrame]]]:
+    symbol = payload.pop("symbol")
+    return symbol, _simulate_symbol_trades(symbol=symbol, **payload)
+
+
 def simulate_trades(
     candidates: pd.DataFrame,
     *,
@@ -646,14 +803,19 @@ def simulate_trades(
     exchange: str,
     quantity: int,
     notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig],
+    rupee_target_allow_beyond_pool: bool,
+    workers: int = 1,
 ) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     chunk_dir = out_dir / "pretouch_trade_chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)
+    if candidates.empty:
+        empty = pd.DataFrame()
+        empty.to_parquet(out_dir / "pretouch_sweep_trades.parquet", index=False)
+        return empty
 
-    base_cache: Dict[str, pd.DataFrame] = {}
-    atr_cache: Dict[str, pd.Series] = {}
-    intrabar_cache: Dict[str, Optional[pd.DataFrame]] = {}
+    tasks: List[Dict] = []
     frames: List[pd.DataFrame] = []
 
     for symbol, sdf in candidates.groupby("symbol", sort=True):
@@ -663,40 +825,59 @@ def simulate_trades(
         base = getattr(asset, "base_df", None)
         if base is None or base.empty:
             raise ValueError(f"empty base_df for {symbol}")
-        base_cache[symbol] = base
         cfg = getattr(asset, "final_cfg", None)
         atr_period = getattr(getattr(cfg, "detect", None), "atr_period", 14)
-        atr_cache[symbol] = atr(base, atr_period).bfill()
-        intrabar_cache[symbol] = _load_symbol_1m(symbol, raw_1m_dir) if use_1m_resolution else None
+        tasks.append({
+            "symbol": symbol,
+            "candidates": sdf.copy(),
+            "base_df": base,
+            "atr_period": int(atr_period),
+            "raw_1m_dir": raw_1m_dir,
+            "geometries": tuple(geometries),
+            "data_timestamps_utc": data_timestamps_utc,
+            "session_exit_time": session_exit_time,
+            "use_1m_resolution": use_1m_resolution,
+            "slippage_model": slippage_model,
+            "base_slippage_bps": base_slippage_bps,
+            "exchange": exchange,
+            "quantity": quantity,
+            "notional_inr": notional_inr,
+            "rupee_target": rupee_target,
+            "rupee_target_allow_beyond_pool": rupee_target_allow_beyond_pool,
+        })
 
-        for geometry in geometries:
-            rows = []
-            for _, row in sdf.iterrows():
-                trade = _simulate_one(
-                    row,
-                    base_df=base_cache[symbol],
-                    atr_values=atr_cache[symbol],
-                    intrabar_1m=intrabar_cache[symbol],
-                    geometry=geometry,
-                    data_timestamps_utc=data_timestamps_utc,
-                    session_exit_time=session_exit_time,
-                    use_1m_resolution=use_1m_resolution,
-                    slippage_model=slippage_model,
-                    base_slippage_bps=base_slippage_bps,
-                    exchange=exchange,
-                    quantity=quantity,
-                    notional_inr=notional_inr,
+    sizing_tag = _sizing_cache_tag(
+        quantity=quantity,
+        notional_inr=notional_inr,
+        rupee_target=rupee_target,
+        allow_beyond_pool=rupee_target_allow_beyond_pool,
+    )
+
+    def consume(symbol: str, symbol_frames: List[Tuple[Geometry, pd.DataFrame]]) -> None:
+        for geometry, chunk in symbol_frames:
+            chunk_path = (
+                chunk_dir
+                / (
+                    f"symbol={symbol}_{sizing_tag}_tf={geometry.target_fraction:g}"
+                    f"_sl={geometry.stop_atr_mult:g}_hold={geometry.max_hold_bars}.parquet"
                 )
-                if trade is not None:
-                    rows.append(trade)
-            if rows:
-                chunk = pd.DataFrame(rows)
-                chunk_path = (
-                    chunk_dir
-                    / f"symbol={symbol}_tf={geometry.target_fraction:g}_sl={geometry.stop_atr_mult:g}_hold={geometry.max_hold_bars}.parquet"
-                )
-                chunk.to_parquet(chunk_path, index=False)
-                frames.append(chunk)
+            )
+            chunk.to_parquet(chunk_path, index=False)
+            frames.append(chunk)
+
+    worker_count = max(1, int(workers))
+    if worker_count == 1 or len(tasks) <= 1:
+        for task in tasks:
+            symbol = str(task["symbol"])
+            task_payload = dict(task)
+            task_payload.pop("symbol")
+            consume(symbol, _simulate_symbol_trades(symbol=symbol, **task_payload))
+    else:
+        with ProcessPoolExecutor(max_workers=min(worker_count, len(tasks))) as executor:
+            futures = [executor.submit(_simulate_symbol_trades_worker, dict(task)) for task in tasks]
+            for future in as_completed(futures):
+                symbol, symbol_frames = future.result()
+                consume(symbol, symbol_frames)
 
     if not frames:
         return pd.DataFrame()
@@ -705,9 +886,39 @@ def simulate_trades(
     return trades
 
 
-def _sizing_matches(trades: pd.DataFrame, *, quantity: int, notional_inr: Optional[float]) -> bool:
+def _sizing_matches(
+    trades: pd.DataFrame,
+    *,
+    quantity: int,
+    notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig] = None,
+    rupee_target_allow_beyond_pool: bool = False,
+) -> bool:
     if trades.empty:
         return True
+    mode = _sizing_mode(notional_inr=notional_inr, rupee_target=rupee_target)
+    if "sizing_mode" in trades.columns:
+        observed_mode = trades["sizing_mode"].astype(str).dropna().unique()
+        if len(observed_mode) and set(observed_mode) != {mode}:
+            return False
+    elif mode == "rupee_target":
+        return False
+
+    if rupee_target is not None:
+        required = _rupee_target_columns(rupee_target)
+        for col, expected in required.items():
+            if col not in trades.columns:
+                return False
+            observed = pd.to_numeric(trades[col], errors="coerce").dropna()
+            if observed.empty or not np.allclose(observed.to_numpy(dtype=float), expected, rtol=0.0, atol=0.01):
+                return False
+        if "rupee_target_allow_beyond_pool" not in trades.columns:
+            return False
+        observed_beyond = trades["rupee_target_allow_beyond_pool"].astype(bool).dropna().unique()
+        if len(observed_beyond) and set(observed_beyond) != {bool(rupee_target_allow_beyond_pool)}:
+            return False
+        return True
+
     if notional_inr is not None:
         if "target_notional_inr" not in trades.columns:
             return False
@@ -725,11 +936,24 @@ def _sizing_matches(trades: pd.DataFrame, *, quantity: int, notional_inr: Option
     return bool(not observed_qty.empty and (observed_qty.astype(int) == int(quantity)).all())
 
 
-def load_existing_trades(out_dir: Path, *, quantity: int, notional_inr: Optional[float]) -> Optional[pd.DataFrame]:
+def load_existing_trades(
+    out_dir: Path,
+    *,
+    quantity: int,
+    notional_inr: Optional[float],
+    rupee_target: Optional[RupeeTargetExecutionConfig] = None,
+    rupee_target_allow_beyond_pool: bool = False,
+) -> Optional[pd.DataFrame]:
     trade_path = out_dir / "pretouch_sweep_trades.parquet"
     if trade_path.exists():
         trades = pd.read_parquet(trade_path)
-        return trades if _sizing_matches(trades, quantity=quantity, notional_inr=notional_inr) else None
+        return trades if _sizing_matches(
+            trades,
+            quantity=quantity,
+            notional_inr=notional_inr,
+            rupee_target=rupee_target,
+            rupee_target_allow_beyond_pool=rupee_target_allow_beyond_pool,
+        ) else None
     chunk_dir = out_dir / "pretouch_trade_chunks"
     if not chunk_dir.exists():
         return None
@@ -737,7 +961,13 @@ def load_existing_trades(out_dir: Path, *, quantity: int, notional_inr: Optional
     if not paths:
         return None
     trades = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
-    if not _sizing_matches(trades, quantity=quantity, notional_inr=notional_inr):
+    if not _sizing_matches(
+        trades,
+        quantity=quantity,
+        notional_inr=notional_inr,
+        rupee_target=rupee_target,
+        rupee_target_allow_beyond_pool=rupee_target_allow_beyond_pool,
+    ):
         return None
     trades.to_parquet(trade_path, index=False)
     return trades
@@ -831,6 +1061,9 @@ def _summarize_subset(
         "temporal_gap_r": temporal_gap,
         "temporal_stable": bool(np.isfinite(temporal_gap) and temporal_gap < 0.15),
         "avg_bars_held": float(cdf["bars_held"].mean()) if len(cdf) else np.nan,
+        "avg_entry_notional_inr": float(cdf["entry_notional_inr"].mean()) if len(cdf) else np.nan,
+        "avg_target_move_inr": float(cdf["target_move_inr"].mean()) if "target_move_inr" in cdf.columns and len(cdf) else np.nan,
+        "avg_target_reward_inr": float(cdf["target_reward_inr"].mean()) if "target_reward_inr" in cdf.columns and len(cdf) else np.nan,
         "target_exit_rate": float((cdf["exit_reason"] == "target").mean()) if len(cdf) else np.nan,
         "stop_exit_rate": float((cdf["exit_reason"] == "stop").mean()) if len(cdf) else np.nan,
         "time_exit_rate": float((cdf["exit_reason"] == "time_exit").mean()) if len(cdf) else np.nan,
@@ -912,6 +1145,7 @@ def _rows_for_report(df: pd.DataFrame, limit: int) -> List[Dict]:
             "mean_R": fnum(row["mean_r"], 3),
             "PF": _fmt_pf(row["profit_factor"]),
             "DSR": pct(row["dsr"], 1),
+            "avg_reward": f"Rs {row['avg_target_reward_inr']:,.0f}" if pd.notna(row.get("avg_target_reward_inr")) else "n/a",
             "long/short": f"{int(row['long_n'])}/{int(row['short_n'])}",
             "sectors": int(row["sectors_with_min_trades"]),
             "stable": str(bool(row["temporal_stable"])),
@@ -966,12 +1200,29 @@ def build_report(
     args: argparse.Namespace,
 ) -> str:
     passing = summary[summary["passes_min_filters"]].copy() if not summary.empty else pd.DataFrame()
-    by_mean = passing.sort_values("mean_r", ascending=False) if not passing.empty else summary.sort_values("mean_r", ascending=False)
-    by_dsr = passing.sort_values("dsr", ascending=False) if not passing.empty else summary.sort_values("dsr", ascending=False)
+    if not passing.empty:
+        by_mean = passing.sort_values("mean_r", ascending=False)
+        by_dsr = passing.sort_values("dsr", ascending=False)
+    elif not summary.empty:
+        by_mean = summary.sort_values("mean_r", ascending=False)
+        by_dsr = summary.sort_values("dsr", ascending=False)
+    else:
+        by_mean = by_dsr = pd.DataFrame()
     sizing = (
-        f"target_notional_inr={float(args.notional_inr):g}"
-        if _target_notional(args.notional_inr) is not None else
-        f"fixed quantity={int(args.quantity)}"
+        (
+            "rupee_target"
+            f"(reward>={float(args.rupee_required_reward_inr):g},"
+            f" move>={float(args.rupee_min_per_share_move):g},"
+            f" max_notional={float(args.rupee_max_notional):g},"
+            f" stop_ratio={float(args.rupee_stop_ratio):g},"
+            f" beyond_pool={bool(args.rupee_target_allow_beyond_pool)})"
+        )
+        if bool(getattr(args, "rupee_target", False)) else
+        (
+            f"target_notional_inr={float(args.notional_inr):g}"
+            if _target_notional(args.notional_inr) is not None else
+            f"fixed quantity={int(args.quantity)}"
+        )
     )
     lines = [
         "# Phase 4 Track A Pre-Touch Directional Sweep",
@@ -993,6 +1244,7 @@ def build_report(
         f"- Feature store: `{args.feature_store}`",
         f"- Raw 1m dir: `{args.raw_1m_dir or ''}`",
         f"- Sizing: `{sizing}`",
+        f"- Replay workers: `{int(args.workers)}`",
         f"- Candidate rows after floor gates: `{meta.get('candidate_rows', 0):,}`",
         f"- Joined proximity rows: `{meta.get('joined_rows', 0):,}`",
         f"- Dropped rows without direction labels: `{meta.get('dropped_no_direction', 0):,}`",
@@ -1001,14 +1253,14 @@ def build_report(
         "",
         markdown_table(
             _rows_for_report(by_mean, 20),
-            ["gate", "geom", "Q", "n", "win", "mean_R", "PF", "DSR", "long/short", "sectors", "stable"],
+            ["gate", "geom", "Q", "n", "win", "mean_R", "PF", "DSR", "avg_reward", "long/short", "sectors", "stable"],
         ),
         "",
         "## Top Cells By DSR",
         "",
         markdown_table(
             _rows_for_report(by_dsr, 10),
-            ["gate", "geom", "Q", "n", "win", "mean_R", "PF", "DSR", "long/short", "sectors", "stable"],
+            ["gate", "geom", "Q", "n", "win", "mean_R", "PF", "DSR", "avg_reward", "long/short", "sectors", "stable"],
         ),
         "",
         "## Interpretation",
@@ -1016,6 +1268,8 @@ def build_report(
         "- Q is applied post-hoc within each cell, not as a separate sweep dimension.",
         "- Cells must clear minimum total trades, long/short trades, and sector breadth before they count as passing.",
         "- `mean_R_cost_1_25x` and `mean_R_cost_1_50x` are included in the CSV for slippage/cost stress checks.",
+        "- In rupee-target mode, target/stop/quantity are simulated directly before path resolution; this is not a post-hoc filter.",
+        "- By default, rupee targets must be reached before the destination pool boundary; use `--rupee-target-allow-beyond-pool` only for exploratory beyond-pool tests.",
         "- This report is research-only and does not change live/predict gates.",
         "",
     ]
@@ -1049,6 +1303,17 @@ def main() -> None:
         default=100_000.0,
         help="Target per-trade notional. Set 0 to use fixed --quantity instead.",
     )
+    parser.add_argument("--rupee-target", action="store_true", help="Use exact rupee-reward target/stop/quantity sizing.")
+    parser.add_argument("--rupee-required-reward-inr", type=float, default=600.0)
+    parser.add_argument("--rupee-min-per-share-move", type=float, default=6.0)
+    parser.add_argument("--rupee-max-notional", type=float, default=200_000.0)
+    parser.add_argument("--rupee-min-notional", type=float, default=30_000.0)
+    parser.add_argument("--rupee-stop-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--rupee-target-allow-beyond-pool",
+        action="store_true",
+        help="Allow rupee targets beyond the destination pool boundary. Default keeps the target inside the journey.",
+    )
     parser.add_argument("--dsr-trials", type=int, default=550)
     parser.add_argument("--min-trades", type=int, default=200)
     parser.add_argument("--min-direction-trades", type=int, default=50)
@@ -1057,6 +1322,7 @@ def main() -> None:
     parser.add_argument("--max-files", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=None)
     parser.add_argument("--max-cells", type=int, default=None, help="Smoke helper: only keep this many gate/geometry pairs before Q cohorts.")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel worker processes for symbol-level trade replay.")
     parser.add_argument("--reuse-trades", action="store_true", help="Reuse existing trade parquet/chunks in --out-dir and only rebuild summaries.")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--summary-out", default=str(DEFAULT_CSV))
@@ -1070,6 +1336,9 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     data_timestamps_utc = not bool(args.data_timestamps_local_ist)
     notional_inr = _target_notional(args.notional_inr)
+    rupee_target = _rupee_target_from_args(args)
+    if rupee_target is not None:
+        notional_inr = None
 
     report = _load_report(model_report)
     min_touch = _parse_csv_floats(args.min_p_touch)
@@ -1113,7 +1382,14 @@ def main() -> None:
         )
 
     trades = (
-        load_existing_trades(out_dir, quantity=args.quantity, notional_inr=notional_inr)
+        load_existing_trades(
+            out_dir,
+            quantity=args.quantity,
+            notional_inr=notional_inr,
+            rupee_target=rupee_target,
+            rupee_target_allow_beyond_pool=bool(args.rupee_target_allow_beyond_pool),
+            workers=int(args.workers),
+        )
         if args.reuse_trades else None
     )
     if trades is None:
@@ -1131,6 +1407,8 @@ def main() -> None:
             exchange=args.exchange,
             quantity=args.quantity,
             notional_inr=notional_inr,
+            rupee_target=rupee_target,
+            rupee_target_allow_beyond_pool=bool(args.rupee_target_allow_beyond_pool),
         )
 
     summary = summarize_cells(

@@ -204,6 +204,14 @@ Strategic decisions (recorded for posterity, no commit attached):
     break_mode -0.400R net despite +0.141R gross and +0.541R cost.
     Post-touch cash-equity MIS is now closed under both ATR geometry
     and user's rupee-floor variable sizing.
+2026-06-05 [codex] (this) — STREAM-A-PRETOUCH-RUPEE-SIM: exact
+    rupee-target sizing is now wired into
+    `analysis/run_phase4_track_a_pretouch_sweep.py`. This is a real
+    pre-touch replay path, not the earlier post-hoc diagnostic filter:
+    target/stop/quantity are built before path resolution, stale caches
+    are rejected by sizing config, and targets must stay before the
+    destination pool boundary unless `--rupee-target-allow-beyond-pool`
+    is explicitly passed. VPS replay verdict still pending.
 ```
 
 ---

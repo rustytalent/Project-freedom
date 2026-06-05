@@ -87,7 +87,9 @@ class RupeeTargetExecutionConfig:
 
 
 @dataclass(frozen=True)
-class _RupeeTargetPlan:
+class RupeeTargetPlan:
+    """Concrete target/stop/quantity plan for rupee-reward sizing."""
+
     stop: float
     target: float
     quantity: int
@@ -526,11 +528,17 @@ def _levels_for_mode(
     )
 
 
-def _rupee_target_plan(
+def build_rupee_target_plan(
     entry_reference: float,
     direction: str,
     cfg: RupeeTargetExecutionConfig,
-) -> Optional[_RupeeTargetPlan]:
+) -> Optional[RupeeTargetPlan]:
+    """Build an exact rupee-target plan from an entry reference.
+
+    The plan first tries to achieve ``required_reward_inr`` using at least
+    ``min_per_share_move``.  If max notional caps the quantity, it widens the
+    per-share target so the requested rupee reward is still reachable.
+    """
     price = abs(float(entry_reference))
     if not np.isfinite(price) or price <= 0:
         return None
@@ -555,7 +563,7 @@ def _rupee_target_plan(
         stop = float(entry_reference + stop_move)
         target = float(entry_reference - target_move)
 
-    return _RupeeTargetPlan(
+    return RupeeTargetPlan(
         stop=stop,
         target=target,
         quantity=int(qty),
@@ -563,6 +571,14 @@ def _rupee_target_plan(
         target_reward_inr=float(target_move * qty),
         entry_notional_inr=float(price * qty),
     )
+
+
+def _rupee_target_plan(
+    entry_reference: float,
+    direction: str,
+    cfg: RupeeTargetExecutionConfig,
+) -> Optional[RupeeTargetPlan]:
+    return build_rupee_target_plan(entry_reference, direction, cfg)
 
 
 def _entry_for_break_confirmed(
