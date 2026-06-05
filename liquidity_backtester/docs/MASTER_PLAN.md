@@ -311,8 +311,9 @@ commits from both agents, no conflicts.
 needed to ship them; importance verification happens on the next retrain
 after Stream B clears)
 **During chokepoint?**: YES — fully independent
-**Status**: design-ready, code unblocked, can ship now
-**Scope (commit 1)**:
+**Status**: all 3 commits ✅ DONE; feature-importance verification
+deferred to next post-B retrain
+**Scope (commit 1)** ✅ `5d01d81`:
 - Liquidity-sweep detector (high pierced + reclaimed within K bars).
 - Stop-run + reclaim pattern (the SMC manipulation signature).
 - One file: `liqpool/detectors/sweep.py`.
@@ -320,16 +321,18 @@ after Stream B clears)
 - Tests pin: detection on a known pattern, non-detection on noise,
   causality under truncation.
 
-**Scope (commit 2)**:
-- Multi-bar imbalance + premium/discount midpoint.
+**Scope (commit 2)** ✅ `ee92848`:
+- Multi-bar imbalance + premium/discount midpoint
+  (`liqpool/detectors/imbalance.py`).
 
-**Scope (commit 3)**:
-- Volume-weighted swing + cumulative-delta-proxy.
+**Scope (commit 3)** ✅ `ee92848`:
+- Volume-weighted swing + cumulative-delta-proxy
+  (`liqpool/detectors/volume.py`).
 
 **Acceptance per commit**: tests pass, lint clean, feature-importance
 verification deferred to next post-B retrain.
 
-**ETA**: 1 commit per session, 3 commits total.
+**ETA**: 1 commit per session, 3 commits total. — DONE.
 
 ---
 
@@ -341,7 +344,8 @@ verification deferred to next post-B retrain.
 - Warehouse Greeks parquet (✅ have it)
 - Stream B (for training the new head against V2 labels)
 **During chokepoint?**: design portions YES, training portions NO
-**Status**: undesigned today
+**Status**: design ✅ DONE (`docs/options_expected_return_model_spec.md`);
+training awaits Stream B
 **Scope (this session, design only)**:
 - `OptionsExpectedReturnModel` specification: inputs (proximity h=12/36/60,
   direction, path_efficiency, vol_regime_zscore_20d, distance-to-strike,
@@ -392,7 +396,8 @@ intent; broker read failures fail-closed; orphan-order tests pass.
 **Owner**: Opus (design); Codex (training, post-B)
 **Depends on**: Stream B (for the V2-notional retrain)
 **During chokepoint?**: design portions YES, training portions NO
-**Status**: undesigned today
+**Status**: design ✅ DONE (`docs/swing_vertical_spec.md`); training
+awaits Stream B
 **Scope (this session, design only)**:
 - Swing horizons (5d, 10d, 20d) added to proximity model config.
 - Swing brief schema (different from intraday: longer T, no MIS cap,
@@ -421,7 +426,7 @@ likely product line to land profitable without further alpha changes.
 **Owner**: Opus
 **Depends on**: nothing (small additive change)
 **During chokepoint?**: YES — independent
-**Status**: ruling made (§4), not implemented
+**Status**: ✅ DONE (`8c4f210`)
 **Scope**:
 - `PredictionRecord.is_retrospective: bool = False` field.
 - Backfill script sets `True` on retrospective replays.
@@ -430,9 +435,16 @@ likely product line to land profitable without further alpha changes.
   retrospective.
 - Test pins the flag end-to-end.
 
-**Acceptance**: 1 commit, test passing.
+**Acceptance**: 1 commit, test passing. — DONE.
 
-**ETA**: 30 min in a fresh session.
+**ETA**: 30 min in a fresh session. — DONE.
+
+**Side effect**: the renderer's previous unconditional pending-stub
+rendering of YESTERDAY AUDIT is replaced with a real per-bucket
+hit-rate table (still pending-stubs when no joined log exists). Means
+the section will start showing real numbers as soon as the backfill
+writer is run against a real bundle, with the retrospective disclosure
+line until live outcomes accumulate.
 
 ---
 
