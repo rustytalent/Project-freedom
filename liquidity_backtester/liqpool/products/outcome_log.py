@@ -78,6 +78,16 @@ class PredictionRecord:
     regime_tags_at_prediction: Dict[str, Any]
     logged_for_audit: bool = True
     schema_version: str = SCHEMA_VERSION
+    # Stream G — retrospective audit flag.
+    # ``False`` => prediction was logged in real time by the live brief
+    #             generator (the canonical case).
+    # ``True``  => prediction was synthesised by ``backfill_outcome_log``
+    #             from a historical bundle. The Yesterday Audit must
+    #             disclose this to the customer, because a retrospective
+    #             calibration window can encode hindsight (the bundle was
+    #             fit on data that overlaps the replayed dates) and is
+    #             therefore weaker evidence than live-collected outcomes.
+    is_retrospective: bool = False
 
 
 @dataclass

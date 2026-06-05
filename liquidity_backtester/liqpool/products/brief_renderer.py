@@ -139,6 +139,52 @@ def _render_pending_stub(section_name: str, stub: dict) -> str:
     return f"{section_name.upper()} — pending: {reason}."
 
 
+def _render_yesterday_audit(audit: dict) -> str:
+    """Render the YESTERDAY AUDIT section.
+
+    Two render paths:
+      * Pending stub (when no joined history exists) — same shape as
+        ``_render_pending_stub`` so v0 customers see the contract.
+      * Populated audit — prints predictions_made / resolved / per-bucket
+        hit rates. When ``is_retrospective_calibration`` is True (Stream G),
+        prefixes the section with a disclosure line so the reader knows
+        the calibration was estimated by replay over historical bundles
+        rather than collected from live brief calls.
+    """
+    if not isinstance(audit, dict):
+        return "YESTERDAY AUDIT — pending: data unavailable."
+    if audit.get("_status") == "pending":
+        return _render_pending_stub("Yesterday audit", audit)
+    lines: List[str] = ["YESTERDAY AUDIT —"]
+    if audit.get("is_retrospective_calibration"):
+        share = float(audit.get("retrospective_share", 0.0))
+        lines.append(
+            f"  Note: calibration estimated on retrospective replay "
+            f"({share:.0%} of resolved predictions were backfilled from "
+            f"historical bundles, not collected live). Treat the numbers "
+            f"below as a directional read, not a live track record.")
+    yb = audit.get("yesterday_brief_id", "unknown")
+    made = int(audit.get("predictions_made", 0))
+    resolved = int(audit.get("predictions_resolved", 0))
+    lines.append(f"  brief={yb} predictions_made={made} resolved={resolved}")
+    buckets = audit.get("hit_rate_by_confidence_bucket") or []
+    if not buckets:
+        lines.append("  no per-bucket calibration available (zero resolved).")
+    else:
+        lines.append("  hit rate by confidence bucket:")
+        for row in buckets:
+            ptype = row.get("prediction_type", "?")
+            bucket = row.get("confidence_bucket", "?")
+            n = int(row.get("n", 0))
+            hr = float(row.get("hit_rate", 0.0))
+            mp = float(row.get("mean_predicted_p", 0.0))
+            ce = float(row.get("calibration_error", 0.0))
+            lines.append(
+                f"    - {ptype} / {bucket}: n={n}, hit_rate={hr:.0%}, "
+                f"mean_p={mp:.0%}, calibration_error={ce:+.2f}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Top-level renderer
 # ---------------------------------------------------------------------------
@@ -168,7 +214,7 @@ def render_email(brief: BriefDocument) -> str:
     parts.append(_render_watchlist(brief.top_watchlist))
     parts.append(_render_avoid_list(brief.avoid_list))
     parts.append(_render_confidence(brief.confidence_notes))
-    parts.append(_render_pending_stub("Yesterday audit", brief.yesterday_audit))
+    parts.append(_render_yesterday_audit(brief.yesterday_audit))
 
     parts.append(
         "—\n"

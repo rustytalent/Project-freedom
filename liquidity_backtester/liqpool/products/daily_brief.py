@@ -600,6 +600,7 @@ def generate_brief(report: Any,
                    feature_version: str = "42_features_v3",
                    outcome_log_writer: Optional[OutcomeLogWriter] = None,
                    index_data: Optional[Dict[str, Dict[str, Any]]] = None,
+                   retrospective: bool = False,
                    ) -> BriefDocument:
     """Top-level: produce a BriefDocument from a fitted report bundle.
 
@@ -617,6 +618,13 @@ def generate_brief(report: Any,
     makes is logged via the writer with a deterministic prediction_id
     for later resolution joining. When omitted, predictions are not
     logged (used for synthetic / test runs).
+
+    ``retrospective`` — when True, every PredictionRecord written via
+    the writer is tagged ``is_retrospective=True``. The backfill driver
+    (``analysis/backfill_outcome_log.py``) sets this to True so that
+    tomorrow's Yesterday Audit can disclose whether yesterday's
+    calibration came from retrospective replay rather than live history.
+    Default False (live brief generation).
 
     ``index_data`` schema per index::
 
@@ -784,6 +792,14 @@ def generate_brief(report: Any,
             else:
                 from .outcome_log import calibration_by_bucket
                 cal = calibration_by_bucket(joined)
+                # Stream G — retrospective-share disclosure. If the
+                # joined frame predates the flag, treat NaN as live
+                # (False) so old partitions render the same as before.
+                if "is_retrospective" in joined.columns:
+                    retro_series = joined["is_retrospective"].fillna(False)
+                    retro_share = float(retro_series.astype(bool).mean())
+                else:
+                    retro_share = 0.0
                 yesterday_audit_payload = {
                     "yesterday_brief_id": (
                         joined["brief_id"].iloc[0]
@@ -794,6 +810,8 @@ def generate_brief(report: Any,
                                                   else 0),
                     "hit_rate_by_confidence_bucket": cal.to_dict(orient="records")
                         if not cal.empty else [],
+                    "retrospective_share": retro_share,
+                    "is_retrospective_calibration": retro_share > 0.5,
                 }
         except Exception as exc:
             yesterday_audit_payload = {
@@ -817,6 +835,7 @@ def generate_brief(report: Any,
             options_suitability=options_suitability_payload,
             model_bundle_version=model_bundle_version,
             feature_version=feature_version,
+            retrospective=retrospective,
         )
 
     return BriefDocument(
@@ -843,7 +862,8 @@ def _log_brief_predictions(writer: OutcomeLogWriter,
                             avoid_list: List[AvoidEntry],
                             options_suitability: Dict[str, Any],
                             model_bundle_version: str,
-                            feature_version: str) -> None:
+                            feature_version: str,
+                            retrospective: bool = False) -> None:
     """Emit one PredictionRecord per call the brief makes, then commit.
 
     Predictions get logged for three call types:
@@ -860,6 +880,7 @@ def _log_brief_predictions(writer: OutcomeLogWriter,
         trading_date_ist=metadata.trading_date_ist,
         model_bundle_version=model_bundle_version,
         feature_version=feature_version,
+        is_retrospective=bool(retrospective),
     )
 
     # 1) Proximity predictions from the watchlist.

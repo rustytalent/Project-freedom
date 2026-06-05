@@ -517,5 +517,165 @@ class BriefWithOutcomeLogTests(unittest.TestCase):
             self.assertEqual(brief.yesterday_audit["_status"], "pending")
 
 
+# ---------------------------------------------------------------------------
+# Stream G — retrospective-audit flag end-to-end
+# ---------------------------------------------------------------------------
+
+class RetrospectiveAuditFlagTests(unittest.TestCase):
+    """End-to-end pin for Stream G:
+
+      * ``retrospective=True`` propagates from ``generate_brief`` through
+        ``_log_brief_predictions`` onto every PredictionRecord written.
+      * Default ``retrospective=False`` keeps the live path untouched.
+      * The Yesterday Audit payload exposes ``retrospective_share`` and
+        ``is_retrospective_calibration`` when the previous-day predictions
+        were retrospective.
+      * The renderer surfaces a customer-readable disclosure line when
+        ``is_retrospective_calibration`` is True.
+    """
+
+    def _writer_with_retrospective_yesterday(self, tmp: str
+                                              ) -> "OutcomeLogWriter":
+        """Write a yesterday-shaped batch of retrospective predictions
+        + resolutions so today's brief can read them via ``read_joined``.
+        """
+        from liqpool.products.outcome_log import (
+            OutcomeLogWriter, ResolutionRecord)
+        writer = OutcomeLogWriter(root=tmp)
+        # Generate yesterday's brief in retrospective mode.
+        report = _two_asset_report(p_touch=0.40)
+        generate_brief(
+            report,
+            trading_date_ist="2026-06-02",
+            outcome_log_writer=writer,
+            retrospective=True,
+        )
+        # Resolve each prediction (outcome doesn't matter for this test;
+        # we just need resolutions so the calibration table is non-empty).
+        preds = writer.read_predictions("2026-06-02")
+        for _, row in preds.iterrows():
+            writer.write_resolution(ResolutionRecord(
+                prediction_id=row["prediction_id"],
+                resolved_at_utc="2026-06-02T10:30:00Z",
+                resolution_method="level_touched",
+                outcome_boolean=True, outcome_continuous=None,
+                resolution_details={"touched_at_bar_offset": 12},
+                had_data_gap=False, resolution_quality="clean",
+                trading_date_ist="2026-06-02",
+            ))
+        writer.commit()
+        return writer
+
+    def test_retrospective_flag_propagates_to_prediction_records(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report(p_touch=0.40)
+            generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+                retrospective=True,
+            )
+            preds = writer.read_predictions("2026-06-03")
+            self.assertGreater(len(preds), 0)
+            self.assertTrue(bool(preds["is_retrospective"].all()),
+                "every logged prediction must carry is_retrospective=True "
+                "when generate_brief is called with retrospective=True")
+
+    def test_live_default_keeps_is_retrospective_false(self) -> None:
+        from liqpool.products.outcome_log import OutcomeLogWriter
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report(p_touch=0.40)
+            generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            preds = writer.read_predictions("2026-06-03")
+            self.assertGreater(len(preds), 0)
+            self.assertFalse(bool(preds["is_retrospective"].any()),
+                "default live brief generation must not tag predictions "
+                "as retrospective")
+
+    def test_yesterday_audit_exposes_retrospective_share(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = self._writer_with_retrospective_yesterday(tmp)
+            # Today's brief reads yesterday's joined log.
+            report = _two_asset_report(p_touch=0.40)
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            audit = brief.yesterday_audit
+            # Populated, not pending.
+            self.assertNotEqual(audit.get("_status"), "pending",
+                f"audit should be populated when yesterday's log exists; "
+                f"got {audit}")
+            self.assertAlmostEqual(audit["retrospective_share"], 1.0,
+                                    places=4)
+            self.assertTrue(audit["is_retrospective_calibration"])
+            self.assertGreater(audit["predictions_made"], 0)
+
+    def test_renderer_surfaces_retrospective_disclosure(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = self._writer_with_retrospective_yesterday(tmp)
+            report = _two_asset_report(p_touch=0.40)
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            text = render_email(brief)
+            self.assertIn("YESTERDAY AUDIT", text)
+            self.assertIn("retrospective replay", text,
+                "renderer must disclose retrospective calibration to "
+                "the customer when >50% of yesterday's predictions were "
+                "backfilled")
+
+    def test_renderer_omits_disclosure_for_live_audit(self) -> None:
+        """If yesterday's predictions were live (is_retrospective=False),
+        the renderer must NOT print the retrospective disclosure line."""
+        from liqpool.products.outcome_log import (
+            OutcomeLogWriter, ResolutionRecord)
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = OutcomeLogWriter(root=tmp)
+            report = _two_asset_report(p_touch=0.40)
+            # Live yesterday — retrospective stays False.
+            generate_brief(
+                report,
+                trading_date_ist="2026-06-02",
+                outcome_log_writer=writer,
+            )
+            preds = writer.read_predictions("2026-06-02")
+            for _, row in preds.iterrows():
+                writer.write_resolution(ResolutionRecord(
+                    prediction_id=row["prediction_id"],
+                    resolved_at_utc="2026-06-02T10:30:00Z",
+                    resolution_method="level_touched",
+                    outcome_boolean=True, outcome_continuous=None,
+                    resolution_details={"touched_at_bar_offset": 12},
+                    had_data_gap=False, resolution_quality="clean",
+                    trading_date_ist="2026-06-02",
+                ))
+            writer.commit()
+            brief = generate_brief(
+                report,
+                trading_date_ist="2026-06-03",
+                outcome_log_writer=writer,
+            )
+            self.assertFalse(
+                brief.yesterday_audit["is_retrospective_calibration"])
+            text = render_email(brief)
+            self.assertNotIn("retrospective replay", text)
+
+
 if __name__ == "__main__":
     unittest.main()

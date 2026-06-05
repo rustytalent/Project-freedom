@@ -273,6 +273,7 @@ def run_backfill(bundle_path: Path,
             trading_date_ist=trading_date,
             model_bundle_version=str(bundle_path.stem),
             outcome_log_writer=writer,
+            retrospective=True,
         )
         # Read back the just-written predictions to drive resolution.
         preds = writer.read_predictions(trading_date)
