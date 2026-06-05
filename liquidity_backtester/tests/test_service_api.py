@@ -40,6 +40,20 @@ def test_valid_key_returns_opaque_feed():
         assert isinstance(score, int) and 0 <= score <= 100
 
 
+def test_demo_key_uses_abstracted_geometry():
+    licensed = _client(GFEED_API_KEYS="k1:custA:licensed",
+                       GFEED_RATE_PER_MIN="100")
+    demo = _client(GFEED_API_KEYS="k1:custA:demo",
+                   GFEED_RATE_PER_MIN="100")
+    params = {"symbol": "X.NS", "date": "2026-05-29"}
+    h = {"X-API-Key": "k1"}
+    exact_zone = licensed.get("/v1/levels", params=params,
+                              headers=h).json()["observations"][0]["level_zone"]
+    demo_zone = demo.get("/v1/levels", params=params,
+                         headers=h).json()["observations"][0]["level_zone"]
+    assert exact_zone != demo_zone
+
+
 def test_rate_limit():
     client = _client(GFEED_API_KEYS="k1:custA", GFEED_RATE_PER_MIN="2")
     h = {"X-API-Key": "k1"}

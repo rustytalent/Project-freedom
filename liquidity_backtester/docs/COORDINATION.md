@@ -25,6 +25,16 @@ Append-only log of decisions. One line each.
 Format: `YYYY-MM-DD [agent] commit_sha — decision`
 
 ```
+2026-06-05 [codex] (this) —
+                            PUBLIC-FEED-TIER-GATE: implement the
+                            2026-06-04 methodology ruling that exact
+                            zones are reserved for licensed/paid
+                            research customers. Demo/public/free/
+                            marketing/sample tiers now receive
+                            deterministic customer-watermarked
+                            abstract zones through the same schema;
+                            data product spec and scoring/API tests
+                            updated.
 2026-06-03 [opus]  bc3eb84 — EXPIRY-CTX: 4 calendar-event features added
 2026-06-03 [opus]  c709635 — AVWAP-FRVP: 9 volume-weighted features added
 2026-06-03 [opus]  eb21b15 — MTF-CTX: 5 today-relative session features added

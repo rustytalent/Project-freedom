@@ -29,6 +29,20 @@ def test_handle_request_envelope_and_records():
         assert set(rec.keys()) == set(PUBLIC_KEYS)
 
 
+def test_demo_tier_fuzzes_served_level_zones():
+    licensed = handle_levels_request(StubScorer(n_above=1, n_below=0),
+                                     symbol="HDFCBANK.NS",
+                                     date="2026-05-29",
+                                     customer_id="cust-a",
+                                     customer_tier="licensed")
+    demo = handle_levels_request(StubScorer(n_above=1, n_below=0),
+                                 symbol="HDFCBANK.NS",
+                                 date="2026-05-29",
+                                 customer_id="cust-a",
+                                 customer_tier="demo")
+    assert licensed["observations"][0]["level_zone"] != demo["observations"][0]["level_zone"]
+
+
 def test_handle_request_requires_symbol_and_customer():
     with pytest.raises(ValueError):
         handle_levels_request(StubScorer(), symbol="", date="d", customer_id="c")

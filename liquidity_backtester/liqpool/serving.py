@@ -41,7 +41,8 @@ class Scorer(Protocol):
 
 def handle_levels_request(scorer: Scorer, *, symbol: str, date: str,
                           customer_id: str, universe: str | None = None,
-                          weights: BlendWeights = BlendWeights()) -> dict:
+                          weights: BlendWeights = BlendWeights(),
+                          customer_tier: str = "licensed") -> dict:
     """Produce the public feed envelope for one instrument/day/customer.
 
     The returned dict contains only opaque, allow-listed records plus a
@@ -53,7 +54,8 @@ def handle_levels_request(scorer: Scorer, *, symbol: str, date: str,
         raise ValueError("customer_id is required")
     levels = list(scorer.internal_levels(symbol, date, universe))
     observations = score_levels(levels, customer_id=customer_id, day=date,
-                                weights=weights)
+                                weights=weights,
+                                customer_tier=customer_tier)
     as_of = levels[0].as_of if levels else date
     return {
         "analytics_type": FEED_ANALYTICS_TYPE,

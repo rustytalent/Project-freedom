@@ -147,6 +147,39 @@ def test_score_levels_end_to_end():
     assert all(set(r.keys()) == set(PUBLIC_KEYS) for r in recs)
 
 
+def test_licensed_tier_preserves_exact_level_zone():
+    lvl = InternalLevel(
+        symbol="TEST.NS", side="above",
+        level_low=99.37, level_high=100.42, level_mid=99.895,
+        p_touch=0.7, p_up=0.6, q=0.5, as_of="2026-05-29",
+    )
+    rec = score_levels([lvl], "cust-a", "2026-05-29",
+                       customer_tier="licensed")[0]
+    assert rec["level_zone"] == {
+        "low": 99.37,
+        "high": 100.42,
+        "mid": 99.895,
+    }
+
+
+def test_demo_tier_abstracts_level_zone_deterministically():
+    lvl = InternalLevel(
+        symbol="TEST.NS", side="above",
+        level_low=99.37, level_high=100.42, level_mid=99.895,
+        p_touch=0.7, p_up=0.6, q=0.5, as_of="2026-05-29",
+    )
+    exact = {"low": 99.37, "high": 100.42, "mid": 99.895}
+    a = score_levels([lvl], "cust-a", "2026-05-29",
+                     customer_tier="demo")[0]["level_zone"]
+    b = score_levels([lvl], "cust-a", "2026-05-29",
+                     customer_tier="demo")[0]["level_zone"]
+    c = score_levels([lvl], "cust-b", "2026-05-29",
+                     customer_tier="demo")[0]["level_zone"]
+    assert a != exact
+    assert a == b
+    assert a != c
+
+
 def test_empty_input():
     assert score_levels([], "cust-a", "2026-05-29") == []
     assert g_scores([], "cust-a", "2026-05-29") == []

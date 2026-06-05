@@ -6,8 +6,10 @@ per-key rate limiting, and request/response shaping. Inference / scoring runs
 server-side and the response carries only opaque, allow-listed records.
 
 Configuration (environment variables):
-  * ``GFEED_API_KEYS`` — comma-separated ``key:customer_id`` pairs. If unset, a
-    single ``demo-key:demo`` pair is used only outside production.
+  * ``GFEED_API_KEYS`` — comma-separated ``key:customer_id[:tier]`` pairs.
+    Tier defaults to ``licensed``. Use ``demo`` / ``public`` for abstracted
+    geometry. If unset, a single ``demo-key:demo:demo`` pair is used only
+    outside production.
   * ``GFEED_RAW_DIR`` — predict-output directory to ingest via RawFeedScorer.
     If unset, a deterministic StubScorer is used only outside production.
   * ``GFEED_ENV`` — set to ``production`` to fail closed when required serving
@@ -24,6 +26,7 @@ from __future__ import annotations
 import os
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from threading import Lock
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -41,6 +44,12 @@ app = FastAPI(
 )
 
 
+@dataclass(frozen=True)
+class CustomerAuth:
+    customer_id: str
+    tier: str
+
+
 def _is_truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -53,19 +62,20 @@ def _allow_dev_defaults() -> bool:
     return (not _production_mode()) or _is_truthy_env("GFEED_ALLOW_DEV_DEFAULTS")
 
 
-def _load_api_keys() -> dict[str, str]:
+def _load_api_keys() -> dict[str, CustomerAuth]:
     raw = os.environ.get("GFEED_API_KEYS", "").strip()
     if not raw:
         if not _allow_dev_defaults():
             raise RuntimeError(
                 "GFEED_API_KEYS is required when GFEED_ENV=production"
             )
-        return {"demo-key": "demo"}
-    keys: dict[str, str] = {}
+        return {"demo-key": CustomerAuth(customer_id="demo", tier="demo")}
+    keys: dict[str, CustomerAuth] = {}
     for pair in raw.split(","):
-        if ":" in pair:
-            k, cust = pair.split(":", 1)
-            keys[k.strip()] = cust.strip()
+        parts = [p.strip() for p in pair.split(":")]
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            tier = parts[2] if len(parts) >= 3 and parts[2] else "licensed"
+            keys[parts[0]] = CustomerAuth(customer_id=parts[1], tier=tier)
     if not keys:
         raise RuntimeError("GFEED_API_KEYS was provided but no key:customer pairs parsed")
     return keys
@@ -101,12 +111,12 @@ def _check_rate(customer_id: str) -> None:
         dq.append(now)
 
 
-def require_customer(x_api_key: str | None = Header(default=None)) -> str:
-    customer = API_KEYS.get(x_api_key or "")
-    if customer is None:
+def require_customer(x_api_key: str | None = Header(default=None)) -> CustomerAuth:
+    auth = API_KEYS.get(x_api_key or "")
+    if auth is None:
         raise HTTPException(status_code=401, detail="invalid or missing API key")
-    _check_rate(customer)
-    return customer
+    _check_rate(auth.customer_id)
+    return auth
 
 
 @app.get("/healthz")
@@ -118,15 +128,17 @@ def healthz() -> dict:
         "scorer": scorer_name,
         "using_stub_scorer": isinstance(SCORER, StubScorer),
         "using_demo_key": "demo-key" in API_KEYS,
+        "customer_tiers": sorted({auth.tier for auth in API_KEYS.values()}),
     }
 
 
 @app.get("/v1/levels")
 def levels(symbol: str = Query(..., min_length=1),
            date: str = Query(...),
-           customer: str = Depends(require_customer)) -> dict:
+           customer: CustomerAuth = Depends(require_customer)) -> dict:
     try:
         return handle_levels_request(SCORER, symbol=symbol, date=date,
-                                     customer_id=customer)
+                                     customer_id=customer.customer_id,
+                                     customer_tier=customer.tier)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

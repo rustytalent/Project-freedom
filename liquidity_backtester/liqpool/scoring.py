@@ -30,7 +30,7 @@ targets. The output is non-recommendatory market-structure analytics.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -85,6 +85,13 @@ PUBLIC_KEYS: tuple[str, ...] = (
     "feed_version",
     "compliance_tag",
 )
+
+LICENSED_TIERS: frozenset[str] = frozenset({
+    "licensed", "paid", "premium", "internal", "private",
+})
+DEMO_TIERS: frozenset[str] = frozenset({
+    "demo", "public", "free", "marketing", "sample",
+})
 
 # Public keys whose VALUES are deliberately compliance text (negated banned
 # words) and are therefore exempt from the forbidden-token leak check.
@@ -172,6 +179,25 @@ def _dir_conf_toward_level(level: InternalLevel) -> float:
 def _customer_seed(customer_id: str, day: str, salt: str = "g-feed") -> int:
     h = hashlib.sha256(f"{salt}|{customer_id}|{day}".encode("utf-8")).hexdigest()
     return int(h[:16], 16)
+
+
+def normalize_customer_tier(customer_tier: str | None) -> str:
+    """Normalize public-feed access tiers.
+
+    Library callers default to ``licensed`` for backward compatibility.
+    Explicit unknown tiers are treated as demo/public, which is the safer
+    geometry policy for customer-facing artifacts.
+    """
+    if customer_tier is None:
+        return "licensed"
+    tier = str(customer_tier).strip().lower()
+    if not tier:
+        return "licensed"
+    if tier in LICENSED_TIERS:
+        return "licensed"
+    if tier in DEMO_TIERS:
+        return "demo"
+    return "demo"
 
 
 def _customer_gamma(customer_id: str, day: str) -> float:
@@ -271,23 +297,69 @@ def feature_states(levels: Sequence[InternalLevel], customer_id: str, day: str,
     return toks
 
 
-def public_record(level: InternalLevel, intensity: int, state: str) -> dict:
+def _demo_zone_step(mid: float) -> float:
+    """Coarse price increment for demo/public zones.
+
+    Roughly 50 bps of price with sensible lower bounds. This keeps the
+    observation useful as public market-structure context while ensuring the
+    exact internal pool geometry is not exposed.
+    """
+    m = max(abs(float(mid)), 1.0)
+    return max(1.0 if m >= 100.0 else 0.25, 0.005 * m)
+
+
+def _abstract_level_zone(level: InternalLevel, customer_id: str, day: str) -> dict:
+    step = _demo_zone_step(level.level_mid)
+    seed = _customer_seed(
+        customer_id,
+        day,
+        f"zone|{level.symbol}|{level.side}|{level.level_mid:.8f}",
+    )
+    rng = np.random.default_rng(seed)
+    jitter = float(rng.uniform(-0.45, 0.45)) * step
+    canary = float(rng.uniform(-0.18, 0.18)) * step
+    center = round((float(level.level_mid) + jitter) / step) * step + canary
+    if abs(center - float(level.level_mid)) < 0.10 * step:
+        center += 0.25 * step
+    half_width = 0.5 * step
+    return {
+        "low": round(center - half_width, 4),
+        "high": round(center + half_width, 4),
+        "mid": round(center, 4),
+    }
+
+
+def _exact_level_zone(level: InternalLevel) -> dict:
+    return {
+        "low": round(float(level.level_low), 4),
+        "high": round(float(level.level_high), 4),
+        "mid": round(float(level.level_mid), 4),
+    }
+
+
+def public_record(level: InternalLevel, intensity: int, state: str, *,
+                  customer_id: str | None = None,
+                  day: str | None = None,
+                  customer_tier: str | None = "licensed") -> dict:
     """Build the outbound record from an explicit neutral allow-list.
 
-    Internal fields have no path into this dict, so they cannot leak. Price-band
-    geometry (level_zone) is public chart information, not IP. The full
-    disclaimer lives once at feed level; each record carries a compact tag.
+    Internal fields have no path into this dict, so they cannot leak. Licensed
+    research customers receive exact chart geometry. Demo/public customers
+    receive deterministic coarse zones so sample feeds cannot be used as an
+    exact level service. The full disclaimer lives once at feed level; each
+    record carries a compact tag.
     """
+    tier = normalize_customer_tier(customer_tier)
+    if tier == "demo":
+        zone = _abstract_level_zone(level, customer_id or "public", day or "")
+    else:
+        zone = _exact_level_zone(level)
     return {
         "analytics_type": ANALYTICS_TYPE,
         "instrument": level.symbol,
         "feature_intensity_score": int(intensity),
         "feature_state": str(state),
-        "level_zone": {
-            "low": round(float(level.level_low), 4),
-            "high": round(float(level.level_high), 4),
-            "mid": round(float(level.level_mid), 4),
-        },
+        "level_zone": zone,
         "level_usage_note": LEVEL_USAGE_NOTE,
         "score_explanation": SCORE_EXPLANATION,
         "scope": str(level.scope),
@@ -306,11 +378,13 @@ def compliance_notice() -> dict:
 
 
 def score_levels(levels: Sequence[InternalLevel], customer_id: str, day: str,
-                 weights: BlendWeights = BlendWeights()) -> list[dict]:
+                 weights: BlendWeights = BlendWeights(),
+                 customer_tier: str | None = "licensed") -> list[dict]:
     """End-to-end: internal cross-section -> list of opaque public records."""
     if not levels:
         return []
     intensities = g_scores(levels, customer_id, day, weights)
     states = feature_states(levels, customer_id, day)
-    return [public_record(l, i, s)
+    return [public_record(l, i, s, customer_id=customer_id, day=day,
+                          customer_tier=customer_tier)
             for l, i, s in zip(levels, intensities, states)]

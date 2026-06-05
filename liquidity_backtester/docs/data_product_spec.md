@@ -11,7 +11,10 @@ not a recommendation, and not an instruction to trade.
 
 For an instrument on a given day, the feed returns a set of **market-structure
 observations** — one per liquidity zone currently in the structure. Each
-observation carries two opaque analytics fields plus the zone's price geometry.
+observation carries two opaque analytics fields plus a reference zone. Licensed
+research customers receive exact zone geometry; public/demo/sample feeds receive
+deterministically abstracted zones so samples cannot be used as an exact-level
+service.
 
 ### `feature_intensity_score` — opaque analytics score (integer 0–100)
 
@@ -40,7 +43,7 @@ you to characterize empirically against your own data; the feed asserts none.
 |---|---|
 | `analytics_type` | `market_structure_observation` (per record); feed root is `market_structure_observation_feed` |
 | `instrument` | the symbol queried |
-| `level_zone` | the zone's price geometry: `{low, high, mid}` |
+| `level_zone` | the reference zone: exact `{low, high, mid}` for licensed/paid research; coarse deterministic band for demo/public/sample feeds |
 | `level_usage_note` | reminder that the zone is a reference only, not an actionable level |
 | `score_explanation` | reminder that the score is a statistical feature, not a direction |
 | `scope` | opaque code for the observation's analytical scope |
@@ -50,6 +53,7 @@ you to characterize empirically against your own data; the feed asserts none.
 
 The feed deliberately does **not** expose probabilities, model internals,
 features, position sizing, or any reference to entering/exiting positions.
+Demo/public/sample keys also do not expose exact internal level geometry.
 
 ## API
 

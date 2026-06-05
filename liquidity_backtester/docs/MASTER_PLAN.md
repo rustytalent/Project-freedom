@@ -221,6 +221,7 @@ what was declined."
 | Strategy Diagnosis spec | ✅ shipped |
 | 5-index options-suitability section | ✅ skeleton; needs Greeks-wire | Stream D |
 | **Daily brief with retrospective flag** | ✅ renderer disclosure shipped in `8c4f210` | Stream G done |
+| **Public/demo exact-zone protection** | ✅ licensed tier gets exact zones; demo/public/sample tiers get deterministic abstract zones | product hardening |
 | **Swing brief schema + generator** | schema specced in `6f9ffd8`; generator NOT built | Stream F |
 | **Options brief tiers (T1/T2/T3/T4)** | NOT specced | future |
 | **Hedging brief / portfolio overlay** | tier 3 | future |
@@ -509,6 +510,7 @@ ROOT — Build a market-intelligence operating system
 │
 ├── [Layer 6] Build the products
 │   ├── [L6] Daily Brief equity-intraday v1                       ✅ DONE
+│   ├── [L6] Public/demo feed exact-zone protection                ✅ DONE
 │   ├── [L6] Options-suitability section (Greeks-wired)           🔄 Stream D
 │   ├── [L6] Swing brief                                          🔄 Stream F
 │   ├── [L6] Strategy Diagnosis as paid deliverable               🔮 spec'd, future
@@ -705,6 +707,27 @@ ROOT — Build a market-intelligence operating system
 - **Downstream**: all future retrains/sweeps should use `ab7d57d` or a
   successor that includes it; do not cite the laptop chokepoint as an
   active blocker.
+- **Status**: RESOLVED.
+
+### Deviation D9 — Public/demo exact-zone leakage closed
+
+- **Branch from**: the first analytics-feed spec exposed `level_zone`
+  as exact chart geometry for every customer tier.
+- **Trigger**: the 2026-06-04 methodology ruling that exact zones are
+  acceptable for licensed/paid research customers, but public/demo
+  samples must be fuzzed or abstracted.
+- **Finding**: the serving path had customer ids and per-customer
+  score watermarking, but no customer-tier geometry policy. A demo key
+  could therefore receive the same exact zone geometry as a paid
+  customer.
+- **Plan-change**: `(this)` adds a tier
+  gate in the public scoring/serving path. `licensed`/`paid`/`premium`
+  tiers keep exact zones; `demo`/`public`/`free`/`marketing`/`sample`
+  tiers receive deterministic, customer-watermarked abstract zones while
+  preserving the same response schema.
+- **Downstream**: public samples and demo API keys can be shared without
+  becoming an exact-level service. Licensed research customers still get
+  exact reference zones in a non-recommendatory analytics context.
 - **Status**: RESOLVED.
 
 ---
