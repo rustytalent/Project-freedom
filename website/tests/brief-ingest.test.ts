@@ -90,7 +90,10 @@ describe("brief ingest validation", () => {
     expect(response.status).toBe(202);
     expect(payload.stored).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
     expect(url).toBe("https://db.example/rest/v1/briefs?on_conflict=brief_id");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toMatchObject({

@@ -7,13 +7,21 @@ export const metadata: Metadata = {
   description: "Sign in to Aurora Research with Google.",
 };
 
+function siteOrigin(): string {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "");
+  if (configured) return configured;
+  return `https://${brand.domain}`;
+}
+
 function googleSignInUrl(): string | null {
   const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "");
-  if (!rawUrl) return null;
-  const redirectTo = `https://${brand.domain}/auth/callback`;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!rawUrl || !anonKey) return null;
+
   const url = new URL(`${rawUrl}/auth/v1/authorize`);
   url.searchParams.set("provider", "google");
-  url.searchParams.set("redirect_to", redirectTo);
+  url.searchParams.set("redirect_to", `${siteOrigin()}/auth/callback`);
+  url.searchParams.set("apikey", anonKey);
   return url.toString();
 }
 
@@ -49,8 +57,16 @@ export default function SignInPage() {
           <>
             <p className="text-sm text-fg-muted leading-relaxed">
               Google sign-in is not configured on this deployment yet.
-              Add <span className="font-mono text-fg">NEXT_PUBLIC_SUPABASE_URL</span>{" "}
-              and enable Google in the Supabase Auth dashboard.
+              Add{" "}
+              <span className="font-mono text-fg">
+                NEXT_PUBLIC_SUPABASE_URL
+              </span>{" "}
+              and{" "}
+              <span className="font-mono text-fg">
+                NEXT_PUBLIC_SUPABASE_ANON_KEY
+              </span>{" "}
+              in Vercel, then enable Google in the Supabase Auth
+              dashboard.
             </p>
             <div className="mt-5">
               <LinkButton href="/contact" variant="secondary">
