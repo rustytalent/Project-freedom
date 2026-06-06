@@ -11,7 +11,7 @@ import type { AccessTier, ArtifactKind, ArtifactRecord } from "@/lib/artifacts";
 // upload flow.
 //
 // Auth: `Authorization: Bearer <ENGINE_INGEST_TOKEN>`. Same token as
-// the briefs endpoint — one shared secret keeps engine config small.
+// the briefs endpoint - one shared secret keeps engine config small.
 
 export const runtime = "nodejs";
 // Engine artifacts can be up to a few MB.

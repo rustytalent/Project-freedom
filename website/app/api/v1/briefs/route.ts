@@ -1,4 +1,9 @@
 import { NextResponse } from "next/server";
+import {
+  storeBrief,
+  validateBriefPayload,
+  type BriefIngestBody,
+} from "@/lib/brief-store";
 
 // Engine ingest endpoint.
 //
@@ -8,20 +13,11 @@ import { NextResponse } from "next/server";
 // in Supabase, and return 202 Accepted. A separate scheduled job
 // then triggers email delivery via Resend.
 //
-// This file is the SKELETON. Supabase write + Resend trigger land
-// when the engine is ready to POST against a real deploy.
+// Delivery email is still handled by the scheduled sender. This
+// endpoint's contract is storage: if Supabase env vars are present,
+// a valid brief is persisted before we return.
 
 export const runtime = "edge";
-
-type BriefIngestBody = {
-  schema_version: string;
-  brief_metadata: {
-    brief_id: string;
-    trading_date_ist: string;
-  };
-  // Other fields validated against the full schema at Supabase write time.
-  [key: string]: unknown;
-};
 
 function unauthorized(reason: string): NextResponse {
   return NextResponse.json({ error: reason }, { status: 401 });
@@ -51,25 +47,25 @@ export async function POST(req: Request): Promise<NextResponse> {
     );
   }
 
-  if (
-    !body.schema_version ||
-    !body.brief_metadata?.brief_id ||
-    !body.brief_metadata?.trading_date_ist
-  ) {
+  const validation = validateBriefPayload(body);
+  if (!validation.ok) {
     return NextResponse.json(
-      { error: "missing_required_fields" },
+      { error: validation.error },
       { status: 400 },
     );
   }
 
-  // TODO: write to Supabase, enqueue delivery, update calibration view.
+  const storage = await storeBrief(body);
   return NextResponse.json(
     {
       accepted: true,
       brief_id: body.brief_metadata.brief_id,
       trading_date_ist: body.brief_metadata.trading_date_ist,
-      stored: false,            // flip to true once Supabase write is wired
-      next_step: "delivery_queue_pending",
+      stored: storage.stored,
+      storage,
+      next_step: storage.stored
+        ? "stored_pending_delivery"
+        : "configure_storage_then_retry",
     },
     { status: 202 },
   );

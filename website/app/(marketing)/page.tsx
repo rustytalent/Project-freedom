@@ -7,25 +7,24 @@ import { LinkButton } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/card";
 import { mockTimeSeries } from "@/lib/outcome-log-mock";
 
-const NO_TIPSTER_EXCERPT = `WATCHLIST — instruments the model flags as in-play today:
-  - LARGE_CAP_BANK_A (BANKING) long bias toward demand pool at
-    ₹[subscriber-only]. P(test today) = 62%; P(test within 60min) = 28%.
-    Confidence: high.
-  - INDEX_NIFTY50 short bias toward supply pool at ₹[subscriber-only].
-    P(test today) = 47%; P(test within 60min) = 14%. Confidence:
-    moderate.`;
+const RESEARCH_EXCERPT = `WATCHLIST
+  - BANKING basket: subscriber-only level cluster is near enough to
+    monitor. Touch probability is moderate; reaction quality is below
+    the paid-action threshold.
+  - IT basket: directional read is mixed. Stand aside until the next
+    update confirms whether the move is developing or fading.`;
 
-const YESTERDAY_AUDIT_EXCERPT = `YESTERDAY AUDIT —
+const YESTERDAY_AUDIT_EXCERPT = `YESTERDAY AUDIT
   Note: 35% of resolved predictions were backfilled from historical
   bundles, not collected live. Treat the numbers below as a directional
   read, not a live track record.
   brief=BRIEF_2026_06_03 predictions_made=14 resolved=12
   hit rate by confidence bucket:
-    - proximity / very_high: n=4, hit_rate=75%, mean_p=84%, calibration_error=+0.09
-    - proximity / high:      n=5, hit_rate=80%, mean_p=72%, calibration_error=-0.08
-    - proximity / moderate:  n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25`;
+    - touch watch / very high: n=4, hit_rate=75%, mean_p=84%, calibration_error=+0.09
+    - touch watch / high:      n=5, hit_rate=80%, mean_p=72%, calibration_error=-0.08
+    - touch watch / moderate:  n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25`;
 
-const CALIBRATION_EXCERPT = `Last 30 days, proximity head:
+const CALIBRATION_EXCERPT = `Last 30 days, touch-watch model:
     very_high (n=68):  hit_rate=78%, mean_p=84%, error +0.06
     high      (n=152): hit_rate=71%, mean_p=72%, error +0.01
     moderate  (n=204): hit_rate=58%, mean_p=57%, error −0.01
@@ -39,20 +38,20 @@ export default function LandingPage() {
 
       <PitchSection
         eyebrow="Discipline 01"
-        title="We do not say buy or sell."
+        title="A brief, not a trade call."
         body={
           <>
             <p>
-              Every research line in every brief we publish describes
-              regime, probability, and context. Never an entry. Never a
-              stop. Never a target.
+              The Daily Brief gives you market structure, sector
+              pressure, touch watch, reaction context, and avoidance
+              flags before the session begins. It is built for a trader
+              who wants better preparation, not a command to follow.
             </p>
             <p>
-              The discipline is enforced at render time. Any phrase from
-              a forbidden vocabulary list — &ldquo;buy&rdquo;,
-              &ldquo;sell&rdquo;, &ldquo;target at&rdquo;,
-              &ldquo;stop loss&rdquo;, and others — raises in our build
-              pipeline before the brief reaches your inbox.
+              Public samples redact exact levels and instruments where
+              needed. Subscriber briefs carry the full view inside the
+              portal, while public pages keep the product understandable
+              without exposing the research machinery.
             </p>
             <p>
               The decision to act on any of our research remains
@@ -61,7 +60,7 @@ export default function LandingPage() {
                 href="/philosophy"
                 className="text-accent-glow underline underline-offset-4"
               >
-                Read why this matters →
+                Read why this matters
               </Link>
             </p>
           </>
@@ -69,7 +68,7 @@ export default function LandingPage() {
         artifact={
           <BriefExcerpt
             label="watchlist section, redacted"
-            body={NO_TIPSTER_EXCERPT}
+            body={RESEARCH_EXCERPT}
           />
         }
       />
@@ -89,7 +88,7 @@ export default function LandingPage() {
             <p>
               When the audit is drawn from a retrospective replay of
               historical bundles rather than live-collected outcomes,
-              we say so explicitly — and our renderer prepends a
+              we say so explicitly, and the brief carries a
               disclosure line so you never confuse the two.
             </p>
             <p>
@@ -99,7 +98,7 @@ export default function LandingPage() {
                 href="/yesterday-audit"
                 className="text-accent-glow underline underline-offset-4"
               >
-                See how the audit works →
+                See how the audit works
               </Link>
             </p>
           </>
@@ -120,7 +119,7 @@ export default function LandingPage() {
             <p>
               A 70% probability we publish should resolve in our favour
               roughly 70 times out of 100. If it doesn&rsquo;t, the gap
-              shows up on the dashboard as calibration error — and we
+              shows up on the dashboard as calibration error, and we
               flag the head as drifting until it returns to within
               tolerance.
             </p>
@@ -134,7 +133,7 @@ export default function LandingPage() {
                 href="/track-record"
                 className="text-accent-glow underline underline-offset-4"
               >
-                Live calibration dashboard →
+                Live calibration dashboard
               </Link>
             </p>
           </>
@@ -142,7 +141,7 @@ export default function LandingPage() {
         artifact={
           <div className="space-y-4">
             <Card>
-              <CardTitle>Proximity head — calibration error</CardTitle>
+              <CardTitle>Touch watch calibration error</CardTitle>
               <CardDescription>
                 Daily mean predicted probability minus actual hit rate, last
                 90 trading days. Closer to zero is better.
@@ -166,13 +165,12 @@ export default function LandingPage() {
             Pricing
           </p>
           <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg max-w-2xl">
-            Sober pricing for sober readers.
+            Pricing for a research product, not a tip sheet.
           </h2>
           <p className="mt-4 text-fg-muted max-w-xl leading-relaxed">
-            No freemium games, no urgency promos. Three tiers, monthly
-            or annual. First seven days of the archive are free to
-            browse after you create an account; after that a paid tier
-            is required.
+            Start with a preview account, then choose Daily Brief or
+            Pro Desk. Payments run through Razorpay and account access
+            uses Google sign-in.
           </p>
           <div className="grid gap-4 md:grid-cols-3 mt-10">
             <Card>
@@ -181,23 +179,23 @@ export default function LandingPage() {
                 Daily Brief, every NSE trading day before open.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹—
+                ₹4,999
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
-                /month (pricing finalising)
+                per month
               </CardContent>
             </Card>
             <Card>
-              <CardTitle>Multi-product</CardTitle>
+              <CardTitle>Pro Desk</CardTitle>
               <CardDescription>
-                Daily Brief + Swing Brief. Monday pre-open + ad-hoc on
-                regime flips.
+                Full archive, pro calibration view, and priority
+                delivery support.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹—
+                ₹9,999
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
-                /month (pricing finalising)
+                per month
               </CardContent>
             </Card>
             <Card>
@@ -207,16 +205,16 @@ export default function LandingPage() {
                 turnaround.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹—
+                ₹49,999+
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
-                per audit (pricing finalising)
+                per audit
               </CardContent>
             </Card>
           </div>
           <div className="mt-10">
             <LinkButton href="/pricing" variant="secondary">
-              Full pricing →
+              Full pricing
             </LinkButton>
           </div>
         </div>

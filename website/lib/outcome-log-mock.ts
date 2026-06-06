@@ -27,7 +27,7 @@ export type DriftFlag = {
   reason: string;
 };
 
-// Deterministic mock generator — same seed → same numbers.
+// Deterministic mock generator - same seed  same numbers.
 function seeded(seed: number): () => number {
   let s = seed >>> 0;
   return () => {

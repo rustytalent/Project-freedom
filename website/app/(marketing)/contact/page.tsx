@@ -18,7 +18,7 @@ export default function ContactPage() {
         </h1>
         <p className="mt-6 text-fg-muted leading-relaxed">
           Product questions, partnership requests, or the Diagnosis
-          intake call — email is the simplest channel for all of them.
+          intake call - email is the simplest channel for all of them.
         </p>
       </header>
 
@@ -45,7 +45,7 @@ export default function ContactPage() {
         </p>
         <p>
           For Daily / Swing Brief questions, the sample brief and
-          pricing page usually answer them — email if anything is
+          pricing page usually answer them - email if anything is
           still unclear.
         </p>
       </section>

@@ -5,7 +5,7 @@ import {
 import { getStorage } from "@/lib/artifact-storage";
 import { LivePulse } from "./LivePulse";
 
-// Server component — reads the artifact registry at render time
+// Server component - reads the artifact registry at render time
 // and surfaces a live "freshly published" pill. Cached briefly via
 // the parent page's revalidate setting.
 
@@ -14,7 +14,7 @@ export async function LatestPublishedTicker() {
   const latest = (await store.list({ limit: 1 }))[0];
   if (!latest) {
     return (
-      <LivePulse label="No publications yet — first brief lands tomorrow" />
+      <LivePulse label="No publications yet - first brief lands tomorrow" />
     );
   }
   return (

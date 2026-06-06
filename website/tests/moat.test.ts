@@ -10,7 +10,7 @@ import { join, extname } from "node:path";
 // must not appear publicly.
 //
 // If a new internal name needs a public-friendly alias, add it to
-// the engine's vocabulary documentation — NOT to this allowlist.
+// the engine's vocabulary documentation - NOT to this allowlist.
 
 const FORBIDDEN: ReadonlyArray<RegExp> = [
   // Detector names
@@ -71,7 +71,7 @@ const FORBIDDEN: ReadonlyArray<RegExp> = [
   /\bliqpool\b/,
 ] as const;
 
-// Allow this test file itself to mention the forbidden terms — that's
+// Allow this test file itself to mention the forbidden terms - that's
 // the only way the test can describe what it's testing.
 const ALLOW_FILES = new Set<string>([
   "tests/moat.test.ts",

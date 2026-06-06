@@ -23,13 +23,13 @@ const mono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: `${brand.name} — ${brand.tagline}`,
+    default: `${brand.name} | ${brand.tagline}`,
     template: `%s · ${brand.name}`,
   },
   description: brand.subTagline,
   metadataBase: new URL(`https://${brand.domain}`),
   openGraph: {
-    title: `${brand.name} — ${brand.tagline}`,
+    title: `${brand.name} | ${brand.tagline}`,
     description: brand.subTagline,
     locale: "en_IN",
     siteName: brand.name,
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: `${brand.name} — ${brand.tagline}`,
+    title: `${brand.name} | ${brand.tagline}`,
     description: brand.subTagline,
   },
   robots: {

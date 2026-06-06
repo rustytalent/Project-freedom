@@ -38,7 +38,7 @@ export default function AboutPage() {
         <p>
           We don&rsquo;t publish signals. We don&rsquo;t hold
           ourselves out as SEBI-registered advisors. We don&rsquo;t
-          take performance fees. We publish calibrated context — and
+          take performance fees. We publish calibrated context - and
           we audit ourselves in public.
         </p>
         <p>

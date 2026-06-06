@@ -9,7 +9,7 @@ import {
 // Public sanitised read of the outcome log.
 //
 // This endpoint is what the public Track Record page consumes. It
-// returns ONLY aggregate per-bucket metrics — never prediction_ids,
+// returns ONLY aggregate per-bucket metrics - never prediction_ids,
 // never specific symbols or levels. The shape matches the
 // `outcome_log_public_view` Supabase view that the engine populates
 // nightly.

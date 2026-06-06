@@ -5,7 +5,7 @@
 // /api/v1/artifacts. The website stores them, lists them on the
 // subscriber portal, and serves tier-gated download URLs.
 //
-// Each artifact carries an explicit `tier` — the lowest subscription
+// Each artifact carries an explicit `tier` - the lowest subscription
 // level required to download. The portal hides artifacts above the
 // reader's tier rather than showing locked padlocks.
 
@@ -112,7 +112,7 @@ export type ArtifactRecord = {
   // For the in-memory adapter it's an opaque key.
   storage_key: string;
   description?: string;
-  // Free-form engine-side context — useful for audit, never shown
+  // Free-form engine-side context - useful for audit, never shown
   // to the customer. Same shape rule as the outcome log: never
   // contains methodology details.
   meta?: Record<string, unknown>;

@@ -36,7 +36,7 @@ export function Hero() {
             href="/philosophy"
             className="ml-2 text-sm text-fg-muted hover:text-fg transition-colors underline-offset-4"
           >
-            Read our philosophy →
+            Read our philosophy
           </Link>
         </div>
       </div>

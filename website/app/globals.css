@@ -38,7 +38,7 @@
       linear-gradient(90deg, rgba(124, 155, 184, 0.04) 1px, transparent 1px);
     background-size: 48px 48px;
   }
-  /* Soft accent glow that washes the hero — calm, not flashy. */
+  /* Soft accent glow that washes the hero - calm, not flashy. */
   .hero-glow {
     background:
       radial-gradient(
@@ -86,7 +86,7 @@
       opacity: 0;
     }
   }
-  /* Fade-in on first paint — gentler than scroll-triggered animation
+  /* Fade-in on first paint - gentler than scroll-triggered animation
      and accessibility-respecting via prefers-reduced-motion below. */
   .fade-in-up {
     animation: fade-in-up 350ms ease-out both;

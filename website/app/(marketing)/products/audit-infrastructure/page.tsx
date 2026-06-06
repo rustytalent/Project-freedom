@@ -16,11 +16,11 @@ export default function AuditInfrastructurePage() {
       intro={
         <>
           <p>
-            The discipline that makes our briefs honest is not the
-            individual detectors, it is the audit harness around them.
-            Calibration tracking, drift detection, retrospective-
-            replay disclosure, outcome logging, no-lookahead invariants
-            pinned in tests.
+            The discipline that makes our briefs honest is the operating
+            layer around the research. Outcome logging, calibration
+            tracking, retrospective replay disclosure, and causality
+            checks are the parts other teams can use without seeing our
+            private research engine.
           </p>
           <p>
             For teams that already have alpha and want a structured
@@ -36,26 +36,26 @@ export default function AuditInfrastructurePage() {
             <>
               <ul className="list-disc pl-6 space-y-2">
                 <li>
-                  Outcome-log schema and tooling — append-only,
-                  partitioned by trading date, with the retrospective-
-                  vs-live flag built in.
+                  Outcome-log schema and tooling: append-only,
+                  partitioned by trading date, with the retrospective
+                  versus live flag built in.
                 </li>
                 <li>
-                  Calibration dashboards — per-bucket hit rate,
+                  Calibration dashboards: per-bucket hit rate,
                   calibration error trend, drift flags. Same shape
                   as the dashboard you can see on our public track
                   record page.
                 </li>
                 <li>
-                  No-lookahead test invariants — the patterns we use
-                  to pin causality in our own engine, ported into
+                  Causality test invariants: the patterns we use
+                  to pin time order in our own engine, ported into
                   your repo as test scaffolding.
                 </li>
                 <li>
-                  Brief-renderer-style tipster-vocabulary guardrails —
+                  Client-reporting guardrails:
                   if your shop publishes any client-facing content,
-                  we can wire the same render-time forbidden-phrase
-                  check.
+                  we can wire checks that block instruction-style
+                  language before it reaches customers.
                 </li>
               </ul>
             </>
@@ -66,7 +66,7 @@ export default function AuditInfrastructurePage() {
           body: (
             <p>
               Our detectors. Our models. Our calibration parameters.
-              Our feature engineering. The harness is the deliverable;
+              Our feature engineering. The operating layer is the deliverable;
               the methodology that runs inside it is ours.
             </p>
           ),

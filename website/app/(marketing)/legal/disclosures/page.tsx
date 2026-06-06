@@ -15,7 +15,7 @@ export default function DisclosuresPage() {
       lastUpdated="To be confirmed before launch"
     >
       <p>
-        <strong>Placeholder — finalise with counsel before public launch.</strong>{" "}
+        <strong>Placeholder - finalise with counsel before public launch.</strong>{" "}
         This page sets out the regulatory framing that applies to{" "}
         {brand.name}&rsquo;s published research.
       </p>

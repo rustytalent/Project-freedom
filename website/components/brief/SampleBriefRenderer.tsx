@@ -67,7 +67,7 @@ function BriefHeader({ brief }: { brief: BriefDocument }) {
   return (
     <header className="border-b border-border pb-6">
       <h2 className="font-serif text-2xl text-fg">
-        Daily Research Brief — {md.trading_date_ist}
+        Daily Research Brief - {md.trading_date_ist}
       </h2>
       <p className="text-xs text-fg-subtle mt-2 font-mono">
         bundle={md.model_bundle_version} · indexes covered:{" "}
@@ -115,7 +115,7 @@ function PendingSection({
       <ul className="space-y-2 text-fg-muted text-sm">
         {Object.entries(stubs).map(([k, v]) => (
           <li key={k}>
-            <span className="font-mono text-fg">{k}</span> — pending:{" "}
+            <span className="font-mono text-fg">{k}</span> - pending:{" "}
             {v._reason ?? "data unavailable"}.
           </li>
         ))}
@@ -137,7 +137,7 @@ function OptionsSection({ options }: { options: Record<string, unknown> }) {
           ) {
             return (
               <p key={idx} className="text-sm text-fg-muted">
-                <span className="font-mono text-fg">{idx}</span> —
+                <span className="font-mono text-fg">{idx}</span> -
                 pending:{" "}
                 {(payload as { _reason?: string })._reason ??
                   "data unavailable"}
@@ -161,7 +161,7 @@ function OptionsSection({ options }: { options: Record<string, unknown> }) {
           return (
             <div key={idx} className="space-y-2">
               <p className="text-sm">
-                <span className="font-mono text-fg">{idx}</span> —
+                <span className="font-mono text-fg">{idx}</span> -
                 directional bias: <em>{p.directional_bias}</em>;
                 expected range today:{" "}
                 <strong className="text-fg">

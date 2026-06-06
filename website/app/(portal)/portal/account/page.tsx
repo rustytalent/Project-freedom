@@ -19,9 +19,9 @@ export default function AccountPage() {
       <div className="space-y-6">
         <Card>
           <CardTitle>Plan</CardTitle>
-          <CardDescription>Multi-product · Monthly · ₹—</CardDescription>
+          <CardDescription>Pro Desk · Monthly · ₹9,999</CardDescription>
           <CardContent className="mt-4 text-sm text-fg-muted">
-            <p>Includes Daily Brief + Swing Brief.</p>
+            <p>Includes Daily Brief, full archive, and pro calibration view.</p>
             <p className="mt-2">Next renewal on 2026-07-04.</p>
             <div className="mt-6 flex gap-3">
               <button
@@ -67,7 +67,7 @@ export default function AccountPage() {
               href="/portal/account/billing"
               className="block mt-4 text-sm text-accent underline underline-offset-4"
             >
-              Open billing →
+              Open billing
             </Link>
           </CardContent>
         </Card>

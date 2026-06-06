@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 // In production the brief is fetched from Supabase by the
 // today-in-IST trading date. For now we render the same sample
-// brief used on the public marketing surface — the only
+// brief used on the public marketing surface - the only
 // difference being that in the portal the levels would NOT be
 // redacted. The redaction tokens live in the JSON itself; in
 // production the portal would read the un-redacted source while

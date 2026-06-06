@@ -6,7 +6,7 @@ import { getStorage } from "@/lib/artifact-storage";
 //
 // In production the reader's tier is resolved from the Supabase
 // session cookie. For this stub we accept an optional header
-// `x-reader-tiers` (comma-separated). Missing header → treated as
+// `x-reader-tiers` (comma-separated). Missing header  treated as
 // `["free_signup"]` (the default after email-signup; conservative).
 // `public` artifacts always download.
 

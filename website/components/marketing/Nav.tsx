@@ -41,10 +41,16 @@ export function Nav() {
         </ul>
         <div className="ml-auto flex items-center gap-3">
           <Link
-            href="/portal"
-            className="hidden sm:inline-block text-sm text-fg-muted hover:text-fg transition-colors"
+            href="/sign-in"
+            className="text-sm text-fg-muted hover:text-fg transition-colors"
           >
-            Subscriber sign in
+            Sign in
+          </Link>
+          <Link
+            href="/pricing"
+            className="hidden sm:inline-flex items-center justify-center px-4 py-2 text-sm font-medium transition-colors duration-150 rounded-sm bg-accent text-bg hover:bg-accent-glow"
+          >
+            Subscribe
           </Link>
           <button
             type="button"
@@ -96,11 +102,11 @@ export function Nav() {
             ))}
             <li className="pt-2 border-t border-border">
               <Link
-                href="/portal"
+                href="/sign-in"
                 className="block py-1 text-accent hover:text-accent-glow transition-colors"
                 onClick={() => setOpen(false)}
               >
-                Subscriber sign in →
+                Subscriber sign in
               </Link>
             </li>
           </ul>

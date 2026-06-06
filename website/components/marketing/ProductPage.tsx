@@ -80,7 +80,7 @@ export function ProductPage({
           href="/contact"
           className="ml-2 text-sm text-fg-muted hover:text-fg transition-colors self-center"
         >
-          Or talk to us →
+          Or talk to us
         </Link>
       </div>
     </article>

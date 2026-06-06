@@ -1,14 +1,14 @@
 // Storage adapter for artifact uploads.
 //
 // V1 ships with two adapters:
-//   * `MemoryStorage` — module-singleton, persists for the lifetime
+//   * `MemoryStorage` - module-singleton, persists for the lifetime
 //     of the serverless instance. Seeded with mock artifacts so the
 //     portal renders something meaningful on first deploy.
-//   * `VercelBlobStorage` — production target. SKELETON; wired when
+//   * `VercelBlobStorage` - production target. SKELETON; wired when
 //     BLOB_READ_WRITE_TOKEN env var is set. Uses @vercel/blob.
 //
 // The interface is intentionally small. Storage adapters do NOT
-// implement tier gating — that lives at the API/page layer, where
+// implement tier gating - that lives at the API/page layer, where
 // the reader's identity is known.
 import type { ArtifactRecord } from "./artifacts";
 
@@ -22,7 +22,7 @@ export interface ArtifactStorage {
   /** Resolve an artifact to a URL the browser can fetch.
    *  TTL is advisory; the in-memory adapter ignores it. */
   downloadUrl(id: string, ttl_seconds?: number): Promise<string | null>;
-  /** Read raw bytes — used by the in-process download proxy when
+  /** Read raw bytes - used by the in-process download proxy when
    *  the adapter doesn't expose signed URLs. */
   readBytes(id: string): Promise<ArrayBuffer | null>;
 }
@@ -108,7 +108,7 @@ async function seedOnce(): Promise<void> {
         description:
           "Today's Daily Brief. PDF mirror of the email + portal render.",
       },
-      body: `Daily Brief — ${isoToday}\n(Mock PDF fixture for first-deploy demo.)`,
+      body: `Daily Brief - ${isoToday}\n(Mock PDF fixture for first-deploy demo.)`,
     },
     {
       rec: {
@@ -122,7 +122,7 @@ async function seedOnce(): Promise<void> {
         tier: "paid_intraday",
         storage_key: "memory",
       },
-      body: `Daily Brief — ${isoYday}\n(Mock PDF fixture.)`,
+      body: `Daily Brief - ${isoYday}\n(Mock PDF fixture.)`,
     },
     {
       rec: {
@@ -136,7 +136,7 @@ async function seedOnce(): Promise<void> {
         tier: "paid_intraday",
         storage_key: "memory",
       },
-      body: `Daily Brief — ${iso2}\n(Mock.)`,
+      body: `Daily Brief - ${iso2}\n(Mock.)`,
     },
     {
       rec: {
@@ -150,7 +150,7 @@ async function seedOnce(): Promise<void> {
         tier: "paid_intraday",
         storage_key: "memory",
       },
-      body: `Daily Brief — ${iso3}\n(Mock.)`,
+      body: `Daily Brief - ${iso3}\n(Mock.)`,
     },
     {
       rec: {
@@ -167,7 +167,7 @@ async function seedOnce(): Promise<void> {
           "Multi-day positional research for the trading week of " +
           isoWeek + ".",
       },
-      body: `Swing Brief — week of ${isoWeek}\n(Mock.)`,
+      body: `Swing Brief - week of ${isoWeek}\n(Mock.)`,
     },
     {
       rec: {

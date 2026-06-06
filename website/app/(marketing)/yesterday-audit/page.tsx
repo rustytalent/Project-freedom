@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     "Why every brief is followed by an audit, and how we disclose retrospective replay vs live history.",
 };
 
-const RETROSPECTIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT —
+const RETROSPECTIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT -
   Note: calibration estimated on retrospective replay (62% of resolved
   predictions were backfilled from historical bundles, not collected
   live). Treat the numbers below as a directional read, not a live
@@ -19,7 +19,7 @@ const RETROSPECTIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT —
     - proximity / moderate: n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25
     - avoidance / moderate: n=2, hit_rate=100%, mean_p=100%, calibration_error=0.00`;
 
-const LIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT —
+const LIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT -
   brief=BRIEF_2026_06_04 predictions_made=12 resolved=11
   hit rate by confidence bucket:
     - proximity / very_high: n=2, hit_rate=100%, mean_p=88%, calibration_error=-0.12
@@ -32,7 +32,7 @@ export default function YesterdayAuditPage() {
     <article className="max-w-prose mx-auto px-6 py-20">
       <header className="mb-12">
         <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
-          Feature — Yesterday Audit
+          Feature - Yesterday Audit
         </p>
         <h1 className="font-serif text-4xl md:text-5xl leading-tight text-fg">
           Every brief is followed by an audit of the previous brief.
@@ -87,7 +87,7 @@ export default function YesterdayAuditPage() {
         <p className="text-fg-muted leading-relaxed mb-6">
           Retrospective replay is useful as a directional check on the
           engine&rsquo;s calibration. It is <em>not</em> the same as a
-          live track record — the bundle was fit on data that
+          live track record - the bundle was fit on data that
           overlaps the replayed dates, which can encode hindsight in
           subtle ways.
         </p>

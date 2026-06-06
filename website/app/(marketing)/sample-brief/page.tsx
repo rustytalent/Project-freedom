@@ -34,7 +34,7 @@ export default function SampleBriefPage() {
         </p>
         <p className="mt-2 text-xs text-fg-subtle">
           The Yesterday Audit numbers are aggregate per-bucket
-          statistics — those need no redaction.
+          statistics - those need no redaction.
         </p>
       </header>
 
@@ -46,14 +46,14 @@ export default function SampleBriefPage() {
         <LinkButton href="/pricing" variant="primary">
           See pricing
         </LinkButton>
-        <LinkButton href="/portal" variant="secondary">
+        <LinkButton href="/checkout?plan=daily&cycle=monthly" variant="secondary">
           Subscribe
         </LinkButton>
         <Link
           href="/philosophy"
           className="ml-2 text-sm text-fg-muted hover:text-fg transition-colors self-center"
         >
-          Read the philosophy →
+          Read the philosophy
         </Link>
       </div>
     </article>

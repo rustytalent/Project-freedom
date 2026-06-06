@@ -15,7 +15,7 @@ export default function TermsPage() {
       lastUpdated="To be confirmed before launch"
     >
       <p>
-        <strong>Placeholder — finalise with counsel before public launch.</strong>{" "}
+        <strong>Placeholder - finalise with counsel before public launch.</strong>{" "}
         These terms govern your use of {brand.name} and any
         subscription products offered through it.
       </p>

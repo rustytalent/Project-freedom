@@ -24,10 +24,10 @@ export default function DailyBriefPage() {
             read carefully.
           </p>
           <p>
-            Every section of the brief is calibrated. Every probability
-            you read was checked against a hold-out window the engine
-            never saw during fitting. Yesterday&rsquo;s brief is
-            audited inside today&rsquo;s.
+            Every section of the brief has an outcome log behind it.
+            Yesterday&rsquo;s brief is audited inside today&rsquo;s, so the
+            product has to show when its read was useful and when it was
+            not.
           </p>
         </>
       }
@@ -66,7 +66,7 @@ export default function DailyBriefPage() {
                 The brief reports the model&rsquo;s view in regime,
                 probability, and avoidance language. If today the model
                 has no actionable conviction anywhere across the
-                basket, the brief says so plainly — and the avoid list
+                basket, the brief says so plainly, and the avoid list
                 opens with{" "}
                 <span className="font-mono text-fg">ALL_BASKET</span>{" "}
                 stand-aside.
@@ -101,7 +101,7 @@ export default function DailyBriefPage() {
         },
       ]}
       delivery="Email + portal. Time: 08:30 IST, every NSE trading day. PDF available on request."
-      cost="From ₹— per month. See full pricing."
+      cost="Daily Brief starts at ₹4,999 per month. See full pricing."
       notes={
         <p>
           This brief is research context, not investment advice. We are

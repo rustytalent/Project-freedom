@@ -33,7 +33,7 @@ export default function PortalCalibrationPage() {
 
       <section className="mb-12">
         <Card>
-          <CardTitle>Calibration error — last 90 trading days</CardTitle>
+          <CardTitle>Calibration error - last 90 trading days</CardTitle>
           <CardDescription>
             Dashed lines mark the ±8% drift tolerance.
           </CardDescription>

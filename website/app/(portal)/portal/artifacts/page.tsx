@@ -81,7 +81,7 @@ export default async function PortalArtifactsPage() {
         </h1>
         <p className="mt-4 text-fg-muted leading-relaxed">
           Daily Brief PDFs, Swing Brief PDFs, calibration exports, and
-          diagnosis reports — uploaded automatically the moment the
+          diagnosis reports - uploaded automatically the moment the
           engine finishes generating them. Tier-gated; you see what
           your subscription includes.
         </p>

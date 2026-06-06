@@ -1,146 +1,158 @@
-# Aurora Research — Website
+# Aurora Research Website
 
-Customer-facing website and authenticated subscriber portal for the
-market-intelligence operating system. Built per the spec in
-`docs/website_codex_prompt.md` of the engine repo.
-
-> Front of house only. The engine, models, detectors, and calibration
-> architecture live in the private engine repo and are NEVER
-> documented here. See **§ The moat constraint** below.
+Customer-facing website and subscriber portal for the research-data
+product. The public surface sells the brief, the archive, the audit
+record, and account delivery. The private research engine is not
+documented here.
 
 ## Local development
 
 ```bash
 pnpm install
 pnpm dev
-# → http://localhost:3000
+# http://localhost:3000
 ```
 
-Requires Node 20+. Tested on Node 22.
+Requires Node 20 or newer.
 
-Other commands:
+Useful checks:
 
 ```bash
-pnpm typecheck   # tsc --noEmit
-pnpm lint        # next lint
-pnpm test        # vitest (renderer + moat tests)
-pnpm build       # next build
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-## Architecture
+## Product surface
 
-```
-                ┌─────────────────────────┐
-                │  engine (private repo)  │
-                │  generates brief JSON   │
-                └────────────┬────────────┘
-                             │
-                             │  POST /api/v1/briefs
-                             │  Bearer ENGINE_INGEST_TOKEN
-                             ▼
-   ┌──────────────────────────────────────────────────┐
-   │                  website (this repo)             │
-   │                                                  │
-   │  app/(marketing)  ← public surface               │
-   │  app/(portal)     ← subscriber surface (auth)    │
-   │  app/api          ← ingest + sanitised reads     │
-   │                                                  │
-   │  Supabase: subscribers, briefs, outcome_log_view │
-   │  Razorpay: subscription payments                 │
-   │  Resend:   transactional + brief delivery email  │
-   └──────────────────────────────────────────────────┘
-                             │
-                             ▼
-                       subscriber inbox
-                       + portal browser
-```
+The site currently supports:
 
-## Brief content
+- Public marketing pages for Daily Brief, Pro Desk, Diagnosis, and B2B
+  audit work.
+- Public sample brief with subscriber-only levels redacted.
+- Public track record page backed by deterministic demo data until the
+  live aggregate view is connected.
+- Subscriber portal skeleton for today, brief archive, calibration, and
+  account pages.
+- Authenticated brief ingest at `POST /api/v1/briefs`.
+- Razorpay order creation at `POST /api/checkout/razorpay-order`.
+- Google sign-in entry at `/sign-in` when Supabase Auth is configured.
 
-Brief JSON arrives via authenticated POST from the engine and is
-stored in Supabase. The web view is the canonical render
-(`lib/brief-render.ts`); the email is a copy. The same renderer
-enforces the tipster-vocabulary guardrail at render time so a
-forbidden phrase fails loudly before reaching any customer.
+## Moat rule
 
-Sample brief content lives in `content/briefs/`. The public sample
-brief is a real historical artifact with symbols category-anonymised
-and specific levels replaced with `₹[subscriber-only]` tokens. The
-subscriber portal in production renders the un-redacted JSON for
-authenticated readers.
+This repo is public-facing. Do not place private technique names,
+feature names, model class names, hyperparameters, private repo names,
+or internal agent names anywhere in code, copy, tooltips, docs, sample
+data, or API responses.
 
-## § The moat constraint (READ THIS)
+Allowed public language:
 
-This codebase is the public surface of a product whose competitive
-defensibility lives in a private engine. The methodology that powers
-our briefs — the detectors, the model architectures, the feature
-engineering, the calibration techniques, the hyperparameters — must
-NEVER appear in this repo. Not in copy, not in tooltips, not in code
-comments, not in API responses, not in the rendered HTML.
+- Brief sections and customer-visible outcomes.
+- Calibration dashboard language.
+- Outcome log language.
+- Product pricing, delivery, and account workflow.
+- Legal and disclosure language.
 
-The `tests/moat.test.ts` test grep-scans every file in the repo
-against a forbidden-name list. It runs on every CI build. Adding
-internal technique names anywhere in the codebase fails the build.
+Forbidden public language:
 
-Allowed surface (output, discipline, philosophy, track record):
+- Private research methods.
+- Private model names and feature names.
+- Specific validation architecture.
+- Specific tuning parameters.
+- Private repository or agent names.
 
-- The brief OUTPUT shape, prose, and section names.
-- The tipster-guardrail policy and discipline language.
-- The outcome-log calibration dashboard (per-bucket hit rate,
-  calibration error, drift flags, retrospective-share disclosure).
-- The principle list: causality, no lookahead, fail-closed, audit-first.
-- Product tier scope and pricing.
-
-Forbidden surface (technique):
-
-- Detector names from any internal feature module.
-- Model class names, AUCs, calibration architecture details.
-- Feature names from the internal featurizer.
-- Specific hyperparameters of any kind.
-- Internal repo / module / agent names.
-
-Heuristic for any new content: if a competitor reads the line and the
-only thing they can clone is the aesthetic of how research is
-delivered, fine. If they can extract a technique, a feature, an
-architecture, or a hyperparameter, the line gets cut.
-
-When in doubt, leave it out.
+The test suite includes a moat scan. If it fails, rewrite the public
+line into customer-facing vocabulary.
 
 ## Environment variables
 
-See `.env.example`. None of these may ever land in the repo with real
-values. Vercel project settings hold them in production. For local
-dev, copy `.env.example` to `.env.local` and fill what you need —
-the site degrades gracefully with mock data when external services
-are not configured.
+Copy `.env.example` to `.env.local` for local development. Production
+values belong in Vercel project settings.
 
-## Deploy
+Required for brief ingest:
 
-Production target: Vercel.
+- `ENGINE_INGEST_TOKEN`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
 
-1. Push the `website/` subtree to a separate repo (or run the
-   monorepo deploy directly from this path).
-2. Create a Vercel project pointing at the website root.
-3. Add the env vars from `.env.example`.
-4. First deploy: review the preview URL, hit every page, run
-   Lighthouse.
-5. Promote to production once `pnpm test`, `pnpm typecheck`, and
-   `pnpm lint` are clean.
+Required for Google sign-in:
 
-## What's stubbed vs production
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- Google OAuth provider enabled in Supabase Auth
+- Production redirect URL set to `https://<domain>/auth/callback`
 
-| Concern                  | Status                                    |
-| ------------------------ | ----------------------------------------- |
-| Marketing pages          | Production-ready, real copy               |
-| Sample brief render      | Production-ready, byte-aligned to engine  |
-| Track record dashboard   | Working with deterministic mock data      |
-| Portal pages             | Skeleton with stubbed auth and brief data |
-| Engine ingest API        | Skeleton; validates bearer token          |
-| Outcome-log summary API  | Returns mock data; swap for Supabase read |
-| Razorpay subscribe flow  | Not wired (CTAs link to /contact)         |
-| Resend email delivery    | Not wired                                 |
-| Supabase auth + tier DB  | Not wired                                 |
-| Sentry / Plausible       | Not wired                                 |
+Required for Razorpay checkout:
 
-Each stub is marked with a `TODO` comment pointing at the integration
-to wire when keys are available.
+- `RAZORPAY_KEY_ID`
+- `RAZORPAY_KEY_SECRET`
+- `RAZORPAY_WEBHOOK_SECRET`
+
+Optional for delivery and operations:
+
+- `RESEND_API_KEY`
+- `SENTRY_DSN`
+- `FOUNDER_EMAIL`
+- `SLACK_WEBHOOK_ALERTS`
+
+## Production setup
+
+1. Create the Supabase project.
+2. Enable Google Auth in Supabase.
+3. Add the production callback URL:
+   `https://<domain>/auth/callback`.
+4. Create the minimum `briefs` table:
+
+```sql
+create table if not exists briefs (
+  id bigserial primary key,
+  brief_id text not null unique,
+  trading_date_ist date not null,
+  schema_version text not null,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+```
+
+5. Add row-level security policies before exposing subscriber reads.
+6. Create Razorpay live keys and add the keys to Vercel.
+7. Create a Razorpay webhook that verifies payment events and updates
+   the subscriber tier table. Keep the webhook server-side only.
+8. Configure Resend for transactional email and brief delivery.
+9. Deploy to Vercel and run:
+
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
+```
+
+## Engine ingest command
+
+Once the website is deployed, the private engine should send the
+generated Daily Brief JSON to the website:
+
+```bash
+curl -X POST "https://<domain>/api/v1/briefs" \
+  -H "Authorization: Bearer $ENGINE_INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @daily_brief.json
+```
+
+If Supabase is not configured, the endpoint still validates the token
+and payload but returns `stored: false` with `supabase_env_missing`.
+
+## Current status
+
+| Concern | Status |
+| --- | --- |
+| Marketing pages | Production copy pass in progress |
+| Sample brief render | Working with redaction |
+| Track record dashboard | Demo aggregate data |
+| Portal pages | Skeleton account and brief views |
+| Engine ingest API | Token validation plus Supabase write |
+| Razorpay checkout | Order API and checkout page wired |
+| Razorpay webhook | Pending |
+| Google sign-in | Entry route wired, session persistence pending |
+| Resend email delivery | Pending |
+| Subscriber entitlement DB | Pending |

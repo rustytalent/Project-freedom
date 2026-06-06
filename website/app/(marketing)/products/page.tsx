@@ -23,9 +23,9 @@ const products = [
     title: "Swing Brief",
     line: "Multi-day proximity calls, delivered Monday pre-open.",
     desc:
-      "The same engine applied to multi-day horizons — 5, 10, and 20 " +
-      "trading days. Delivery-cost arithmetic makes this the most " +
-      "structurally favourable horizon we cover.",
+      "A multi-day research read for slower decisions. This stream is " +
+      "not generally available yet and will open only after the daily " +
+      "brief archive is stable.",
     audience: "For positional traders and option buyers.",
   },
   {
@@ -43,9 +43,9 @@ const products = [
     title: "Audit Infrastructure",
     line: "Our audit machinery, licensed to your shop.",
     desc:
-      "The internal audit harness that powers our own briefs — " +
-      "calibration tracking, drift detection, outcome logging — " +
-      "available as a B2B engagement for other quant teams.",
+      "Outcome logging, calibration tracking, drift review, and public " +
+      "reporting patterns available as a B2B engagement for teams with " +
+      "their own research stack.",
     audience: "For small quant funds and prop desks.",
   },
 ];
@@ -73,7 +73,7 @@ export default function ProductsPage() {
             href={p.href}
             key={p.href}
             className="group block"
-            aria-label={`${p.title} — ${p.line}`}
+            aria-label={`${p.title} - ${p.line}`}
           >
             <Card className="h-full group-hover:border-accent transition-colors">
               <CardTitle className="group-hover:text-accent-glow transition-colors">
@@ -87,7 +87,7 @@ export default function ProductsPage() {
                 {p.audience}
               </CardContent>
               <CardContent className="mt-6 text-sm text-accent">
-                Learn more →
+                Learn more
               </CardContent>
             </Card>
           </Link>

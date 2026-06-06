@@ -93,7 +93,7 @@ export default function TrackRecordPage() {
       {/* Time series */}
       <section className="mb-16">
         <Card>
-          <CardTitle>Calibration error — last 90 trading days</CardTitle>
+          <CardTitle>Calibration error - last 90 trading days</CardTitle>
           <CardDescription>
             Mean predicted probability minus actual hit rate, per
             prediction type. Dashed lines mark the ±8% drift tolerance.
@@ -111,7 +111,7 @@ export default function TrackRecordPage() {
         </h2>
         <p className="text-fg-muted text-sm mb-8 max-w-prose leading-relaxed">
           A bucket is calibrated when its hit rate is close to its
-          mean predicted probability — the calibration error column
+          mean predicted probability - the calibration error column
           should hover around zero. Errors larger than{" "}
           <span className="font-mono">|0.08|</span> trigger a drift
           flag (above) and a note in the next brief&rsquo;s confidence

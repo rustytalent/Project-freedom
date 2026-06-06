@@ -11,7 +11,7 @@ type Props = {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { date } = await params;
   return {
-    title: `Brief — ${date}`,
+    title: `Brief - ${date}`,
   };
 }
 

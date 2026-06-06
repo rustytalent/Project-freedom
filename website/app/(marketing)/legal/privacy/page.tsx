@@ -15,7 +15,7 @@ export default function PrivacyPage() {
       lastUpdated="To be confirmed before launch"
     >
       <p>
-        <strong>Placeholder — finalise with counsel before public launch.</strong>{" "}
+        <strong>Placeholder - finalise with counsel before public launch.</strong>{" "}
         This page sets out how {brand.name} collects, uses, and
         protects personal data.
       </p>
@@ -23,22 +23,22 @@ export default function PrivacyPage() {
       <h2 className="text-xl text-fg font-serif">Data we collect</h2>
       <ul>
         <li>
-          Email address — required for account creation, brief
+          Email address - required for account creation, brief
           delivery, and billing.
         </li>
         <li>
-          Subscription state — your tier, billing cycle, and renewal
+          Subscription state - your tier, billing cycle, and renewal
           status, held in our database for the duration of the
           subscription.
         </li>
         <li>
-          Aggregate analytics — page views and brief read-rate, using
+          Aggregate analytics - page views and brief read-rate, using
           a privacy-respecting analytics provider (Plausible). We do
           not place third-party advertising cookies and we do not run
           Google Analytics.
         </li>
         <li>
-          Communication content — emails you send us, kept in our
+          Communication content - emails you send us, kept in our
           support inbox for the purposes of responding to you.
         </li>
       </ul>
@@ -72,11 +72,11 @@ export default function PrivacyPage() {
 
       <h2 className="text-xl text-fg font-serif">Third-party processors</h2>
       <ul>
-        <li>Supabase — subscriber database hosting.</li>
-        <li>Razorpay — payment processing.</li>
-        <li>Resend — transactional and brief-delivery email.</li>
-        <li>Sentry — error tracking. We strip personal data from error reports.</li>
-        <li>Plausible — privacy-respecting page-view analytics.</li>
+        <li>Supabase - subscriber database hosting.</li>
+        <li>Razorpay - payment processing.</li>
+        <li>Resend - transactional and brief-delivery email.</li>
+        <li>Sentry - error tracking. We strip personal data from error reports.</li>
+        <li>Plausible - privacy-respecting page-view analytics.</li>
       </ul>
 
       <h2 className="text-xl text-fg font-serif">Your rights</h2>

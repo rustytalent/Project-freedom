@@ -23,8 +23,8 @@ export default function DiagnosisPage() {
           </p>
           <p>
             Submit a trade log; we return a structured report. Five
-            trading days from intake to delivery. Independent — we are
-            not selling you the next strategy, we are reading the one
+            trading days from intake to delivery. Independent - we are
+            not offering you the next strategy, we are reading the one
             you already have.
           </p>
         </>
@@ -37,12 +37,12 @@ export default function DiagnosisPage() {
               <p>One of two artifact types is sufficient:</p>
               <ul className="list-disc pl-6 space-y-2">
                 <li>
-                  A backtest log — a CSV of trades with timestamps,
+                  A backtest log - a CSV of trades with timestamps,
                   side, entry, exit, and P&amp;L, plus a one-page
                   description of the strategy logic.
                 </li>
                 <li>
-                  A live track record — same shape, but tagged as live
+                  A live track record - same shape, but tagged as live
                   rather than simulated. Broker statements work if you
                   can export them as trade rows.
                 </li>
@@ -65,29 +65,29 @@ export default function DiagnosisPage() {
               </p>
               <ul className="list-disc pl-6 space-y-2">
                 <li>
-                  Regime decomposition — when does the strategy work,
+                  Regime decomposition - when does the strategy work,
                   and what regime feature explains the bulk of the
                   good periods.
                 </li>
                 <li>
-                  Drawdown attribution — what specifically went wrong
+                  Drawdown attribution - what specifically went wrong
                   in the worst quintile of trades.
                 </li>
                 <li>
-                  Persistence test — does the edge appear in both
+                  Persistence test - does the edge appear in both
                   halves of the sample, or is it a single sub-period?
                 </li>
                 <li>
-                  Leakage check — are any of the features the strategy
+                  Leakage check - are any of the features the strategy
                   uses peering into the future (intentionally or
                   otherwise)?
                 </li>
                 <li>
-                  Cost sensitivity — how the edge degrades when you
+                  Cost sensitivity - how the edge degrades when you
                   bump assumed slippage and brokerage by 1.5x.
                 </li>
                 <li>
-                  Recommendation — which of (a) ship as-is, (b) ship
+                  Recommendation - which of (a) ship as-is, (b) ship
                   with specific guardrails, (c) re-scope to a
                   different regime, (d) shelve.
                 </li>
@@ -106,7 +106,7 @@ export default function DiagnosisPage() {
                 strictly the audit; the action is yours to take.
               </p>
               <p>
-                We do hold every submitted strategy in confidence —
+                We do hold every submitted strategy in confidence -
                 see the disclosures page for the data-handling terms.
               </p>
             </>
@@ -114,7 +114,7 @@ export default function DiagnosisPage() {
         },
       ]}
       delivery="Five trading days from intake to PDF delivery. Encrypted handoff; signed NDA on request."
-      cost="From ₹— per audit. See full pricing."
+      cost="From ₹49,999 per audit. See full pricing."
     />
   );
 }

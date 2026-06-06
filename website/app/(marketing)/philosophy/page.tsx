@@ -31,15 +31,15 @@ export default function PhilosophyPage() {
           <>
             <p>
               The Indian markets are flooded with services that tell you
-              what to do. They send WhatsApp messages with entry,
-              target, stop. They show backtests on a perfect chart that
-              their model has already seen. They charge per signal.
+              what to do. They send instructions, show perfect-looking
+              charts, and charge for urgency. That is not the product
+              we are building.
             </p>
             <p>
               {brand.name} publishes research. A brief is a structured
               read of where the market sits today, which structural
               levels are in play, which sectors are leading, where the
-              model has actionable conviction, and where it
+              research stack has actionable conviction, and where it
               doesn&rsquo;t. The decision to act on any of it remains
               entirely with the reader.
             </p>
@@ -63,7 +63,7 @@ export default function PhilosophyPage() {
               Every claim in every brief carries a number. A 62% chance
               that a particular structural level is tested today is not
               a prediction that it <em>will</em> be tested. It is the
-              model&rsquo;s calibrated estimate of how often the
+              system&rsquo;s calibrated estimate of how often the
               setup&rsquo;s historical analogues did.
             </p>
             <p>
@@ -87,15 +87,15 @@ export default function PhilosophyPage() {
               calibration error.
             </p>
             <p>
-              When a particular head&rsquo;s calibration error exceeds
+              When a particular probability bucket drifts beyond
               a tolerance, we flag it as <em>drifting</em> in the brief
-              itself. You see, in real time, which parts of the model
-              we trust today.
+              itself. You see, in real time, which parts of the read
+              deserve more caution.
             </p>
             <p>
-              We do not advertise back-tested AUCs. We do not show
-              cherry-picked weeks. We show the per-bucket hit rate of
-              every prediction we have ever published.
+              We do not advertise cherry-picked weeks. We show the
+              per-bucket hit rate of every prediction we have published
+              through the product.
             </p>
           </>
         }
@@ -110,7 +110,7 @@ export default function PhilosophyPage() {
               Every brief ends with an audit of the previous
               brief&rsquo;s calls. Per confidence bucket, per prediction
               type. The numbers are aggregated nightly and are visible
-              to anyone who visits our track record page — subscriber
+              to anyone who visits our track record page - subscriber
               or not.
             </p>
             <p>
@@ -119,7 +119,7 @@ export default function PhilosophyPage() {
               collected live, we say so explicitly. Retrospective
               replay is useful for filling in calibration before our
               live history has accumulated, but it is not the same
-              evidence — and the disclosure line keeps the difference
+              evidence - and the disclosure line keeps the difference
               honest.
             </p>
           </>
@@ -128,24 +128,19 @@ export default function PhilosophyPage() {
 
       <Section
         eyebrow="05"
-        title="Causality, never lookahead."
+        title="Time order, never hindsight."
         body={
           <>
             <p>
               Every number in every brief was knowable in real time at
-              the moment we claim to know it. A swing high is not
-              &ldquo;detected&rdquo; until the bars that confirm it
-              have closed. A daily feature is not used as today&rsquo;s
-              input — it is used as yesterday&rsquo;s. A pool&rsquo;s
-              proximity probability is computed against the actual
-              distance from the last closed bar, not a placeholder.
+              the moment we claim to know it. If a data point would not
+              have existed before publication, it does not belong in the
+              brief.
             </p>
             <p>
-              The discipline is enforced in tests pinned at the engine
-              level: truncating any dataset to the bar where a feature
-              becomes known must produce the same value as running on
-              the full dataset. If a future bar would have changed the
-              answer, the test fails.
+              This is why the product separates live evidence from
+              retrospective replay and labels both clearly. The reader
+              should never have to guess what was known when.
             </p>
           </>
         }
@@ -156,15 +151,12 @@ export default function PhilosophyPage() {
         title="What we refuse to do."
         body={
           <>
-            <p>The list below is enforced in our build pipeline. None of these phrases can appear in any brief we publish:</p>
-            <ul className="font-mono text-sm text-fg-muted list-none pl-0 my-6 space-y-1">
-              <li>— &ldquo;buy [symbol]&rdquo;</li>
-              <li>— &ldquo;sell [symbol]&rdquo;</li>
-              <li>— &ldquo;go long&rdquo;, &ldquo;go short&rdquo;</li>
-              <li>— &ldquo;entry at&rdquo;, &ldquo;target at&rdquo;</li>
-              <li>— &ldquo;stop loss&rdquo;, &ldquo;stop-loss&rdquo;</li>
-              <li>— &ldquo;book profit&rdquo;, &ldquo;exit at&rdquo;</li>
-            </ul>
+            <p>
+              We refuse instruction-style language in customer research.
+              The brief can tell you where the market looks stretched,
+              where attention is warranted, and where caution is higher.
+              It cannot make the decision for you.
+            </p>
             <p>We also refuse, structurally:</p>
             <ul className="list-disc pl-6 space-y-2">
               <li>
@@ -200,7 +192,7 @@ export default function PhilosophyPage() {
           <>
             <p>
               {brand.name} is built for traders who already know what
-              they are doing — and want better context to do it with.
+              they are doing - and want better context to do it with.
               If you want signals, this is not the right service. If
               you want a calibrated reading of structural risk every
               morning, before NSE open, audited the next morning, this

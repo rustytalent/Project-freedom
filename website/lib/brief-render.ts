@@ -2,7 +2,7 @@
 // The web view of a brief is the canonical render; the email is a copy.
 //
 // Hard rule: the rendered output is grep-checked against the tipster
-// vocabulary list before display. A match raises — better to fail
+// vocabulary list before display. A match raises - better to fail
 // loudly in CI than land "buy X at Y" in a customer inbox.
 
 export const TIPSTER_VOCABULARY = [
@@ -112,7 +112,7 @@ export class TipsterVocabularyError extends Error {
     super(
       `Brief renderer produced tipster-vocabulary contract violation. ` +
       `Forbidden phrases found: [${hits.join(", ")}]. This is a hard ` +
-      `product contract — every match indicates a regression.`,
+      `product contract - every match indicates a regression.`,
     );
   }
 }
@@ -133,14 +133,14 @@ export function isYesterdayAuditPending(
   return "_status" in audit && audit._status === "pending";
 }
 
-// Plain-text email renderer — mirrors brief_renderer.py byte-for-byte
+// Plain-text email renderer - mirrors brief_renderer.py byte-for-byte
 // (modulo whitespace). Used by the email template and by tests.
 export function renderEmail(brief: BriefDocument): string {
   const parts: string[] = [];
 
   const md = brief.brief_metadata;
   parts.push(
-    `Daily Research Brief — ${md.trading_date_ist}\n` +
+    `Daily Research Brief - ${md.trading_date_ist}\n` +
       `Generated ${md.generated_at_utc}  bundle=${md.model_bundle_version}\n` +
       `Indexes covered: ${md.indexes_covered.join(", ") || "(none in v1)"}\n` +
       `Estimated reading time: ~${md.reading_time_minutes} min`,
@@ -158,7 +158,7 @@ export function renderEmail(brief: BriefDocument): string {
   parts.push(renderYesterdayAudit(brief.yesterday_audit));
 
   parts.push(
-    "—\n" +
+    "-\n" +
       "This brief is research context, NOT trade instructions. The " +
       "probabilities reflect the model's calibrated view; the decision " +
       "to act on any of it remains entirely with the reader.",
@@ -188,9 +188,9 @@ function renderTldr(brief: BriefDocument): string {
       `own thesis.`;
   } else {
     verdict =
-      "Brief generated — see sections below for the structural read.";
+      "Brief generated - see sections below for the structural read.";
   }
-  return `TLDR — ${verdict}`;
+  return `TLDR - ${verdict}`;
 }
 
 function renderSectorRegime(s: SectorRegime): string {
@@ -205,17 +205,17 @@ function renderSectorRegime(s: SectorRegime): string {
   const leadership = s.leadership_change_vs_yesterday.length
     ? ` Leadership change vs yesterday: ${s.leadership_change_vs_yesterday.join(", ")}.`
     : "";
-  return `SECTOR REGIME — ${body}.${leadership}`;
+  return `SECTOR REGIME - ${body}.${leadership}`;
 }
 
 function renderWatchlist(entries: WatchlistEntry[]): string {
   if (!entries.length) {
     return (
-      "WATCHLIST — empty. No instruments cleared the proximity " +
+      "WATCHLIST - empty. No instruments cleared the proximity " +
       "threshold today."
     );
   }
-  const lines = ["WATCHLIST — instruments the model flags as in-play today:"];
+  const lines = ["WATCHLIST - instruments the model flags as in-play today:"];
   for (const e of entries) {
     const note = e.avoidance_note ? `  [note: ${e.avoidance_note}]` : "";
     lines.push(
@@ -231,10 +231,10 @@ function renderWatchlist(entries: WatchlistEntry[]): string {
 
 function renderAvoidList(entries: AvoidEntry[]): string {
   if (!entries.length) {
-    return "AVOID — no specific stand-aside calls today.";
+    return "AVOID - no specific stand-aside calls today.";
   }
   const lines = [
-    "AVOID — the model recommends standing aside in these contexts:",
+    "AVOID - the model recommends standing aside in these contexts:",
   ];
   for (const e of entries) {
     lines.push(
@@ -252,7 +252,7 @@ function renderConfidence(c: ConfidenceNotes): string {
     parts.push(`drifting today: ${c.drifting_today.join(", ")}`);
   if (!parts.length) parts.push("no model-health data available");
   return (
-    `CONFIDENCE — ${parts.join("; ")}. ` +
+    `CONFIDENCE - ${parts.join("; ")}. ` +
     `Overall brief confidence: ${c.overall_brief_confidence}.`
   );
 }
@@ -262,14 +262,14 @@ function renderPendingStub(
   stub: Record<string, unknown>,
 ): string {
   const reason = String(stub._reason ?? "data unavailable");
-  return `${sectionName.toUpperCase()} — pending: ${reason}.`;
+  return `${sectionName.toUpperCase()} - pending: ${reason}.`;
 }
 
 function renderYesterdayAudit(audit: YesterdayAudit): string {
   if (isYesterdayAuditPending(audit)) {
     return renderPendingStub("Yesterday audit", audit);
   }
-  const lines: string[] = ["YESTERDAY AUDIT —"];
+  const lines: string[] = ["YESTERDAY AUDIT -"];
   if (audit.is_retrospective_calibration) {
     const share = audit.retrospective_share;
     lines.push(

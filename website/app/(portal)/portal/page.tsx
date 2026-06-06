@@ -37,7 +37,7 @@ export default function PortalLandingPage() {
           </CardDescription>
           <CardContent className="mt-6">
             <LinkButton href="/portal/brief/today" variant="primary">
-              Read today&rsquo;s brief →
+              Read today&rsquo;s brief
             </LinkButton>
           </CardContent>
         </Card>
@@ -49,17 +49,17 @@ export default function PortalLandingPage() {
           </CardDescription>
           <CardContent className="mt-6">
             <p className="font-mono text-xs text-fg-muted leading-relaxed tabnum">
-              proximity: <span className="text-calibrated">calibrated</span>
+              touch watch: <span className="text-calibrated">calibrated</span>
               <br />
               avoidance: <span className="text-calibrated">calibrated</span>
               <br />
-              options: <span className="text-drift">drifting +0.11</span>
+              slower horizon: <span className="text-drift">under review</span>
             </p>
             <Link
               href="/portal/calibration"
               className="block mt-4 text-sm text-accent underline underline-offset-4"
             >
-              Open full dashboard →
+              Open full dashboard
             </Link>
           </CardContent>
         </Card>
@@ -73,7 +73,7 @@ export default function PortalLandingPage() {
               { date: "2026-06-04", note: "Daily" },
               { date: "2026-06-03", note: "Daily" },
               { date: "2026-06-02", note: "Daily" },
-              { date: "2026-06-01", note: "Swing — week of Jun 1" },
+              { date: "2026-06-01", note: "Swing - week of Jun 1" },
             ].map((row) => (
               <div
                 key={row.date}
@@ -95,15 +95,15 @@ export default function PortalLandingPage() {
         </Card>
         <Card>
           <CardTitle>Your subscription</CardTitle>
-          <CardDescription>Multi-product · Monthly</CardDescription>
+          <CardDescription>Pro Desk · Monthly</CardDescription>
           <CardContent className="mt-4 text-sm text-fg-muted">
             <p>Next renewal: 2026-07-04.</p>
-            <p className="mt-2">Daily Brief + Swing Brief active.</p>
+            <p className="mt-2">Daily Brief and full archive active.</p>
             <Link
               href="/portal/account"
               className="block mt-4 text-sm text-accent underline underline-offset-4"
             >
-              Manage subscription →
+              Manage subscription
             </Link>
           </CardContent>
         </Card>
