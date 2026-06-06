@@ -12,7 +12,7 @@
 
 export type CalibrationBucketRow = {
   trading_date_ist: string;       // YYYY-MM-DD
-  prediction_type: string;        // proximity | avoidance | options_strike
+  prediction_type: string;        // touch_watch | avoidance | options_strike
   confidence_bucket: string;      // very_high | high | moderate | low
   n: number;
   hit_rate: number;
@@ -36,7 +36,7 @@ function seeded(seed: number): () => number {
   };
 }
 
-const PREDICTION_TYPES = ["proximity", "avoidance", "options_strike"] as const;
+const PREDICTION_TYPES = ["touch_watch", "avoidance", "options_strike"] as const;
 const BUCKETS = ["very_high", "high", "moderate", "low"] as const;
 
 const BUCKET_CENTERS: Record<string, number> = {
@@ -71,7 +71,7 @@ export function mockLatestSummary(): CalibrationBucketRow[] {
 
 export function mockTimeSeries(): Array<{
   trading_date_ist: string;
-  proximity_calibration_error: number;
+  touch_watch_calibration_error: number;
   avoidance_calibration_error: number;
   options_calibration_error: number;
 }> {
@@ -85,7 +85,7 @@ export function mockTimeSeries(): Array<{
     if (d.getDay() === 0 || d.getDay() === 6) continue;
     out.push({
       trading_date_ist: d.toISOString().slice(0, 10),
-      proximity_calibration_error: (rand() - 0.5) * 0.16,
+      touch_watch_calibration_error: (rand() - 0.5) * 0.16,
       avoidance_calibration_error: (rand() - 0.5) * 0.10,
       options_calibration_error: (rand() - 0.5) * 0.20,
     });

@@ -19,9 +19,12 @@ export default function AccountPage() {
       <div className="space-y-6">
         <Card>
           <CardTitle>Plan</CardTitle>
-          <CardDescription>Pro Desk · Monthly · ₹9,999</CardDescription>
+          <CardDescription>Live Desk · Monthly · ₹14,999</CardDescription>
           <CardContent className="mt-4 text-sm text-fg-muted">
-            <p>Includes Daily Brief, full archive, and pro calibration view.</p>
+            <p>
+              Includes equity, options, indexes, full archive, calibration,
+              and live update delivery.
+            </p>
             <p className="mt-2">Next renewal on 2026-07-04.</p>
             <div className="mt-6 flex gap-3">
               <button
@@ -49,7 +52,7 @@ export default function AccountPage() {
               <span className="text-fg">Email + portal</span>
             </p>
             <p>
-              Swing Brief delivery:{" "}
+              Options and index exports:{" "}
               <span className="text-fg">Email + portal</span>
             </p>
             <p>

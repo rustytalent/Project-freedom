@@ -101,7 +101,7 @@ export default function DailyBriefPage() {
         },
       ]}
       delivery="Email + portal. Time: 08:30 IST, every NSE trading day. PDF available on request."
-      cost="Daily Brief starts at ₹4,999 per month. See full pricing."
+      cost="Core Research starts at ₹6,999 per month and includes equity, options, and index research. See full pricing."
       notes={
         <p>
           This brief is research context, not investment advice. We are

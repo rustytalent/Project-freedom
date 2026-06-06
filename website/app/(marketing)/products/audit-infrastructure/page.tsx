@@ -23,7 +23,7 @@ export default function AuditInfrastructurePage() {
             private research engine.
           </p>
           <p>
-            For teams that already have alpha and want a structured
+            For teams that already have a research edge and want a structured
             audit layer wrapped around it, we license that harness as
             a B2B engagement.
           </p>
@@ -91,7 +91,7 @@ export default function AuditInfrastructurePage() {
         },
       ]}
       delivery="On a per-engagement basis. Roughly eight weeks from contract to handover."
-      cost="On request. The Diagnosis product is a useful smaller engagement to start with."
+      cost="On request. Audit Base starts at ₹2,000 and is the smaller engagement to start with."
     />
   );
 }

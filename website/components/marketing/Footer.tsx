@@ -8,9 +8,9 @@ const groups: Array<{
   {
     heading: "Product",
     links: [
-      { href: "/products/daily-brief", label: "Daily brief" },
-      { href: "/products/swing-brief", label: "Swing brief" },
-      { href: "/products/diagnosis", label: "Diagnosis" },
+      { href: "/products/daily-brief", label: "Core Research" },
+      { href: "/products/swing-brief", label: "Live Desk" },
+      { href: "/products/diagnosis", label: "Audit Base" },
       { href: "/products/audit-infrastructure", label: "Audit infrastructure" },
     ],
   },

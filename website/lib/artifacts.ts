@@ -23,8 +23,8 @@ export type ArtifactKind =
 export const ARTIFACT_KIND_LABELS: Record<ArtifactKind, string> = {
   daily_brief_pdf: "Daily Brief (PDF)",
   daily_brief_email: "Daily Brief (email archive)",
-  swing_brief_pdf: "Swing Brief (PDF)",
-  diagnosis_report_pdf: "Diagnosis Report",
+  swing_brief_pdf: "Live Desk note (PDF)",
+  diagnosis_report_pdf: "Audit Report",
   calibration_summary_csv: "Calibration summary",
   outcome_log_export_csv: "Outcome log export",
   yesterday_audit_csv: "Yesterday Audit",
@@ -38,9 +38,9 @@ export const ARTIFACT_KIND_DESCRIPTIONS: Record<ArtifactKind, string> = {
   daily_brief_email:
     "The same brief in email format (text + light HTML).",
   swing_brief_pdf:
-    "Multi-day positional research, published Monday pre-open.",
+    "Slower-horizon research note for Live Desk subscribers.",
   diagnosis_report_pdf:
-    "Your strategy diagnosis report.",
+    "Your audit report.",
   calibration_summary_csv:
     "Per-bucket calibration error for the last 90 trading days.",
   outcome_log_export_csv:
@@ -48,7 +48,7 @@ export const ARTIFACT_KIND_DESCRIPTIONS: Record<ArtifactKind, string> = {
   yesterday_audit_csv:
     "Calibrated hit-rate audit for the previous IST trading session.",
   options_strikes_csv:
-    "Index option strikes flagged in today's brief, with proximity numbers.",
+    "Index option strikes flagged in today's brief, with touch-watch numbers.",
   weekly_research_note_pdf:
     "Long-form Monday note on regime structure.",
 };
@@ -68,10 +68,10 @@ export type AccessTier =
 
 export const TIER_LABELS: Record<AccessTier, string> = {
   public: "Public",
-  free_signup: "Signed-in (free 7-day window)",
-  paid_intraday: "Intraday subscribers",
-  paid_multi_product: "Multi-product subscribers",
-  paid_diagnosis: "Diagnosis customers",
+  free_signup: "Signed-in preview (5 days)",
+  paid_intraday: "Core Research subscribers",
+  paid_multi_product: "Live Desk subscribers",
+  paid_diagnosis: "Audit customers",
 };
 
 // Order matters: higher index = higher-privilege tier.
@@ -91,8 +91,8 @@ export function canAccess(
   for (const t of reader_tiers) {
     if (TIER_RANK[t] >= TIER_RANK[required]) return true;
   }
-  // Diagnosis is orthogonal: diagnosis customers see their own report,
-  // multi-product subs do NOT inherit access to other people's reports.
+  // Audit reports are personal; higher general tiers do NOT inherit
+  // access to other people's reports.
   if (required === "paid_diagnosis") {
     return reader_tiers.has("paid_diagnosis");
   }

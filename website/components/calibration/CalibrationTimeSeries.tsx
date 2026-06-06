@@ -14,7 +14,7 @@ import {
 
 type Point = {
   trading_date_ist: string;
-  proximity_calibration_error: number;
+  touch_watch_calibration_error: number;
   avoidance_calibration_error: number;
   options_calibration_error: number;
 };
@@ -68,9 +68,9 @@ export function CalibrationTimeSeries({ data }: { data: Point[] }) {
             iconType="plainline"
           />
           <Line
-            name="Proximity"
+            name="Touch watch"
             type="monotone"
-            dataKey="proximity_calibration_error"
+            dataKey="touch_watch_calibration_error"
             stroke="#7C9BB8"
             strokeWidth={1.5}
             dot={false}

@@ -29,11 +29,12 @@ export default function TermsPage() {
 
       <h2 className="text-xl text-fg font-serif">2. Subscription products</h2>
       <p>
-        Active subscriptions grant access to the corresponding briefs
-        (Daily Brief, Swing Brief) for the period paid. Subscriptions
-        renew automatically at the start of each billing period unless
-        cancelled in the subscriber portal at least 24 hours before
-        renewal.
+        Active subscriptions grant access to the corresponding equity,
+        options, and index research artifacts for the period paid. Live
+        update delivery is included only in plans that explicitly list
+        live updates. Subscriptions renew automatically at the start of
+        each billing period unless cancelled in the subscriber portal
+        at least 24 hours before renewal.
       </p>
 
       <h2 className="text-xl text-fg font-serif">3. Refunds</h2>

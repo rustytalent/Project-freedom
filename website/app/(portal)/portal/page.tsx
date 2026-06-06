@@ -95,10 +95,12 @@ export default function PortalLandingPage() {
         </Card>
         <Card>
           <CardTitle>Your subscription</CardTitle>
-          <CardDescription>Pro Desk · Monthly</CardDescription>
+          <CardDescription>Live Desk · Monthly</CardDescription>
           <CardContent className="mt-4 text-sm text-fg-muted">
             <p>Next renewal: 2026-07-04.</p>
-            <p className="mt-2">Daily Brief and full archive active.</p>
+            <p className="mt-2">
+              Equity, options, indexes, archive, and live updates active.
+            </p>
             <Link
               href="/portal/account"
               className="block mt-4 text-sm text-accent underline underline-offset-4"

@@ -17,7 +17,8 @@ export default function AuthCallbackPage() {
       </h1>
       <p className="mt-6 text-fg-muted leading-relaxed">
         If your browser has completed the Google sign-in flow, continue
-        to the subscriber portal. If access is not active yet, use the
+        to the subscriber portal. Preview access starts on first login
+        and lasts five days. If paid access is not active yet, use the
         same email you paid with and contact support.
       </p>
       <div className="mt-8 flex flex-wrap gap-3">

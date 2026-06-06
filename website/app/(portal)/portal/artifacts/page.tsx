@@ -27,10 +27,10 @@ const SECTION_ORDER: Array<{
       "No Daily Brief artifacts yet. Today's brief will appear here by 08:30 IST.",
   },
   {
-    heading: "Swing Brief",
+    heading: "Live Desk notes",
     kinds: ["swing_brief_pdf"],
     empty:
-      "No Swing Brief artifacts yet. Monday pre-open is the next scheduled publication.",
+      "No Live Desk note artifacts yet. Monday pre-open is the next scheduled publication.",
   },
   {
     heading: "Calibration & audit exports",
@@ -52,10 +52,10 @@ const SECTION_ORDER: Array<{
     empty: "Weekly research notes appear here on Monday mornings.",
   },
   {
-    heading: "Diagnosis",
+    heading: "Audit reports",
     kinds: ["diagnosis_report_pdf"],
     empty:
-      "Diagnosis reports appear here only for diagnosis customers, once published.",
+      "Audit reports appear here only for the customer account they belong to, once published.",
   },
 ];
 
@@ -80,10 +80,10 @@ export default async function PortalArtifactsPage() {
           Every artifact the engine publishes, in one place.
         </h1>
         <p className="mt-4 text-fg-muted leading-relaxed">
-          Daily Brief PDFs, Swing Brief PDFs, calibration exports, and
-          diagnosis reports - uploaded automatically the moment the
-          engine finishes generating them. Tier-gated; you see what
-          your subscription includes.
+          Daily Brief PDFs, options exports, index notes, calibration
+          exports, and audit reports - uploaded automatically the
+          moment the engine finishes generating them. Tier-gated; you
+          see what your subscription includes.
         </p>
         {latest && (
           <p className="mt-4 text-xs text-fg-subtle font-mono">

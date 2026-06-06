@@ -168,47 +168,48 @@ export default function LandingPage() {
             Pricing for a research product, not a tip sheet.
           </h2>
           <p className="mt-4 text-fg-muted max-w-xl leading-relaxed">
-            Start with a preview account, then choose Daily Brief or
-            Pro Desk. Payments run through Razorpay and account access
-            uses Google sign-in.
+            Google sign-in starts a five-day preview automatically.
+            Paid plans run through Razorpay and keep the exact research
+            archive inside the subscriber portal.
           </p>
           <div className="grid gap-4 md:grid-cols-3 mt-10">
             <Card>
-              <CardTitle>Intraday</CardTitle>
+              <CardTitle>Core Research</CardTitle>
               <CardDescription>
-                Daily Brief, every NSE trading day before open.
+                Equity, options, and index research without live
+                intraday updates.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹4,999
+                ₹6,999
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
                 per month
               </CardContent>
             </Card>
             <Card>
-              <CardTitle>Pro Desk</CardTitle>
+              <CardTitle>Live Desk</CardTitle>
               <CardDescription>
-                Full archive, pro calibration view, and priority
+                Core Research plus live update stream and priority
                 delivery support.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹9,999
+                ₹14,999
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
                 per month
               </CardContent>
             </Card>
             <Card>
-              <CardTitle>Diagnosis</CardTitle>
+              <CardTitle>Audit Base</CardTitle>
               <CardDescription>
-                One-off audit of your own strategy. Five trading days
-                turnaround.
+                Base audit for research or infrastructure, expanded by
+                data size and scope.
               </CardDescription>
               <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹49,999+
+                ₹2,000+
               </CardContent>
               <CardContent className="text-xs text-fg-subtle mt-1">
-                per audit
+                base + scope
               </CardContent>
             </Card>
           </div>

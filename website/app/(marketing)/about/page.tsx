@@ -72,7 +72,7 @@ export default function AboutPage() {
             {brand.contact.email}
           </a>{" "}
           for product questions, partnerships, or to book a 30-minute
-          intake call for the Diagnosis product.
+          intake call for Audit Base.
         </p>
       </section>
 

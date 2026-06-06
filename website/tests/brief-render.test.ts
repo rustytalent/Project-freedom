@@ -19,7 +19,7 @@ describe("tipster vocabulary guardrail", () => {
   it("passes on calibrated research language", () => {
     expect(() =>
       assertNoTipsterLanguage(
-        "Proximity model assigns a 70% probability to the level " +
+        "Touch-watch read assigns a 70% probability to the level " +
           "being tested today. Context only; consult your own thesis.",
       ),
     ).not.toThrow();
@@ -64,7 +64,7 @@ describe("renderEmail on the sample brief", () => {
   it("populates the yesterday audit per-bucket table", () => {
     const text = renderEmail(brief);
     expect(text).toMatch(/hit rate by confidence bucket:/);
-    expect(text).toMatch(/proximity \/ high/);
+    expect(text).toMatch(/touch watch \/ high/);
   });
 });
 

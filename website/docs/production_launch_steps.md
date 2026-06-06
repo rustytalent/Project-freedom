@@ -13,7 +13,9 @@ staging product into a paid subscriber product.
 create table if not exists subscribers (
   id uuid primary key default gen_random_uuid(),
   email text not null unique,
-  tier text not null default 'preview',
+  tier text not null default 'free_signup',
+  preview_started_at timestamptz,
+  preview_expires_at timestamptz,
   razorpay_customer_id text,
   razorpay_subscription_id text,
   status text not null default 'inactive',
@@ -27,6 +29,10 @@ create table if not exists subscribers (
 6. Add redirect URLs:
    - `http://localhost:3000/auth/callback`
    - `https://<domain>/auth/callback`
+7. On first successful Google sign-in, upsert the subscriber row and
+   set `preview_started_at = now()` and `preview_expires_at = now() +
+   interval '5 days'` if those fields are empty. Do not reset the
+   preview clock on later logins.
 
 ## 2. Razorpay
 
@@ -35,7 +41,7 @@ create table if not exists subscribers (
    - `RAZORPAY_KEY_ID`
    - `RAZORPAY_KEY_SECRET`
    - `RAZORPAY_WEBHOOK_SECRET`
-3. Use test mode first and complete one Daily Brief checkout.
+3. Use test mode first and complete one Core Research checkout.
 4. Add a webhook endpoint in the website before public launch. The
    webhook should verify the signature, upsert the subscriber email,
    and activate the paid tier.

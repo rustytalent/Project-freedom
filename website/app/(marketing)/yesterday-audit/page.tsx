@@ -15,16 +15,16 @@ const RETROSPECTIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT -
   track record.
   brief=BRIEF_2026_05_28 predictions_made=11 resolved=9
   hit rate by confidence bucket:
-    - proximity / high:     n=4, hit_rate=75%, mean_p=71%, calibration_error=-0.04
-    - proximity / moderate: n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25
+    - touch watch / high:     n=4, hit_rate=75%, mean_p=71%, calibration_error=-0.04
+    - touch watch / moderate: n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25
     - avoidance / moderate: n=2, hit_rate=100%, mean_p=100%, calibration_error=0.00`;
 
 const LIVE_AUDIT_EXCERPT = `YESTERDAY AUDIT -
   brief=BRIEF_2026_06_04 predictions_made=12 resolved=11
   hit rate by confidence bucket:
-    - proximity / very_high: n=2, hit_rate=100%, mean_p=88%, calibration_error=-0.12
-    - proximity / high:      n=5, hit_rate=80%, mean_p=72%, calibration_error=-0.08
-    - proximity / moderate:  n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25
+    - touch watch / very_high: n=2, hit_rate=100%, mean_p=88%, calibration_error=-0.12
+    - touch watch / high:      n=5, hit_rate=80%, mean_p=72%, calibration_error=-0.08
+    - touch watch / moderate:  n=3, hit_rate=33%, mean_p=58%, calibration_error=+0.25
     - avoidance / high:      n=1, hit_rate=100%, mean_p=100%, calibration_error=0.00`;
 
 export default function YesterdayAuditPage() {

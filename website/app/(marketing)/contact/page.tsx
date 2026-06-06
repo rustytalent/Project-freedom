@@ -17,7 +17,7 @@ export default function ContactPage() {
           Talk to us.
         </h1>
         <p className="mt-6 text-fg-muted leading-relaxed">
-          Product questions, partnership requests, or the Diagnosis
+          Product questions, partnership requests, or an Audit Base
           intake call - email is the simplest channel for all of them.
         </p>
       </header>
@@ -33,7 +33,7 @@ export default function ContactPage() {
           </a>
         </p>
         <p>
-          For Diagnosis intakes, include a one-paragraph description of
+          For Audit Base intakes, include a one-paragraph description of
           your strategy and a rough trade count. We&rsquo;ll send you
           the CSV column spec and a 30-minute intake call link.
         </p>
@@ -44,7 +44,7 @@ export default function ContactPage() {
           days.
         </p>
         <p>
-          For Daily / Swing Brief questions, the sample brief and
+          For Core Research or Live Desk questions, the sample brief and
           pricing page usually answer them - email if anything is
           still unclear.
         </p>

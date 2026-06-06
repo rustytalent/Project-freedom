@@ -27,9 +27,10 @@ pnpm build
 
 The site currently supports:
 
-- Public marketing pages for Daily Brief, Pro Desk, Diagnosis, and B2B
-  audit work.
+- Public marketing pages for Core Research, Live Desk, Audit Base, and
+  B2B audit work.
 - Public sample brief with subscriber-only levels redacted.
+- Five-day signed-in preview that starts on first Google login.
 - Public track record page backed by deterministic demo data until the
   live aggregate view is connected.
 - Subscriber portal skeleton for today, brief archive, calibration, and
@@ -115,11 +116,15 @@ create table if not exists briefs (
 ```
 
 5. Add row-level security policies before exposing subscriber reads.
-6. Create Razorpay live keys and add the keys to Vercel.
-7. Create a Razorpay webhook that verifies payment events and updates
+6. Create the subscriber table with `tier = 'free_signup'`,
+   `preview_started_at`, and `preview_expires_at`. First Google login
+   should set a five-day preview clock and later logins should not
+   reset it.
+7. Create Razorpay live keys and add the keys to Vercel.
+8. Create a Razorpay webhook that verifies payment events and updates
    the subscriber tier table. Keep the webhook server-side only.
-8. Configure Resend for transactional email and brief delivery.
-9. Deploy to Vercel and run:
+9. Configure Resend for transactional email and brief delivery.
+10. Deploy to Vercel and run:
 
 ```bash
 pnpm test

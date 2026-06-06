@@ -47,7 +47,7 @@ export default function PrivacyPage() {
       <ul>
         <li>
           Phone number (unless you voluntarily provide it for the
-          Diagnosis intake call).
+          Audit Base intake call).
         </li>
         <li>Identity documents (KYC). We are not an Investment Adviser; KYC is not required.</li>
         <li>Broker / demat account credentials. Ever.</li>
@@ -62,12 +62,13 @@ export default function PrivacyPage() {
         manage subscription renewal and refund.
       </p>
 
-      <h2 className="text-xl text-fg font-serif">Diagnosis-product data</h2>
+      <h2 className="text-xl text-fg font-serif">Audit-product data</h2>
       <p>
-        If you engage the Diagnosis product, the trade log you submit
-        is held under NDA on encrypted storage, used only for the
-        purpose of producing your report, and deleted within 90 days
-        of report delivery unless you request retention.
+        If you engage the Audit Base product, the trade log you submit
+        is transferred through an encrypted handoff, used only for the
+        purpose of producing your report, and not retained after report
+        delivery unless you explicitly request retention. NDA is
+        available on request. We never ask for broker credentials.
       </p>
 
       <h2 className="text-xl text-fg font-serif">Third-party processors</h2>

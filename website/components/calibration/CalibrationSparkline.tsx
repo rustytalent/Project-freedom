@@ -13,7 +13,7 @@ import {
 
 export type SparklinePoint = {
   trading_date_ist: string;
-  proximity_calibration_error: number;
+  touch_watch_calibration_error: number;
 };
 
 export function CalibrationSparkline({
@@ -74,7 +74,7 @@ export function CalibrationSparkline({
           />
           <Line
             type="monotone"
-            dataKey="proximity_calibration_error"
+            dataKey="touch_watch_calibration_error"
             stroke="#7C9BB8"
             strokeWidth={1.5}
             dot={false}

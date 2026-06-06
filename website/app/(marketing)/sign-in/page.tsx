@@ -28,9 +28,9 @@ export default function SignInPage() {
         Sign in with Google.
       </h1>
       <p className="mt-6 text-fg-muted leading-relaxed">
-        Subscribers use Google sign-in for account access. The same
-        email used at checkout should be used here so the portal can
-        match your subscription tier.
+        Google sign-in starts your five-day preview automatically. The
+        same email used at checkout should be used here so the portal
+        can match your subscription tier after payment.
       </p>
 
       <div className="mt-10 border border-border bg-bg-raised p-6 rounded-sm">
@@ -41,7 +41,8 @@ export default function SignInPage() {
             </LinkButton>
             <p className="mt-4 text-xs text-fg-subtle leading-relaxed">
               You will be redirected to Google, then back to the portal
-              after authentication.
+              after authentication. Preview access starts on the first
+              successful login and does not reset on later logins.
             </p>
           </>
         ) : (

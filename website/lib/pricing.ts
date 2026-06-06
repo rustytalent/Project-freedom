@@ -15,36 +15,36 @@ export type Plan = {
 export const plans: Record<PlanId, Plan> = {
   daily: {
     id: "daily",
-    name: "Daily Brief",
+    name: "Core Research",
     description:
-      "Equity research brief before open, subscriber-only levels, " +
-      "yesterday audit, and a thirty-day archive.",
-    monthlyInr: 4999,
-    annualInr: 49999,
-    displayMonthly: "₹4,999/mo",
-    displayAnnual: "₹49,999/yr",
+      "Equity, options, and index research briefs with archive access. " +
+      "Live intraday updates are not included.",
+    monthlyInr: 6999,
+    annualInr: 69999,
+    displayMonthly: "₹6,999/mo",
+    displayAnnual: "₹69,999/yr",
   },
   pro: {
     id: "pro",
-    name: "Pro Desk",
+    name: "Live Desk",
     description:
-      "Daily Brief plus full archive, pro calibration dashboard, " +
-      "priority support, and options-ready context when enabled.",
-    monthlyInr: 9999,
-    annualInr: 99999,
-    displayMonthly: "₹9,999/mo",
-    displayAnnual: "₹99,999/yr",
+      "Core Research plus live update delivery, full archive, " +
+      "calibration dashboard, and priority support.",
+    monthlyInr: 14999,
+    annualInr: 149999,
+    displayMonthly: "₹14,999/mo",
+    displayAnnual: "₹149,999/yr",
   },
   diagnosis: {
     id: "diagnosis",
-    name: "Strategy Diagnosis",
+    name: "Audit Base",
     description:
-      "One-off strategy audit with cost sensitivity, failure modes, " +
-      "and a clear ship, re-scope, or shelve recommendation.",
+      "One-off research or infrastructure audit. Starts with a base " +
+      "scope and expands by infrastructure size and data complexity.",
     monthlyInr: null,
     annualInr: null,
-    displayMonthly: "From ₹49,999",
-    displayAnnual: "Per audit",
+    displayMonthly: "From ₹2,000",
+    displayAnnual: "Base + scope",
   },
 };
 

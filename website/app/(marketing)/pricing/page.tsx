@@ -6,24 +6,10 @@ import { plans } from "@/lib/pricing";
 export const metadata: Metadata = {
   title: "Pricing",
   description:
-    "Daily Brief, Pro Desk, and strategy diagnosis pricing for Indian market research.",
+    "Core Research, Live Desk, and audit pricing for Indian market research.",
 };
 
 const tiers = [
-  {
-    name: "Preview",
-    monthly: "₹0",
-    annual: "No card required",
-    desc: "A redacted product preview for serious readers before they subscribe.",
-    includes: [
-      "Public sample brief with licensed levels hidden",
-      "Seven-day archive preview after account creation",
-      "Public calibration dashboard",
-      "No exact zones, no subscriber archive",
-    ],
-    cta: "Create preview account",
-    href: "/portal/sign-in",
-  },
   {
     name: plans.daily.name,
     monthly: plans.daily.displayMonthly,
@@ -31,11 +17,12 @@ const tiers = [
     desc: plans.daily.description,
     recommended: true,
     includes: [
+      "Equity, options, and index research",
       "Daily Brief by 08:30 IST on NSE trading days",
-      "Exact subscriber-only zones in the portal",
+      "Subscriber-only portal archive",
       "Yesterday Audit inside every brief",
       "Email plus portal delivery",
-      "Thirty-day archive access",
+      "No live intraday update stream",
     ],
     cta: "Subscribe with Razorpay",
     href: "/checkout?plan=daily&cycle=monthly",
@@ -46,10 +33,11 @@ const tiers = [
     annual: plans.pro.displayAnnual,
     desc: plans.pro.description,
     includes: [
-      "Everything in Daily Brief",
+      "Everything in Core Research",
+      "Live update stream when the desk is active",
+      "Equity, options, and index coverage",
       "Full brief archive",
-      "Pro calibration dashboard",
-      "Options-ready context when the stream is enabled",
+      "Calibration and outcome dashboard",
       "Priority delivery support",
     ],
     cta: "Subscribe with Razorpay",
@@ -61,11 +49,11 @@ const tiers = [
     annual: plans.diagnosis.displayAnnual,
     desc: plans.diagnosis.description,
     includes: [
-      "Structured PDF report, usually 12 to 18 pages",
-      "Regime decomposition and drawdown attribution",
-      "Persistence and leakage checks",
-      "Cost-sensitivity analysis",
-      "Recommendation: ship, re-scope, or shelve",
+      "₹2,000 base review",
+      "Scope expands by infrastructure and data size",
+      "Structured PDF report",
+      "Data processed for the audit only",
+      "No strategy data retained after delivery unless requested",
     ],
     cta: "Request a diagnosis",
     href: "/contact",
@@ -94,7 +82,22 @@ export default function PricingPage() {
         </p>
       </header>
 
-      <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+      <section className="mb-10 rounded-lg border border-border bg-bg-raised p-6">
+        <p className="text-xs uppercase tracking-[0.18em] text-accent mb-3">
+          Login preview
+        </p>
+        <h2 className="font-serif text-2xl text-fg">
+          Five days start automatically after Google sign-in.
+        </h2>
+        <p className="mt-3 text-sm text-fg-muted leading-relaxed max-w-3xl">
+          There is no public zero-price plan card. When a reader signs
+          in, their preview clock starts for five days with redacted
+          access to selected artifacts. The timer is account-based and
+          does not require a Razorpay checkout.
+        </p>
+      </section>
+
+      <div className="grid gap-6 md:grid-cols-3">
         {tiers.map((t) => (
           <Card
             key={t.name}
@@ -145,7 +148,8 @@ export default function PricingPage() {
           Exact levels, archive access, and private brief delivery are
           the paid product. The preview is intentionally limited so
           public pages cannot be reverse engineered into the subscriber
-          experience.
+          experience. It begins on first login and expires after five
+          days.
         </p>
         <h2 className="font-serif text-2xl text-fg mt-12 mb-4">
           Why no performance-fee tier?

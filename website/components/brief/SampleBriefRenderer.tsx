@@ -1,6 +1,7 @@
 import {
   BriefDocument,
   isYesterdayAuditPending,
+  publicPredictionLabel,
   WatchlistEntry,
 } from "@/lib/brief-render";
 
@@ -237,7 +238,7 @@ function WatchlistBody({ entries }: { entries: WatchlistEntry[] }) {
   if (!entries.length) {
     return (
       <p className="text-fg-muted text-sm">
-        Empty. No instruments cleared the proximity threshold today.
+        Empty. No instruments cleared the touch-watch threshold today.
       </p>
     );
   }
@@ -310,13 +311,13 @@ function ConfidenceBody({ brief }: { brief: BriefDocument }) {
       {c.calibrated_today.length > 0 && (
         <p>
           <span className="text-calibrated">calibrated today:</span>{" "}
-          {c.calibrated_today.join(", ")}
+          {c.calibrated_today.map(publicPredictionLabel).join(", ")}
         </p>
       )}
       {c.drifting_today.length > 0 && (
         <p>
           <span className="text-drift">drifting today:</span>{" "}
-          {c.drifting_today.join(", ")}
+          {c.drifting_today.map(publicPredictionLabel).join(", ")}
         </p>
       )}
       <p className="text-fg pt-2">
@@ -371,7 +372,7 @@ function YesterdayAuditBody({ brief }: { brief: BriefDocument }) {
             {a.hit_rate_by_confidence_bucket.map((row, i) => (
               <tr key={i} className="border-b border-border/50">
                 <td className="py-2 pr-4 text-fg-muted">
-                  {row.prediction_type}
+                  {publicPredictionLabel(row.prediction_type)}
                 </td>
                 <td className="py-2 pr-4 text-fg-muted">
                   {row.confidence_bucket}

@@ -15,8 +15,7 @@ import {
 // nightly.
 //
 // CRITICAL: this route must NEVER leak per-prediction detail. If you
-// add fields, audit them against §2 of the website spec
-// (docs/website_codex_prompt.md in the engine repo).
+// add fields, audit them against the public website spec.
 
 export const runtime = "edge";
 // Revalidate hourly; the engine populates the view nightly so an

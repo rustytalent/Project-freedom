@@ -2,28 +2,28 @@ import type { Metadata } from "next";
 import { ProductPage } from "@/components/marketing/ProductPage";
 
 export const metadata: Metadata = {
-  title: "Swing Brief",
+  title: "Live Desk",
   description:
-    "Coming multi-day research brief for positional traders.",
+    "Live update desk and slower-horizon research stream for subscribers.",
 };
 
 export default function SwingBriefPage() {
   return (
     <ProductPage
-      eyebrow="Product · Swing Brief"
-      title="A coming multi-day research stream."
-      oneLiner="For positional traders and options users who need slower context than the Daily Brief."
+      eyebrow="Product · Live Desk"
+      title="Core Research, with live updates when the desk is active."
+      oneLiner="For readers who want the core archive plus faster update delivery."
       intro={
         <>
           <p>
-            The current production focus is the Daily Brief. Swing is
-            the next research stream because slower horizons usually
-            give cleaner cost arithmetic and more time for a thesis to
-            develop.
+            Live Desk builds on Core Research. It keeps the same
+            morning brief and archive, then adds live update delivery
+            when the desk is active.
           </p>
           <p>
-            We will not sell this as a separate paid product until its
-            archive and outcome log are stable enough to review.
+            Slower-horizon and options notes are part of the same desk
+            language, but every module stays behind an audit trail
+            before it becomes a regular customer artifact.
           </p>
         </>
       }
@@ -49,7 +49,7 @@ export default function SwingBriefPage() {
           ),
         },
         {
-          heading: "What's different from the Daily Brief",
+          heading: "What's different from Core Research",
           body: (
             <>
               <p>
@@ -59,7 +59,7 @@ export default function SwingBriefPage() {
                 structural setup.
               </p>
               <p>
-                The Yesterday Audit equivalent on swing runs at the
+                The Yesterday Audit equivalent on slower notes runs at the
                 end of each 5/10/20-day window, not nightly.
                 Calibration converges more slowly on swing horizons -
                 that is honest evidence of the longer feedback loop.
@@ -78,8 +78,8 @@ export default function SwingBriefPage() {
           ),
         },
       ]}
-      delivery="Not generally available yet. Planned delivery is email plus portal."
-      cost="Included in Pro Desk only after the stream is validated and enabled."
+      delivery="Email plus portal, with live update delivery only for Live Desk subscribers when the desk is active."
+      cost="Live Desk is ₹14,999 per month. Core Research still includes equity, options, and index research without live updates."
     />
   );
 }

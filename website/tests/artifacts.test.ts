@@ -26,7 +26,7 @@ describe("canAccess tier policy", () => {
   });
 
   it("diagnosis access does NOT come from multi_product subscription", () => {
-    // Diagnosis reports are personal; the higher-tier general
+    // Audit reports are personal; the higher-tier general
     // subscription does not entitle a customer to other readers'
     // diagnosis reports.
     const multi = new Set<AccessTier>(["paid_multi_product"]);

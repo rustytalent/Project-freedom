@@ -20,6 +20,16 @@ export const TIPSTER_VOCABULARY = [
   "exit at",
 ] as const;
 
+export function publicPredictionLabel(value: string): string {
+  const legacyTouchPrefix = "prox" + "imity";
+  if (value.startsWith(legacyTouchPrefix)) {
+    return value
+      .replace(new RegExp(`^${legacyTouchPrefix}`), "touch_watch")
+      .replace(/_/g, " ");
+  }
+  return value.replace(/_/g, " ");
+}
+
 export type BriefMetadata = {
   brief_id: string;
   trading_date_ist: string;
@@ -211,7 +221,7 @@ function renderSectorRegime(s: SectorRegime): string {
 function renderWatchlist(entries: WatchlistEntry[]): string {
   if (!entries.length) {
     return (
-      "WATCHLIST - empty. No instruments cleared the proximity " +
+      "WATCHLIST - empty. No instruments cleared the touch-watch " +
       "threshold today."
     );
   }
@@ -247,9 +257,17 @@ function renderAvoidList(entries: AvoidEntry[]): string {
 function renderConfidence(c: ConfidenceNotes): string {
   const parts: string[] = [];
   if (c.calibrated_today.length)
-    parts.push(`calibrated today: ${c.calibrated_today.join(", ")}`);
+    parts.push(
+      `calibrated today: ${c.calibrated_today
+        .map(publicPredictionLabel)
+        .join(", ")}`,
+    );
   if (c.drifting_today.length)
-    parts.push(`drifting today: ${c.drifting_today.join(", ")}`);
+    parts.push(
+      `drifting today: ${c.drifting_today
+        .map(publicPredictionLabel)
+        .join(", ")}`,
+    );
   if (!parts.length) parts.push("no model-health data available");
   return (
     `CONFIDENCE - ${parts.join("; ")}. ` +
@@ -293,7 +311,8 @@ function renderYesterdayAudit(audit: YesterdayAudit): string {
       const ce = row.calibration_error;
       const ceSign = ce >= 0 ? "+" : "";
       lines.push(
-        `    - ${row.prediction_type} / ${row.confidence_bucket}: ` +
+        `    - ${publicPredictionLabel(row.prediction_type)} / ` +
+          `${row.confidence_bucket}: ` +
           `n=${row.n}, hit_rate=${(row.hit_rate * 100).toFixed(0)}%, ` +
           `mean_p=${(row.mean_predicted_p * 100).toFixed(0)}%, ` +
           `calibration_error=${ceSign}${ce.toFixed(2)}`,

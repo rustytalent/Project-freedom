@@ -4,7 +4,7 @@
     "brief_id": "BRIEF_2026_03_14",
     "trading_date_ist": "2026-03-14",
     "generated_at_utc": "2026-03-14T03:00:00Z",
-    "model_bundle_version": "core25_head_alpha",
+    "model_bundle_version": "public_sample_bundle",
     "feature_version": "42_features_v3",
     "session_status": "pre_open",
     "reading_time_minutes": 6,
@@ -33,7 +33,7 @@
       "symbol": "LARGE_CAP_BANK_A",
       "sector": "BANKING",
       "side": "long",
-      "reason_tag": "proximity_high_p_touch_journey",
+      "reason_tag": "touch_watch_high_journey",
       "key_level": 0,
       "key_level_type": "demand_pool",
       "p_touch_today": 0.62,
@@ -46,7 +46,7 @@
       "symbol": "NIFTY50",
       "sector": "INDEX",
       "side": "short",
-      "reason_tag": "proximity_high_p_touch_journey",
+      "reason_tag": "touch_watch_high_journey",
       "key_level": 0,
       "key_level_type": "supply_pool",
       "p_touch_today": 0.47,
@@ -59,7 +59,7 @@
       "symbol": "LARGE_CAP_IT_B",
       "sector": "IT",
       "side": "long",
-      "reason_tag": "proximity_high_p_touch_journey",
+      "reason_tag": "touch_watch_high_journey",
       "key_level": 0,
       "key_level_type": "demand_pool",
       "p_touch_today": 0.41,
@@ -105,7 +105,7 @@
     }
   ],
   "confidence_notes": {
-    "calibrated_today": ["direction", "proximity_h12", "proximity_h36", "proximity_h60"],
+    "calibrated_today": ["direction", "touch_watch_h12", "touch_watch_h36", "touch_watch_h60"],
     "drifting_today": [],
     "drift_reason": {},
     "overall_brief_confidence": "high",
@@ -117,7 +117,7 @@
     "predictions_resolved": 12,
     "hit_rate_by_confidence_bucket": [
       {
-        "prediction_type": "proximity",
+        "prediction_type": "touch_watch",
         "confidence_bucket": "very_high",
         "n": 2,
         "hit_rate": 0.5,
@@ -125,7 +125,7 @@
         "calibration_error": 0.34
       },
       {
-        "prediction_type": "proximity",
+        "prediction_type": "touch_watch",
         "confidence_bucket": "high",
         "n": 5,
         "hit_rate": 0.8,
@@ -133,7 +133,7 @@
         "calibration_error": -0.09
       },
       {
-        "prediction_type": "proximity",
+        "prediction_type": "touch_watch",
         "confidence_bucket": "moderate",
         "n": 3,
         "hit_rate": 0.33,

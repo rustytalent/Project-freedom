@@ -164,10 +164,10 @@ async function seedOnce(): Promise<void> {
         tier: "paid_multi_product",
         storage_key: "memory",
         description:
-          "Multi-day positional research for the trading week of " +
+          "Live Desk slower-horizon research for the trading week of " +
           isoWeek + ".",
       },
-      body: `Swing Brief - week of ${isoWeek}\n(Mock.)`,
+      body: `Live Desk note - week of ${isoWeek}\n(Mock.)`,
     },
     {
       rec: {
@@ -186,8 +186,8 @@ async function seedOnce(): Promise<void> {
       body:
         "trading_date_ist,prediction_type,confidence_bucket,n,hit_rate," +
         "mean_predicted_p,calibration_error,is_retrospective_share\n" +
-        `${isoToday},proximity,high,152,0.71,0.72,0.01,0.35\n` +
-        `${isoToday},proximity,moderate,204,0.58,0.57,-0.01,0.35\n` +
+        `${isoToday},touch_watch,high,152,0.71,0.72,0.01,0.35\n` +
+        `${isoToday},touch_watch,moderate,204,0.58,0.57,-0.01,0.35\n` +
         `${isoToday},avoidance,moderate,42,0.86,0.83,-0.03,0.20\n`,
     },
     {
@@ -206,9 +206,9 @@ async function seedOnce(): Promise<void> {
       },
       body:
         "prediction_type,confidence_bucket,n,hit_rate,mean_p,calibration_error\n" +
-        "proximity,very_high,2,0.50,0.84,0.34\n" +
-        "proximity,high,5,0.80,0.71,-0.09\n" +
-        "proximity,moderate,3,0.33,0.55,0.22\n" +
+        "touch_watch,very_high,2,0.50,0.84,0.34\n" +
+        "touch_watch,high,5,0.80,0.71,-0.09\n" +
+        "touch_watch,moderate,3,0.33,0.55,0.22\n" +
         "avoidance,moderate,2,1.00,1.00,0.00\n",
     },
   ];

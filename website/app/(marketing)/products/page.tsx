@@ -4,39 +4,38 @@ import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/c
 
 export const metadata: Metadata = {
   title: "Products",
-  description: "Daily Brief, Swing Brief, Diagnosis, Audit Infrastructure.",
+  description: "Core Research, Live Desk, Audit Base, and Audit Infrastructure.",
 };
 
 const products = [
   {
     href: "/products/daily-brief",
-    title: "Daily Brief",
-    line: "Intraday research before NSE open, every trading day.",
+    title: "Core Research",
+    line: "Equity, options, and index research before NSE open.",
     desc:
       "A structured read of the day's structural levels, sector regime, " +
       "and avoidance contexts. Delivered as email plus the portal view " +
       "by 08:30 IST.",
-    audience: "For intraday traders.",
+    audience: "For active equity, option, and index traders.",
   },
   {
     href: "/products/swing-brief",
-    title: "Swing Brief",
-    line: "Multi-day proximity calls, delivered Monday pre-open.",
+    title: "Live Desk",
+    line: "Core Research plus live update delivery when active.",
     desc:
-      "A multi-day research read for slower decisions. This stream is " +
-      "not generally available yet and will open only after the daily " +
-      "brief archive is stable.",
-    audience: "For positional traders and option buyers.",
+      "The full subscriber desk for readers who want the core archive " +
+      "plus live update delivery once the live stream is active.",
+    audience: "For desk-style readers who need faster updates.",
   },
   {
     href: "/products/diagnosis",
-    title: "Diagnosis",
-    line: "A one-off audit of your own strategy.",
+    title: "Audit Base",
+    line: "A one-off audit of your own strategy or research stack.",
     desc:
       "Submit a trade log; we return a PDF report on regime " +
       "decomposition, drawdown attribution, persistence, leakage, and " +
       "cost sensitivity. Five trading days turnaround.",
-    audience: "For serious retail and small prop traders.",
+    audience: "For serious retail, small prop, and research teams.",
   },
   {
     href: "/products/audit-infrastructure",

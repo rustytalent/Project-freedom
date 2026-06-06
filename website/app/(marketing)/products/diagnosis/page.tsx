@@ -2,16 +2,16 @@ import type { Metadata } from "next";
 import { ProductPage } from "@/components/marketing/ProductPage";
 
 export const metadata: Metadata = {
-  title: "Diagnosis",
+  title: "Audit Base",
   description:
-    "A one-off audit of your own strategy. You bring the trade log; we return a PDF report.",
+    "A one-off audit of your own strategy or research stack. You bring the log; we return a PDF report.",
 };
 
-export default function DiagnosisPage() {
+export default function AuditBasePage() {
   return (
     <ProductPage
-      eyebrow="Product · Diagnosis"
-      title="You bring your alpha. We audit it."
+      eyebrow="Product · Audit Base"
+      title="You bring your strategy. We audit it."
       oneLiner="A one-off, deeply-researched PDF report on what is and isn't working in your own strategy."
       intro={
         <>
@@ -19,7 +19,7 @@ export default function DiagnosisPage() {
             Most retail traders never get an honest, structured second
             opinion on the strategy they trade. The friends and forums
             available to ask are usually wrong about both the strengths
-            and the weaknesses. The Diagnosis product fills that gap.
+            and the weaknesses. The Audit Base product fills that gap.
           </p>
           <p>
             Submit a trade log; we return a structured report. Five
@@ -102,19 +102,20 @@ export default function DiagnosisPage() {
               <p>
                 We do not provide a corrected strategy. We do not
                 provide signals you can trade. We do not co-develop or
-                license alpha back to you. The Diagnosis product is
+                license strategy back to you. The Audit Base product is
                 strictly the audit; the action is yours to take.
               </p>
               <p>
-                We do hold every submitted strategy in confidence -
-                see the disclosures page for the data-handling terms.
+                We do not retain submitted strategy data after report
+                delivery unless you explicitly request retention. See the
+                disclosures page for the data-handling terms.
               </p>
             </>
           ),
         },
       ]}
       delivery="Five trading days from intake to PDF delivery. Encrypted handoff; signed NDA on request."
-      cost="From ₹49,999 per audit. See full pricing."
+      cost="Audit Base starts at ₹2,000. Final scope expands by infrastructure size, data size, and requested depth."
     />
   );
 }
