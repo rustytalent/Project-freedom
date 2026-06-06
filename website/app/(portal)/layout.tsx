@@ -40,7 +40,7 @@ export default function PortalLayout({
             ))}
           </ul>
           <div className="ml-auto flex items-center gap-3">
-            <span className="text-xs text-fg-subtle">demo@example.in</span>
+            <span className="text-xs text-fg-subtle">account@gcruxresearch.in</span>
             <button
               className="text-xs text-fg-muted hover:text-fg transition-colors"
               type="button"

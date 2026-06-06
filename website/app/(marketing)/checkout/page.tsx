@@ -4,7 +4,7 @@ import { parseBillingCycle, parsePlanId } from "@/lib/pricing";
 
 export const metadata: Metadata = {
   title: "Checkout",
-  description: "Subscribe to Aurora Research through Razorpay.",
+  description: "Subscribe to Crux Research through Razorpay.",
 };
 
 export default async function CheckoutPage({

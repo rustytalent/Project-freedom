@@ -46,7 +46,7 @@ export default function AccountPage() {
         <Card>
           <CardTitle>Delivery preferences</CardTitle>
           <CardContent className="mt-4 text-sm text-fg-muted space-y-3">
-            <p>Email: demo@example.in</p>
+            <p>Email: account@gcruxresearch.in</p>
             <p>
               Daily Brief delivery:{" "}
               <span className="text-fg">Email + portal</span>

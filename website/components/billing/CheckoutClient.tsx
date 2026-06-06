@@ -113,7 +113,7 @@ export function CheckoutClient({
         key: payload.key_id,
         amount: payload.order.amount,
         currency: payload.order.currency,
-        name: "Aurora Research",
+        name: "Crux Research",
         description: `${selectedPlan.name} ${cycle}`,
         order_id: payload.order.id,
         prefill: { email },

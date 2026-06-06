@@ -4,7 +4,7 @@ import { brand } from "@/lib/brand";
 
 export const metadata: Metadata = {
   title: "Sign in",
-  description: "Sign in to Aurora Research with Google.",
+  description: "Sign in to Crux Research with Google.",
 };
 
 function siteOrigin(): string {
