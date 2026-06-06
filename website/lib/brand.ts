@@ -5,8 +5,8 @@
 // import from here - never hardcode brand strings in JSX.
 
 export const brand = {
-  name: process.env.NEXT_PUBLIC_BRAND_NAME ?? "Aurora Research",
-  domain: process.env.NEXT_PUBLIC_DOMAIN ?? "aurora-research.in",
+  name: process.env.NEXT_PUBLIC_BRAND_NAME ?? "Crux Research",
+  domain: process.env.NEXT_PUBLIC_DOMAIN ?? "cruxresearch.in",
   tagline: "Calibrated context, daily, for the Indian markets.",
   subTagline:
     "A research brief in your inbox before NSE opens, followed by a " +
@@ -15,7 +15,7 @@ export const brand = {
     name: "(founder name)",
   },
   contact: {
-    email: "hello@aurora-research.in",
+    email: "hello@cruxresearch.in",
     calendly: null as string | null,
   },
   legalEntity: "(legal entity TBD)",

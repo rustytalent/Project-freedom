@@ -81,10 +81,10 @@ export default function AccountPage() {
             <p>
               Email{" "}
               <a
-                href="mailto:hello@aurora-research.in"
+                href="mailto:hello@cruxresearch.in"
                 className="text-accent underline underline-offset-4"
               >
-                hello@aurora-research.in
+                hello@cruxresearch.in
               </a>{" "}
               to export or delete your data. We respond within seven
               business days.
