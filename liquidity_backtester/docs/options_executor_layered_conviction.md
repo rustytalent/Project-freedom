@@ -39,39 +39,59 @@ calculation.
 
 This amendment redesigns §5 around that.
 
-## §1. The honest tension this design has to resolve
+## §1. The design's central commitment
 
-There's a real tension and it would be dishonest to pretend otherwise.
+This design has one central commitment: **either we trust the
+Layered Conviction Score, or we don't ship.**
 
-The user's style worked yesterday because:
-- HDFC fell within 5 minutes after a -₹1,300 unbooked drawdown.
-- INFOSYS resolved in 87 seconds.
-- The macro hypothesis was right.
+Earlier drafts tried to hedge — keep the conviction model AND add a
+fixed-percent drawdown stop "just in case." After user pushback on
+2026-06-09, that hedge is removed. It was incoherent: a system that
+overrides its own conviction layer on a fixed-percent threshold is
+admitting it doesn't trust the layer. Shipping a model we don't
+trust is the actual risk; the override is just retail-stop reflex
+disguised as discipline.
 
-The same style will fail on a different day when:
-- The market keeps moving against the conviction for 90 minutes.
-- The "manipulation" read is wrong — the trend is real.
-- The macro hypothesis was right in direction but wrong in timing.
+The argument for trusting the LCS in production is **not** that
+conviction is always right. It will sometimes be catastrophically
+wrong. The argument is that the place where we discover whether to
+trust the LCS is **the OOS replay at Gate 2 and the live audit at
+Gate 4** — not a runtime hedge that contaminates every trade.
 
-Survivorship bias is real. Conviction-hold-through-drawdown produces
-spectacular wins on the days it works and large losses on the days it
-doesn't. A retail trader can absorb the variance with discipline; a
-publisher of research has to surface BOTH outcomes honestly in the
-audit log.
+So the philosophy this design enforces is:
+1. **In production**: the LCS is the only exit signal. If layers
+   agree, we hold. Always.
+2. **At Gate 2** (before ship): the conviction-hold variant must
+   beat the naive percent-stop baseline by ≥ +0.20 R per trade on a
+   60-day OOS replay. If it doesn't, we ship the simpler design
+   instead. **This is where "do we trust it?" gets answered.**
+3. **At Gate 4** (first 30 live days): the conviction-hold outcomes
+   must hold OOS calibration. If drawdown distribution shifts
+   meaningfully, the LCS weights or thresholds get retuned.
+4. **In the audit** (every brief): conviction-hold outcomes are
+   published separately from naive outcomes. The subscriber sees
+   what the discipline cost on the bad days AND what it earned on
+   the good ones. The discipline either proves itself or it doesn't,
+   in public.
 
-So this amendment:
-1. **Encodes the layered-conviction model faithfully** so the system
-   can reproduce the user's style on subscribers' behalf.
-2. **Adds explicit hard guardrails** that override conviction when
-   the drawdown crosses thresholds that statistically cannot be
-   recovered. These are not stop losses in the conventional sense —
-   they are disaster floors that exist because the model has to
-   survive the days when the user's read is wrong.
-3. **Audits the conviction-hold outcomes separately from the clean
-   signal outcomes** so subscribers can see, with their own eyes,
-   how often "manipulation" reads are actually right vs how often
-   they're wishful thinking. The truth is in the data, not in the
-   philosophy.
+This means: the system WILL lose money on days when layers agree
+but the market keeps moving anyway. Those losses are real and the
+audit shows them. The bet is that, on average, across 200+ trades,
+the days the layers are right pay for the days they're wrong by
+more than the naive percent-stop baseline pays. Gate 2 answers that
+bet empirically before any subscriber sees it.
+
+Survivorship bias is the live risk. The user's three winning trades
+yesterday are not evidence the discipline works — they are evidence
+the discipline worked on three specific trades. The 60-day OOS
+replay is what tells us whether the philosophy generalises. The
+30-day live window is what tells us whether the OOS result
+generalises further. The audit is what tells subscribers the answer
+in their own time.
+
+If the data says yes: this is the genuinely novel executor described
+in §4. If the data says no: this becomes the simpler executor of the
+original methodology §5, no apology needed.
 
 ## §2. The six context layers
 
@@ -300,57 +320,78 @@ drawdown_R          = realized R in ATR units (negative = against us)
 
 ### The hold-vs-exit decision tree
 
-The exit decision is **driven by LCS, not by P&L**:
+The exit decision is **driven by LCS only. P&L is never a standalone
+exit trigger.** Drawdown alone, no matter how deep, does not exit
+the trade. The layered conviction model is either trusted or it
+isn't; we trust it.
 
 ```
-if any kill_condition triggered:
+if any kill_condition triggered:                        # §4.1
     EXIT_KILL
-elif drawdown_R <= disaster_floor_R:           # see §6
-    EXIT_DISASTER
-elif LCS_drop >= 0.40 and agreeing_layers_now <= 2:
-    # Layers are collapsing. This is "real invalidation",
-    # not manipulation. The user's own discipline says exit.
+elif LCS_drop >= 0.40 and agreeing_layers_now <= 2:    # real invalidation
     EXIT_INVALIDATION
-elif drawdown_R <= -1.0 and agreeing_layers_now <= 3:
-    # Moderate drawdown AND moderate layer-disagreement.
-    # We hold one more bar, then re-decide.
-    HOLD_WATCHED
-elif LCS_now >= 0.60 and realized_R >= 1.0:
-    # Strong conviction AND profitable. Trail.
-    TRAIL_STOP
 elif realized_R >= predicted_target_R:
     EXIT_TARGET
+elif LCS_now >= 0.60 and realized_R >= 1.0:            # strong + profitable
+    TRAIL_STOP
 else:
     HOLD
 ```
 
+That's the entire tree. There is no `drawdown_R <= disaster_floor`
+clause. If the layers say HOLD, the executor holds, regardless of
+how deep the drawdown gets.
+
+### §4.1 Kill conditions — what CAN override the layers
+
+Only events the context layers literally cannot react to inside a
+5-minute bar:
+
+1. **Exchange-level halt** on the underlying or the option chain
+   (NSE F&O circuit breaker).
+2. **Broker connection loss** lasting > 60 seconds. (Audit-only at
+   v1 since we don't auto-execute; the brief just notes "if you are
+   in this trade and lost connection, your discipline takes over".)
+3. **VIX intra-bar spike > +3 points** (this is a magnitude that
+   means the volatility regime has changed faster than any layer
+   can update; the trade's pricing assumptions are no longer valid).
+4. **Underlying spot intra-bar move > 4 ATR** in either direction
+   (flash event; layers cannot reprice in one bar).
+
+None of these are "the trade went against you." Every one of them
+is "the world changed faster than the model can read."
+
 ### The key insight
 
 A drawdown of -1.5 ATR with LCS still at +0.55 and 5/6 layers
-agreeing is **NOT an exit signal under this logic**. The layered
-read of the market still says the thesis is correct; the drawdown is
-manipulation noise.
+agreeing is **NOT an exit signal**. The layered read of the market
+still says the thesis is correct; the drawdown is manipulation.
+
+A drawdown of -3.0 ATR with LCS still at +0.55 and 5/6 layers
+agreeing is **STILL NOT an exit signal**. Same reason.
 
 A drawdown of -0.5 ATR with LCS collapsed from +0.55 to +0.05 and
 agreeing layers dropped from 5 to 2 **IS an exit signal**. The
 drawdown is small, but the underlying read has fallen apart, which
-the user's own discipline says is the real invalidation.
+is the real invalidation.
 
-This is the user's lived trading style encoded as a decision tree.
-It will lose money on days the layers stay aligned but the market
-keeps moving anyway (the "everyone is wrong; manipulation just kept
-going" scenario). Those losses are bounded by §6.
+A flash event that moves the underlying 4 ATR in 5 minutes triggers
+EXIT_KILL because the layers cannot react that fast. Not because
+the P&L is bad.
 
 ### Why this is novel
 
 Every other retail options executor I know of exits on percent
-drawdown. That works fine for systems whose edge is statistical
-because their conviction never changes during the trade.
+drawdown. They have to, because their underlying edge is purely
+statistical and their conviction never changes during the trade —
+the only sensible discipline is "cut at -X%".
 
-This executor exits on conviction collapse. Conviction is recomputed
-from the same six layers every 5 minutes. When the layers agree, we
-hold. When they disagree, we exit. The percent drawdown is a
-secondary check, not the primary trigger.
+This executor doesn't have a fixed-percent stop at all. Conviction
+is recomputed from the six layers every 5 minutes. When the layers
+agree, we hold — for as long as they agree. When they disagree, we
+exit. There is no "but just in case the model is wrong" override.
+The model's correctness is the question Gate 2 answers, not a
+parameter to hedge against in production.
 
 ## §5. Dynamic rupee floor (data-derived per bucket)
 
@@ -436,30 +477,59 @@ So:
 
 - **Reward** = `predicted_net_R_atr × per_lot_R_inr × qty` (rupee
   upside if the prediction is right)
-- **Risk** = the absolute rupee cap the executor will allow on this
-  trade (the disaster floor; see below)
+- **Risk** = the rupee figure used for sizing the position so that
+  conviction-weighted upside justifies the notional. This is a
+  **sizing input**, not a runtime stop.
 
-### The disaster floor
+### What "risk" is NOT, anymore
 
-Given the sizing formula:
+In an earlier revision of this document the `risk` figure also acted
+as a runtime stop — a "disaster floor" that fired EXIT_DISASTER even
+when LCS was high. That clause has been **removed** (2026-06-09
+revision after user pushback).
 
-```
-max_rupee_risk = reward^(2p)
-disaster_floor_R = -max_rupee_risk / (per_lot_R_inr × qty)
-```
+The user's argument was correct: a runtime drawdown floor that
+overrides the conviction model is incoherent with the design's
+premise. Either we trust the LCS, or we don't. If we layer a
+"but-just-in-case" P&L stop on top, we are admitting we don't trust
+our own model — and shipping a model we don't trust is the actual
+risk. The mid-position is the worst position.
 
-This is the rupee number the executor will NOT let the trade drop
-past, regardless of conviction. If the trade hits this, EXIT_DISASTER
-fires (§4 decision tree) even if LCS is still +0.80.
+The runtime executor therefore has no fixed-percent stop. The only
+exits are: layer-collapse (EXIT_INVALIDATION), target (EXIT_TARGET),
+trail (TRAIL_STOP after profit), kill-condition (EXIT_KILL: exchange
+halt, broker outage, VIX spike > +3 points, intra-bar spot move > 4
+ATR — events the layers literally cannot react to).
 
-### Why this disciplines the conviction-hold
+### Where the safety actually lives
 
-Conviction-driven holds can in principle absorb arbitrary drawdown.
-The disaster floor caps absolute rupee loss per trade so that even a
-day where the user's read is wrong AND the layers stay misleadingly
-aligned (the "everyone is wrong" scenario) is bounded.
+Safety is moved up-stack to where it belongs:
 
-This is the explicit safety the §1 honesty discussion demanded.
+1. **At sizing**: `√risk = reward^p` is the sizing rule. The harder
+   the conviction (higher LCS), the bigger the position. This caps
+   exposure at the moment of decision rather than after.
+2. **At Gate 2**: the conviction-hold logic must prove itself on
+   real OOS data — if it doesn't beat naive percent-stop discipline
+   by ≥ +0.20 R per trade, the entire conviction-hold engine gets
+   retired and we ship the simpler version. **The data decides
+   whether to trust the philosophy.**
+3. **At Gate 4**: 30 days of live conviction-holds must hold the OOS
+   calibration. If they don't, the head retrains.
+4. **At the audit table B (§8 of this doc)**: every conviction-hold
+   outcome is published. Subscribers see the win rate and the worst
+   loss alongside each other. The product's honesty is in the audit,
+   not in the rules.
+
+This means: in production, if the user (or any subscriber following
+the executor) takes a -₹4,000 conviction-hold trade because layers
+agreed and the trade ran away anyway, that's a real loss the system
+recorded. The audit publishes it. The subscriber knows. The next
+day's calibration table shows the impact. If those losses accumulate
+faster than the wins, Gate 4 fires and the conviction-hold parameters
+get retuned or the discipline gets retired.
+
+That is honest risk management. A hidden override that fires the
+emergency-exit on the customer's behalf is not.
 
 ## §7. What this design does NOT do
 

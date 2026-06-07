@@ -401,11 +401,18 @@ edge on an instrument where cost-to-target ratio drops from 17x to
   a layered-conviction engine (see
   `docs/options_executor_layered_conviction.md`). Six context layers
   produce a Layered Conviction Score (LCS) ∈ [-1, +1]; force-entry
-  fires at |LCS| ≥ 0.30; hold-vs-exit during drawdown driven by LCS
-  collapse, not percent drawdown. Disaster-floor cap on absolute
-  rupee loss derived from `reward = risk^p` sizing. Rupee floor is
-  now **dynamic** — derived from per-bucket OOS p20 of top-decile
-  realized R, not hardcoded. 4 commits (was 3). **Gate 2 updated**.
+  fires at |LCS| ≥ 0.30; hold-vs-exit driven by LCS collapse only.
+  **Runtime disaster floor removed (same-day revision after user
+  pushback)** — no fixed-percent stop, no rupee-cap override; the
+  only exits are layer-invalidation, target, trail, or kill-condition
+  (events the layers literally cannot react to: exchange halt,
+  broker outage, VIX spike, 4-ATR intra-bar move). Safety lives at
+  sizing (`√risk = reward^p`), at Gate 2 (must beat naive percent-
+  stop baseline by ≥ +0.20 R per trade), at Gate 4 (live calibration
+  must hold), and in the audit (table B publishes conviction-hold
+  outcomes separately for subscriber visibility). Rupee floor is
+  **dynamic** — per-bucket OOS p20 of top-decile realized R, not
+  hardcoded. 4 commits. **Gate 2 updated**.
 - **D.6** — Outcome-log + Yesterday Audit for options including the
   SKIP counter-factual row. 1 commit.
 - **D.7** — Live-publish hook (options PDF + CSV artifacts auto-
@@ -878,6 +885,67 @@ ROOT — Build a market-intelligence operating system
   hold until first paying options pilot is reading briefs.
 - **Status**: ADOPTED. Methodology doc shipped this commit. D.1
   is the next implementation step.
+
+### Deviation D13 — Runtime disaster floor removed; safety moved up-stack to Gate 2 + audit
+
+- **Branch from**: D12 / `docs/options_executor_layered_conviction.md`
+  shipped earlier the same day (2026-06-09) with a runtime
+  EXIT_DISASTER clause that fired at a `reward^(2p)`-derived rupee
+  cap regardless of LCS.
+- **Trigger**: same-day user pushback. Argument: a runtime fixed-
+  percent drawdown stop on top of a layered-conviction model is
+  incoherent. Either the conviction layers work, in which case the
+  stop never fires; or they don't, in which case shipping the system
+  at all is the actual risk. The mid-position ("trust the model but
+  add a safety stop") is the worst of both worlds because it
+  contaminates every trade with retail-stop reflex.
+- **Finding**: the user was correct. The original design's §1 framed
+  the disaster floor as resolving "honest tension"; in reality it
+  resolved the tension by hedging the bet that should be made
+  explicitly. Tier-3 systems trust their own calibration in
+  production. The place where the "do we trust it?" question gets
+  answered is Gate 2 (OOS replay) and Gate 4 (live calibration
+  hold), not a runtime stop.
+- **Plan-change**:
+  - §4 decision tree rewritten: no `drawdown_R <= disaster_floor`
+    clause. Only exits in production are EXIT_KILL (events layers
+    cannot react to within 5 minutes: exchange halt, broker outage,
+    VIX spike > +3, intra-bar spot move > 4 ATR), EXIT_INVALIDATION
+    (LCS drop ≥ 0.40 AND agreeing_layers ≤ 2), EXIT_TARGET, and
+    TRAIL_STOP after profit.
+  - §6 sizing math kept (`√risk = reward^p` is a useful sizing rule)
+    but `risk` is reframed as a sizing input only, NOT a runtime
+    stop trigger.
+  - §1 rewritten as "the design's central commitment": we trust the
+    LCS in production or we don't ship. Safety lives at sizing
+    (caps exposure up-front), at Gate 2 (proves discipline beats
+    naive baseline before any ship), at Gate 4 (proves OOS
+    generalises to live), and in the audit (publishes
+    conviction-hold outcomes side-by-side with naive outcomes for
+    subscriber visibility).
+  - Kill conditions tightened to events that genuinely cannot be
+    detected by the 5-minute layer recomputation cycle (flash
+    events, exchange halts), not "the trade went too far against
+    you" thresholds dressed as kill conditions.
+- **What this commits us to**: the conviction-hold logic in
+  production will produce real losses on days when layers agree but
+  the market keeps moving anyway. Those losses will be larger than
+  a naive percent-stop would have produced. The bet is that on
+  average across 200+ trades the days the layers are right pay for
+  the days they're wrong by more than the percent-stop baseline
+  does. Gate 2 answers that bet empirically before any subscriber
+  sees it.
+- **What this does NOT commit us to**: shipping a system whose
+  conviction-hold variant fails Gate 2. If the OOS replay shows the
+  discipline loses to a naive percent-stop baseline, the design
+  reverts to the simpler executor of the original methodology §5.
+  The data, not the philosophy, has the last word.
+- **Downstream**: D.5 sub-stream stays at 4 commits but the third
+  commit's scope shifts from "implement disaster floor + tests" to
+  "implement EXIT_KILL conditions + the LCS-only decision tree +
+  the audit-table-B accumulator." Acceptance criteria unchanged.
+- **Status**: ADOPTED. Amendment doc updated this commit. D.1 still
+  the next implementation step.
 
 ### Deviation D12 — Executor redesigned around user's actual trading style (layered conviction)
 
