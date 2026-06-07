@@ -19,6 +19,14 @@ type RazorpayConstructor = new (options: {
   order_id: string;
   prefill: { email: string };
   theme: { color: string };
+  handler: (response: {
+    razorpay_order_id: string;
+    razorpay_payment_id: string;
+    razorpay_signature: string;
+  }) => void | Promise<void>;
+  modal?: {
+    ondismiss?: () => void;
+  };
 }) => { open: () => void };
 
 declare global {
@@ -118,6 +126,37 @@ export function CheckoutClient({
         order_id: payload.order.id,
         prefill: { email },
         theme: { color: "#D6B56D" },
+        handler: async (payment) => {
+          setBusy(true);
+          setStatus("Payment received. Confirming access.");
+          const verifyResponse = await fetch("/api/checkout/razorpay-verify", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payment),
+          });
+          const verifyPayload = (await verifyResponse.json()) as {
+            verified?: boolean;
+            stored?: boolean;
+            error?: string;
+          };
+          setBusy(false);
+          if (verifyResponse.ok && verifyPayload.verified) {
+            setStatus(
+              verifyPayload.stored
+                ? "Payment confirmed. Sign in with the same email to access your plan."
+                : "Payment confirmed. Access will activate after subscriber storage is configured.",
+            );
+            return;
+          }
+          setStatus(
+            verifyPayload.error === "payment_not_captured"
+              ? "Payment is authorized. Access will activate after capture confirmation."
+              : "Payment could not be verified. Please contact support with your payment id.",
+          );
+        },
+        modal: {
+          ondismiss: () => setStatus("Checkout closed before payment."),
+        },
       });
       checkout.open();
     } finally {

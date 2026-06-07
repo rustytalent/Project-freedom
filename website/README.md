@@ -37,6 +37,8 @@ The site currently supports:
   account pages.
 - Authenticated brief ingest at `POST /api/v1/briefs`.
 - Razorpay order creation at `POST /api/checkout/razorpay-order`.
+- Razorpay checkout verification at `POST /api/checkout/razorpay-verify`.
+- Razorpay webhook receiver at `POST /api/webhooks/razorpay`.
 - Google sign-in entry at `/sign-in` when Supabase Auth is configured.
 
 ## Moat rule
@@ -156,8 +158,8 @@ and payload but returns `stored: false` with `supabase_env_missing`.
 | Track record dashboard | Demo aggregate data |
 | Portal pages | Skeleton account and brief views |
 | Engine ingest API | Token validation plus Supabase write |
-| Razorpay checkout | Order API and checkout page wired |
-| Razorpay webhook | Pending |
+| Razorpay checkout | Order API, client checkout, payment verification |
+| Razorpay webhook | Signature-verified payment receiver wired |
 | Google sign-in | Entry route wired, session persistence pending |
 | Resend email delivery | Pending |
 | Subscriber entitlement DB | Pending |

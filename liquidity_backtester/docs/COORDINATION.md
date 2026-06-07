@@ -25,6 +25,15 @@ Append-only log of decisions. One line each.
 Format: `YYYY-MM-DD [agent] commit_sha — decision`
 
 ```
+2026-06-08 [codex] (this) — WEBSITE-RAZORPAY-READY:
+                            production Razorpay flow wired for the
+                            customer website. Checkout now uses
+                            server-created orders, server-side checkout
+                            signature verification, captured-payment
+                            confirmation, and a signature-verified
+                            webhook endpoint that upserts subscriber
+                            entitlements in Supabase. Website tests,
+                            typecheck, lint, and production build pass.
 2026-06-05 [codex] (this) — CUSTOMER-DELIVERY-PACK:
                             extend `analysis/pack_artifacts.py` with
                             `--customer-delivery` mode. The pack now

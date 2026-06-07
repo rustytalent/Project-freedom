@@ -14,10 +14,16 @@ create table if not exists subscribers (
   id uuid primary key default gen_random_uuid(),
   email text not null unique,
   tier text not null default 'free_signup',
+  plan_id text,
+  billing_cycle text,
   preview_started_at timestamptz,
   preview_expires_at timestamptz,
   razorpay_customer_id text,
   razorpay_subscription_id text,
+  razorpay_order_id text,
+  razorpay_payment_id text,
+  razorpay_signature text,
+  paid_at timestamptz,
   status text not null default 'inactive',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -42,9 +48,25 @@ create table if not exists subscribers (
    - `RAZORPAY_KEY_SECRET`
    - `RAZORPAY_WEBHOOK_SECRET`
 3. Use test mode first and complete one Core Research checkout.
-4. Add a webhook endpoint in the website before public launch. The
-   webhook should verify the signature, upsert the subscriber email,
-   and activate the paid tier.
+4. In Razorpay Dashboard, add webhook URL:
+   `https://<domain>/api/webhooks/razorpay`.
+5. Enable these webhook events:
+   - `payment.captured`
+   - `payment.failed`
+   - `order.paid`
+6. Keep auto-capture enabled. The instant checkout verifier and the
+   webhook both verify signatures before activating access.
+
+If the `subscribers` table already exists, apply this migration:
+
+```sql
+alter table subscribers add column if not exists plan_id text;
+alter table subscribers add column if not exists billing_cycle text;
+alter table subscribers add column if not exists razorpay_order_id text;
+alter table subscribers add column if not exists razorpay_payment_id text;
+alter table subscribers add column if not exists razorpay_signature text;
+alter table subscribers add column if not exists paid_at timestamptz;
+```
 
 ## 3. Google Sign-In
 
