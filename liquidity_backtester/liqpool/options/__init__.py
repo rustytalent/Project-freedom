@@ -12,9 +12,17 @@ from .featurizer import (
     build_options_feature_frame,
     OPTIONS_FEATURE_COLUMNS,
 )
+from .labels import (
+    OptionsLabelParams,
+    add_options_labels,
+    LABEL_OUTPUT_COLUMNS,
+)
 
 __all__ = [
     "OptionsFeaturizerParams",
     "build_options_feature_frame",
     "OPTIONS_FEATURE_COLUMNS",
+    "OptionsLabelParams",
+    "add_options_labels",
+    "LABEL_OUTPUT_COLUMNS",
 ]
