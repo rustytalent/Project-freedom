@@ -397,22 +397,33 @@ edge on an instrument where cost-to-target ratio drops from 17x to
   side × tenor × ToD). 2 commits. **Gate 1**.
 - **D.4** — Brief integration (`predicted_net_return_*_atr` per
   strike entry). 1 commit.
-- **D.5** — Executor layer — the moat. **REDESIGNED 2026-06-09** as
-  a layered-conviction engine (see
-  `docs/options_executor_layered_conviction.md`). Six context layers
-  produce a Layered Conviction Score (LCS) ∈ [-1, +1]; force-entry
-  fires at |LCS| ≥ 0.30; hold-vs-exit driven by LCS collapse only.
-  **Runtime disaster floor removed (same-day revision after user
-  pushback)** — no fixed-percent stop, no rupee-cap override; the
-  only exits are layer-invalidation, target, trail, or kill-condition
-  (events the layers literally cannot react to: exchange halt,
-  broker outage, VIX spike, 4-ATR intra-bar move). Safety lives at
-  sizing (`√risk = reward^p`), at Gate 2 (must beat naive percent-
-  stop baseline by ≥ +0.20 R per trade), at Gate 4 (live calibration
-  must hold), and in the audit (table B publishes conviction-hold
-  outcomes separately for subscriber visibility). Rupee floor is
-  **dynamic** — per-bucket OOS p20 of top-decile realized R, not
-  hardcoded. 4 commits. **Gate 2 updated**.
+- **D.5** — Executor layer — the moat. **REDESIGNED 2026-06-09 (three
+  revisions same day)** as a layered-conviction cascade engine
+  (see `docs/options_executor_layered_conviction.md`).
+  - Six context layers; macro layer is the **gate** (LCS = 0 when
+    macro silent), other five contribute multiplicative agreement
+    factors aggregated by **geometric mean** — NOT a linear weighted
+    sum. Encodes the user's "string-theory" cascade intuition: macro
+    births the possibility space, lower layers refine which
+    possibilities sit in today's tradeable universe.
+  - Force-entry threshold **bootstrap rule at v1** (|LCS| ≥ 0.30 so
+    system has defined behaviour day 1), **learned per-bucket
+    logistic regression after ≥200 trades**. Bootstrap and learned
+    run in parallel 90 days; whichever beats on realized R wins.
+  - Hold-vs-exit driven by LCS collapse only. No runtime disaster
+    floor. Only exits: EXIT_KILL (events layers cannot react to in
+    5 min: exchange halt, broker outage, VIX > +3 spike, 4-ATR
+    intra-bar move), EXIT_INVALIDATION (LCS drop ≥ 0.40), EXIT_TARGET,
+    TRAIL_STOP. Safety lives at sizing, at Gate 2, at Gate 4, in
+    audit table B.
+  - Macro data source: **free** (Yahoo public endpoints + warehouse
+    USDINR). When Yahoo degrades, macro reports 0 → cascade gate
+    closes → executor SKIPs day. Swap to paid feed via one adapter
+    class when revenue allows.
+  - AVWAP anchor: **session-open only** at v1 (09:15 IST + ±1σ/2σ/3σ).
+  - Rupee floor is **dynamic** — per-bucket OOS p20 of top-decile
+    realized R, not hardcoded.
+  - 4 commits. **Gate 2 updated**.
 - **D.6** — Outcome-log + Yesterday Audit for options including the
   SKIP counter-factual row. 1 commit.
 - **D.7** — Live-publish hook (options PDF + CSV artifacts auto-
@@ -885,6 +896,84 @@ ROOT — Build a market-intelligence operating system
   hold until first paying options pilot is reading briefs.
 - **Status**: ADOPTED. Methodology doc shipped this commit. D.1
   is the next implementation step.
+
+### Deviation D14 — LCS reformulated as causal cascade (geometric mean), force-entry threshold becomes learned
+
+- **Branch from**: D12 / D13 design where the LCS was a linear
+  weighted sum of six layers with weights `w1..w6` summing to 1.0,
+  and force-entry fired at hand-coded `|LCS| ≥ 0.30`.
+- **Trigger**: 2026-06-09 user briefing on the actual structure of
+  the layers. Quote: "the layers you told are not different but
+  actually multiple side of same side, or like string theory if
+  the some dimensions are stretched enough others get non
+  existent... macro oversight give birth to possibilities of types
+  of manipulation, microstructure make some of them feasible using
+  pools and options as a kind of limits of a visible universe...
+  integration range is not 0 to infinity but references to highest
+  limit under knowable condition with feasible and factor
+  favouring." User also said force-entry should be learned, not
+  hand-coded.
+- **Finding**: my linear-sum LCS was treating six causally-ordered
+  layers as parallel independent voters. They are not. The actual
+  structure is a cascade:
+  - **Macro** is the gate. When it's silent, no possibility-space
+    exists today and no other layer can manufacture conviction.
+  - **Index regime + pool + options** narrow which of macro's
+    possibilities are inside today's tradeable universe (the
+    "observable universe" of the metaphor).
+  - **Microstructure + manipulation** determine which of those are
+    feasible to enter on this bar.
+  - A silent or strongly-disagreeing layer collapses the cascade
+    multiplicatively, not additively.
+- **Plan-change**:
+  - §3 of `docs/options_executor_layered_conviction.md` rewritten
+    around an explicit cascade formula:
+    ```
+    if |macro| < 0.10: return 0.0          # gate closed
+    direction = sign(macro)
+    factors = [1 + 0.5*(direction*s_i) for s_i in non_macro_layers]
+    geom_mean = product(factors) ** (1/n)
+    magnitude = min(1.0, |macro| * geom_mean)
+    LCS = direction * magnitude
+    ```
+    Geometric mean (not arithmetic) so a near-zero agreement factor
+    damps the whole cascade more than a high factor lifts it. That
+    is the "string under tension" intuition: collapse of one
+    dimension matters more than excitement of another.
+  - Worked-example table added showing the cascade's behaviour
+    across six layer-state combinations including the user's
+    actual HDFC trade fit (macro moderate bearish + structural
+    pool disagrees → LCS damped to +0.21, small-size hold the
+    correct response).
+  - Force-entry threshold reframed as **bootstrap at v1, learned
+    after 200 trades**. v1 ships `|LCS| ≥ 0.30` as the bootstrap
+    rule so behaviour is defined day 1. After ≥200 trades per
+    (side × tenor × ToD) bucket accumulate, a per-bucket logistic
+    regression replaces the threshold. Inputs: LCS at entry, each
+    layer score at entry, agreeing-layer indicator, predicted_R,
+    bucket id. Target: `realized_R > rupee_floor_per_bucket`.
+    Bootstrap and learned run in parallel for 90 days; the audit
+    publishes both decisions; whichever beats on realized R wins
+    production.
+  - All five §11 open questions answered same commit: macro source
+    free (Yahoo + warehouse), AVWAP session-open only, weights
+    obsolete under cascade, force-entry bootstrap-then-learned,
+    disaster floor obsolete (D13).
+- **Why this matters for the moat**: the cascade architecture
+  formalises what experienced traders already do intuitively. The
+  user can describe their top-down approach in five sentences; the
+  cascade math implements it in twenty lines. No other retail
+  options research service in India encodes "macro silent → no
+  trade today, regardless of how clean the chart looks." This is
+  the executor's actual moat in code form.
+- **Downstream**: D.5 sub-stream still 4 commits but the first
+  commit's scope shifts from "implement linear LCS + weights" to
+  "implement cascade LCS + the bootstrap force-entry rule + the
+  classifier interface stub for the learned post-bootstrap fit".
+  Acceptance criteria unchanged.
+- **Status**: ADOPTED. Cascade formula + answered open questions
+  shipped this commit. D.1 (featurizer) still the next
+  implementation step.
 
 ### Deviation D13 — Runtime disaster floor removed; safety moved up-stack to Gate 2 + audit
 

@@ -242,44 +242,158 @@ maintained. When it drops, conviction breaks.
 
 ## §3. The Layered Conviction Score (LCS)
 
-The LCS is a single scalar in [-1, +1] computed at every prediction
-time and every 5-min in-trade bar:
+> **Redesigned 2026-06-09** after user pushback. The original linear-
+> weighted-sum is wrong: the layers are not parallel voters. They are
+> a causal cascade where macro births the space of possible regime
+> moves, the pool/options layers narrow which of those possibilities
+> sit inside the tradeable universe today, and microstructure +
+> manipulation determine which are feasible to enter on this bar.
+>
+> User's metaphor: a single string under tension across multiple
+> dimensions. When one dimension is stretched (macro is loud), other
+> dimensions can collapse to irrelevance. When the macro dimension
+> collapses to zero, the whole string has no energy regardless of how
+> excited microstructure thinks it is. The integration range of
+> "tradeable today" is not 0 → ∞ — it is bounded by the highest limit
+> knowable under today's layer state.
+
+### §3.1 The cascade formula
 
 ```
-LCS = w1 * macro_score
-    + w2 * index_regime_score
-    + w3 * pool_score
-    + w4 * options_score
-    + w5 * microstructure_score
-    + w6 * manipulation_score
+def lcs(scores: dict[str, float]) -> float:
+    """
+    scores has six keys with values in [-1, +1]:
+      macro, regime, pool, options, micro, manipulation
+    Returns LCS in [-1, +1].
+    """
+    macro = scores["macro"]
+
+    # Macro is the gate. Below this floor, no possibility space exists
+    # and no other layer can manufacture conviction. Returns 0.
+    if abs(macro) < 0.10:
+        return 0.0
+
+    direction = +1.0 if macro > 0 else -1.0
+
+    # Each non-macro layer contributes a multiplicative agreement
+    # factor in [0.5, 1.5]. Aligned layers amplify; misaligned damp;
+    # silent (zero-score) layers contribute factor 1.0 and pass through.
+    factors = []
+    for key in ("regime", "pool", "options", "micro", "manipulation"):
+        s = scores[key]
+        alignment = direction * s            # +1 when same sign as macro
+        factor = 1.0 + 0.5 * alignment       # in [0.5, 1.5]
+        factors.append(factor)
+
+    # Geometric mean of the agreement factors. Using geometric mean
+    # (not arithmetic) means: a single near-zero factor damps the
+    # whole product more than a single high factor lifts it. That is
+    # the user's "string under tension" intuition: collapse of one
+    # dimension matters more than excitement of another.
+    n = len(factors)
+    product = 1.0
+    for f in factors:
+        product *= f
+    geom_mean = product ** (1.0 / n)
+
+    # LCS magnitude = macro strength × geometric mean of layer
+    # agreement, bounded to [0, 1].
+    magnitude = min(1.0, abs(macro) * geom_mean)
+
+    return direction * magnitude
 ```
 
-with weights summing to 1.0. Starting weights (will tune from data):
+### §3.2 What this formula encodes
+
+- **Macro is the gate.** When `|macro| < 0.10`, LCS = 0. No trade is
+  possible because no possibility-space exists today. The other
+  layers have nothing to refine.
+- **Direction follows macro.** Once the gate opens, sign(LCS) =
+  sign(macro). Even if every other layer screams the opposite
+  direction, the cascade respects the upstream causal layer.
+- **Magnitude is macro × geometric-mean of agreement.** Each non-
+  macro layer contributes a factor between 0.5 (strongly against)
+  and 1.5 (strongly with). Geometric mean means: layers that agree
+  amplify (multiplicative), layers that disagree damp (the same
+  multiplicative geometry working in reverse). A silent layer
+  (score = 0) gives factor 1.0 and is neutral.
+- **Saturation at 1.0.** The cascade cannot manufacture conviction
+  beyond a 5/5-layer-agreement at full macro strength. There is no
+  super-conviction tail.
+
+### §3.3 Worked examples
+
+| State | macro | regime | pool | options | micro | manip | → LCS |
+|---|---|---|---|---|---|---|---|
+| Macro silent | 0.05 | +0.9 | +0.9 | +0.9 | +0.9 | +0.9 | **0.00** (gate closed) |
+| Macro strong, all aligned | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | **+1.00** (saturated) |
+| Macro strong, mixed | +0.60 | +0.40 | +0.40 | 0.0 | +0.40 | 0.0 | **+0.62** |
+| Macro strong, all disagree | +0.80 | −0.80 | −0.80 | −0.80 | −0.80 | −0.80 | **+0.48** (macro still dominant, but damped) |
+| Macro moderate, all aligned | +0.30 | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | **+0.42** |
+| Macro moderate, structural disagrees | +0.30 | +0.60 | −0.80 | +0.60 | +0.60 | +0.60 | **+0.21** |
+
+The last row matters. Yesterday's HDFC trade fits: macro moderate
+bearish, microstructure & manip aligned bearish, but a strong
+demand pool sat below. The cascade says: lower LCS, hold the
+trade with smaller size, watch for the layer that disagrees to
+flip first. That is exactly what the user did discretionarily.
+
+### §3.4 Why we do NOT pre-set fixed thresholds anymore
+
+The original §3 had:
 
 ```
-w1 = 0.15   macro
-w2 = 0.20   index regime
-w3 = 0.20   pool
-w4 = 0.15   options
-w5 = 0.20   microstructure
-w6 = 0.10   manipulation
+LCS ≥ +0.50 → high
+LCS ≥ +0.30 → moderate (force-entry fires)
 ```
 
-The weights are NOT learned at v1 — they are the user's stated
-priorities expressed numerically. v2 learns them from outcomes once
-≥200 OOS trades exist per bucket.
+These were guesses. The user pushed back: **the force-entry threshold
+is exactly the kind of decision the model should learn from data,
+not have hand-coded.**
 
-### LCS thresholds
+The right framing: which `LCS_at_entry` values produce net-positive
+realized R for this (side × tenor × ToD) bucket, conditional on
+which layers are providing the agreement?
 
-```
-LCS ≥ +0.50   →  high-conviction BUY thesis
-LCS ≥ +0.30   →  moderate-conviction BUY thesis
-+0.10 to +0.30 → low-conviction; system WAITs
--0.10 to +0.10 → no signal; system SKIPs
--0.30 to -0.10 → low-conviction SELL
-LCS ≤ -0.30   →  moderate-conviction SELL
-LCS ≤ -0.50   →  high-conviction SELL
-```
+### §3.5 Force-entry: bootstrap rule at v1, learned post-bootstrap
+
+We need to ship something at first deploy because there is no OOS
+trade history to train a force-entry classifier against. So:
+
+**v1 bootstrap (first ~30 days)**: rule-based fallback. ENTER fires
+at `|LCS| ≥ 0.30` so the system has a defined behaviour from day 1.
+This number is documented as a bootstrap, not as an answer.
+
+**v1.1 (after ≥ 200 trades accumulate per bucket)**: a small per-
+bucket logistic regression replaces the threshold. Features:
+- LCS at entry
+- Each individual layer score at entry
+- Indicator: which layers are agreeing
+- Predicted_R from the §4 model
+- Bucket identity (side × tenor × ToD)
+
+Target: `realized_R > rupee_floor_per_bucket` (binary).
+
+The classifier outputs `p_force_entry_profitable`. ENTER fires when
+`p > 0.55` (50% would be coin-flip; +5% margin accounts for cost
+asymmetry).
+
+The bootstrap rule and the learned classifier run in parallel for
+the first 90 days post-cutover; the audit shows their decisions
+side-by-side; we keep whichever beats the other on realized R.
+
+### §3.6 What this commits us to engineering-wise
+
+- `lib/options/lcs.py` ships the cascade formula at v1. Deterministic,
+  testable, no learned components.
+- `lib/options/force_entry.py` ships the bootstrap rule + a stub
+  classifier interface. The classifier is empty at v1; it gets fit
+  in a separate analysis script once trades accumulate.
+- Pin tests on the cascade: gate behaviour (macro < 0.10 → 0),
+  saturation, sign-from-macro, the worked-example table above.
+- The brief's executor block reports BOTH the bootstrap decision
+  and the (eventually) learned decision, alongside the per-layer
+  scores. The customer sees the full state, not a single number.
 
 ### "Force entry" rule (the user's actual discipline)
 
@@ -628,29 +742,51 @@ distinguishes this product**:
 This is what makes the product trustable. Not the philosophy. The
 audit.
 
-## §11. Open questions to settle before D.5 implementation
+## §11. Open questions — answered 2026-06-09
 
-These need user input before I write code:
+1. **Macro layer data source — RESOLVED → free.** Yahoo Finance
+   public endpoints for SPX/DJI/NDX/SGX-Nifty + the existing
+   warehouse for USDINR. No paid feed at v1. Caveat documented:
+   no SLA, no overnight backfill on the rare days Yahoo's endpoint
+   is degraded; on those days the macro layer reports `score=0`
+   (which closes the cascade gate per §3.1 and the executor SKIPs
+   the day entirely until macro is recovered). When revenue allows,
+   swap in a paid feed (Polygon / Twelve Data / AlphaVantage) by
+   replacing one adapter class; no other code changes.
 
-1. **Macro layer data source.** Do we use a paid data feed for
-   SPX/DJI/NDX (e.g. AlphaVantage, Polygon, Twelve Data; ~$30/month)
-   or scrape Yahoo Finance for free? The free option works but has
-   no SLA.
-2. **Microstructure layer's AVWAP anchor.** The user computes AVWAP
-   from session open. Do we also compute from prior swing
-   high/low / prior day's close as alternative anchors? Multiple
-   anchors give more layers but more complexity.
-3. **Conviction weights starting values.** I used 0.15/0.20/0.20/
-   0.15/0.20/0.10 above. Are those right or should the user nudge
-   them?
-4. **Force-entry threshold.** I used LCS ≥ +0.30 for ENTER. Is that
-   right or should it be +0.40 (more conservative) or +0.20 (more
-   aggressive)?
-5. **Disaster floor coefficient.** Currently `reward^2p` gives a
-   typical disaster floor of -1.5 to -2.5 R per trade. Comfortable
-   with that range or want tighter?
+2. **Microstructure AVWAP anchor — RESOLVED → session-open only.**
+   No prior-swing or prior-day-close anchors at v1. Keeps the
+   microstructure layer auditable in one line: "anchored from the
+   day's 09:15 IST bar with ±1σ, ±2σ, ±3σ bands." If we add anchors
+   later they go behind a feature flag so the audit can compare
+   one-anchor vs multi-anchor calibration on real data.
 
-I default to the values above and proceed. Override any of them
-before D.5 lands and I'll re-derive.
+3. **Conviction weights — OBSOLETE.** The original §3 had per-layer
+   weights `w1..w6` summing to 1.0 inside a linear sum. The cascade
+   redesign (§3.1) does not use linear weights. Macro is a gate
+   (no weight); the other five layers contribute multiplicative
+   factors in `[0.5, 1.5]` aggregated by geometric mean. Each
+   non-macro layer contributes equally per the geometric mean. v2
+   may add per-layer powers (`factor_i ^ w_i`) if data justifies
+   layer asymmetry; v1 stays equal.
+
+4. **Force-entry threshold — RESOLVED → bootstrap rule, then
+   learned.** Per §3.5: at first deploy ENTER fires at `|LCS| ≥
+   0.30` (bootstrap so the system has defined behaviour from day 1).
+   After ≥200 trades per bucket accumulate, a small logistic
+   regression per (side × tenor × ToD) bucket replaces the
+   threshold. Bootstrap and learned classifier run in parallel for
+   90 days; whichever beats the other on realized R per trade
+   becomes the production policy. Audit publishes both decisions
+   side-by-side throughout.
+
+5. **Disaster floor — OBSOLETE.** Removed entirely per D13. The
+   only runtime exits are EXIT_KILL (events the 5-min layer
+   recomputation cannot detect), EXIT_INVALIDATION (LCS collapse),
+   EXIT_TARGET, TRAIL_STOP. Safety lives at sizing, at Gate 2, at
+   Gate 4, and in audit table B. No rupee-cap runtime override.
+
+All five answered. D.5 implementation has no remaining structural
+ambiguity. Next implementation step is D.1 (per-strike featurizer).
 
 End of amendment.
