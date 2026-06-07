@@ -397,33 +397,41 @@ edge on an instrument where cost-to-target ratio drops from 17x to
   side × tenor × ToD). 2 commits. **Gate 1**.
 - **D.4** — Brief integration (`predicted_net_return_*_atr` per
   strike entry). 1 commit.
-- **D.5** — Executor layer — the moat. **REDESIGNED 2026-06-09 (three
-  revisions same day)** as a layered-conviction cascade engine
+- **D.5** — Executor layer — the moat. **REDESIGNED 2026-06-09 (four
+  revisions same day)** as a causal-graph layered-conviction engine
   (see `docs/options_executor_layered_conviction.md`).
-  - Six context layers; macro layer is the **gate** (LCS = 0 when
-    macro silent), other five contribute multiplicative agreement
-    factors aggregated by **geometric mean** — NOT a linear weighted
-    sum. Encodes the user's "string-theory" cascade intuition: macro
-    births the possibility space, lower layers refine which
-    possibilities sit in today's tradeable universe.
-  - Force-entry threshold **bootstrap rule at v1** (|LCS| ≥ 0.30 so
-    system has defined behaviour day 1), **learned per-bucket
-    logistic regression after ≥200 trades**. Bootstrap and learned
-    run in parallel 90 days; whichever beats on realized R wins.
-  - Hold-vs-exit driven by LCS collapse only. No runtime disaster
-    floor. Only exits: EXIT_KILL (events layers cannot react to in
-    5 min: exchange halt, broker outage, VIX > +3 spike, 4-ATR
-    intra-bar move), EXIT_INVALIDATION (LCS drop ≥ 0.40), EXIT_TARGET,
-    TRAIL_STOP. Safety lives at sizing, at Gate 2, at Gate 4, in
-    audit table B.
-  - Macro data source: **free** (Yahoo public endpoints + warehouse
-    USDINR). When Yahoo degrades, macro reports 0 → cascade gate
-    closes → executor SKIPs day. Swap to paid feed via one adapter
-    class when revenue allows.
-  - AVWAP anchor: **session-open only** at v1 (09:15 IST + ±1σ/2σ/3σ).
-  - Rupee floor is **dynamic** — per-bucket OOS p20 of top-decile
-    realized R, not hardcoded.
-  - 4 commits. **Gate 2 updated**.
+  - Six context layers form a **causal DAG**, not parallel voters.
+    Macro is the cascade gate; manipulation has backward edges into
+    micro (forces it) and pool (distorts it). Forced-micro and
+    distorted-pool are flagged explicitly so the model treats them
+    as different regimes than organic-micro / intact-pool.
+  - System carries a **Causal Context Vector (CCV)** with raw
+    layer scores, causal flags (`micro_forced_flag`,
+    `pool_distortion_flag`), adjusted scores (`micro_organic_score`,
+    `pool_holding_strength`), and cross-layer alignment features.
+    The CCV is what the executor + LightGBM model consume.
+  - The **LCS scalar** is a digest of the CCV for human display
+    only (the brief shows "+0.42"); decisions use the full vector.
+  - **Local collapse** semantics: manipulation distorts micro and
+    pool LOCALLY (downstream layers in the DAG), not macro or
+    regime globally. Encoded in `apply_causal_adjustments`.
+  - **LightGBM structural priors**: `interaction_constraints`
+    encode the layer DAG so trees cannot split on causally-
+    disconnected feature pairs (e.g. macro × options directly).
+    `monotone_constraints` pin known directional relationships
+    (macro+ → R+; theta_per_day → R−; iv_percentile → R−;
+    micro_forced_flag → P(force-entry profitable)−). The model
+    spends its ~200-trade data budget on questions we don't already
+    know the answer to.
+  - Force-entry: bootstrap rule at v1 (|LCS| ≥ 0.30), separate
+    LightGBM classifier with the same structural priors after ≥200
+    trades. Bootstrap and learned run parallel 90 days.
+  - Hold-vs-exit: LCS collapse + manipulation-aware
+    EXIT_INVALIDATION. No runtime disaster floor (D13).
+  - Macro data: free Yahoo + warehouse. AVWAP anchor: session-open.
+  - Rupee floor: dynamic per-bucket p20 of top-decile R.
+  - 5 commits (was 4 — added the CCV + causal adjustments
+    module). **Gate 2 updated**.
 - **D.6** — Outcome-log + Yesterday Audit for options including the
   SKIP counter-factual row. 1 commit.
 - **D.7** — Live-publish hook (options PDF + CSV artifacts auto-
@@ -896,6 +904,85 @@ ROOT — Build a market-intelligence operating system
   hold until first paying options pilot is reading briefs.
 - **Status**: ADOPTED. Methodology doc shipped this commit. D.1
   is the next implementation step.
+
+### Deviation D15 — Causal Context Vector + local-collapse semantics + LightGBM structural priors
+
+- **Branch from**: D14 / cascade-with-geometric-mean LCS where the
+  six layers fed a single scalar via global geometric-mean damping
+  and the force-entry classifier consumed raw layer scores as flat
+  features.
+- **Trigger**: 2026-06-09 user critique. Three sharp points: (1)
+  the scalar LCS throws away the causal state; (2) collapse is
+  LOCAL not global (manipulation forces micro and distorts pool,
+  but not macro or regime); (3) LightGBM must encode the causal
+  structure, not just receive flat features. Quote: "logic of
+  microstructure collapse due which something else maybe ranked up
+  and ranked down, there should this kind of thing, also we need
+  mechanism in our own lightgbm a modification which allow it to
+  understand this concept and able to learn context and
+  manipulation inherently using all of this."
+- **Finding**: the user is right on all three counts. The geometric-
+  mean cascade encoded "macro is upstream" correctly but encoded
+  "all downstream layers damp/lift uniformly," which is wrong.
+  Manipulation has DIRECTED downstream effects (forces micro;
+  distorts pool); macro and regime are NOT downstream of
+  manipulation and shouldn't be affected by it.
+- **Plan-change**:
+  - §3 of the executor doc rewritten around a causal DAG:
+    `macro → regime → pool → options` with backward edges from
+    `manipulation → micro` and `manipulation → pool`.
+  - System now carries a **Causal Context Vector (CCV)** —
+    dataclass with raw layer scores, derived causal flags
+    (`micro_forced_flag`, `pool_distortion_flag`), adjusted scores
+    (`micro_organic_score`, `pool_holding_strength`), and cross-
+    layer alignment features (manip×micro, manip×pool, regime×pool,
+    macro×regime). The CCV is the model's input.
+  - **Local-collapse adjustment** (`apply_causal_adjustments`):
+    when manipulation aligns with micro at strength ≥ 0.40, the
+    micro score is partly EXPLAINED by manipulation and is damped
+    by `0.6 × |manip|`. When manipulation opposes pool at strength
+    ≥ 0.50, the pool's holding strength is damped by 0.6. Macro
+    and regime are NEVER adjusted by manipulation (they're
+    upstream in the DAG).
+  - **LCS scalar** is now a digest computed from the ADJUSTED
+    layer state, not the raw scores. It exists for human display
+    in the brief; the executor and the model consume the full CCV.
+  - **LightGBM modifications**: the OptionsExpectedReturnModel and
+    the force-entry classifier both use:
+    - `interaction_constraints` encoding the layer DAG. A split
+      path cannot directly combine `macro × options` because they
+      don't share an interaction group; it has to chain through
+      regime or pool features. This enforces top-down causal flow
+      at the tree-structure level.
+    - `monotone_constraints` pinning known directional
+      relationships: `macro_score: +1`, `theta_per_day_pct: -1`,
+      `iv_percentile: -1`, `micro_organic_score: +1`,
+      `micro_forced_flag: -1` (on force-entry P),
+      `pool_distortion_flag: -1`. The model is mathematically
+      prevented from learning implausible reversals.
+  - With ~200 OOS trades per bucket the model can't learn structure
+    from scratch (overfits noise). Encoding the DAG and monotonic
+    relationships as priors lets the model spend its limited data
+    budget on the questions we don't already know the answer to.
+- **What the customer sees**: the brief surfaces the LCS scalar AND
+  the per-layer state AND any active causal flags. When
+  `micro_forced_flag` fires, the renderer prints "⚠ MICRO FORCED"
+  with a one-sentence explanation. The customer reads the chain of
+  why, not just a number.
+- **Why this is novel**: no retail options research service encodes
+  "this microstructure signal looks bullish but was forced by stop-
+  run activity; the organic contribution is only +0.10." Most
+  services don't track the relationship at all; the calibration
+  benefits of separating forced-vs-organic micro are real because
+  forced-micro predicts mean-reversion-on-the-other-side, not
+  trend-continuation.
+- **Downstream**: D.5 sub-stream now 5 commits (was 4) — the CCV
+  + causal adjustments module is a self-contained addition. New
+  test surface: `apply_causal_adjustments` flag-firing matrix,
+  LightGBM constraint round-trip, brief renderer warning text.
+- **Status**: ADOPTED. CCV + DAG + LightGBM constraints shipped
+  this commit. D.1 (featurizer) still the next implementation
+  step; D.5 now has 5 commits to ship.
 
 ### Deviation D14 — LCS reformulated as causal cascade (geometric mean), force-entry threshold becomes learned
 

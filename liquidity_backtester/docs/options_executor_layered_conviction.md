@@ -240,160 +240,339 @@ ON our side). Negative when the patterns are AGAINST us.
 stays strongly positive during an in-trade drawdown, conviction is
 maintained. When it drops, conviction breaks.
 
-## §3. The Layered Conviction Score (LCS)
+## §3. The Layered Conviction Score (LCS) and the Causal Context Vector (CCV)
 
-> **Redesigned 2026-06-09** after user pushback. The original linear-
-> weighted-sum is wrong: the layers are not parallel voters. They are
-> a causal cascade where macro births the space of possible regime
-> moves, the pool/options layers narrow which of those possibilities
-> sit inside the tradeable universe today, and microstructure +
-> manipulation determine which are feasible to enter on this bar.
->
-> User's metaphor: a single string under tension across multiple
-> dimensions. When one dimension is stretched (macro is loud), other
-> dimensions can collapse to irrelevance. When the macro dimension
-> collapses to zero, the whole string has no energy regardless of how
-> excited microstructure thinks it is. The integration range of
-> "tradeable today" is not 0 → ∞ — it is bounded by the highest limit
-> knowable under today's layer state.
+> **Redesigned 2026-06-09 (third revision, same day)** after user
+> pushback. The previous geometric-mean cascade was right about
+> hierarchy but wrong about (a) collapsing all the causal state into
+> a single scalar and (b) applying uniform global damping when one
+> layer collapsed. Real layer interactions are LOCAL: when
+> manipulation fires, it forces microstructure and distorts pool —
+> not macro, not regime. The downstream LightGBM model must encode
+> this graph structure, not just consume layer scores as flat
+> features.
 
-### §3.1 The cascade formula
+### §3.1 The causal layer graph
 
 ```
-def lcs(scores: dict[str, float]) -> float:
-    """
-    scores has six keys with values in [-1, +1]:
-      macro, regime, pool, options, micro, manipulation
-    Returns LCS in [-1, +1].
-    """
-    macro = scores["macro"]
+            ┌─────────────────────────────────────────┐
+            │                                         │
+   macro ──►│   regime ──► pool ──► options           │
+            │                ▲                        │
+            │                │                        │
+            │   micro ◄──────┴──── manipulation       │
+            │     ▲                      │            │
+            │     └──────────────────────┘            │
+            │   (manipulation forces micro;           │
+            │    micro reflects forced-or-organic)    │
+            └─────────────────────────────────────────┘
+```
 
-    # Macro is the gate. Below this floor, no possibility space exists
-    # and no other layer can manufacture conviction. Returns 0.
+- **Forward edges** (top to bottom): macro defines possibility space;
+  regime selects the realised regime; pool defines the target; options
+  defines the vehicle.
+- **Manipulation has backward edges** into pool and micro. Aggressive
+  stacked orders can distort pool boundaries (apparent demand pool
+  broken by stacked-buy pressure, not by organic demand failure). The
+  same orders force the microstructure (EMA stack flipping because
+  the price was pushed there, not because trend reversed).
+- **Micro is dual-purpose**: a micro signal can be either organic
+  (trend-induced) or forced (manipulation-induced). The two have
+  different information content and must be distinguished, not summed.
+
+### §3.2 The Causal Context Vector (CCV) — what the executor and the
+        model actually consume
+
+The single-scalar LCS throws away the causal state. The system
+internally carries a richer object — the **Causal Context Vector**
+(CCV) — which preserves the layer-by-layer information:
+
+```python
+@dataclass
+class CCV:
+    # Raw per-layer scores, in [-1, +1]
+    macro_score: float
+    regime_score: float
+    pool_score: float
+    options_score: float
+    micro_score: float
+    manipulation_score: float
+
+    # Causal flags derived from inter-layer state (see §3.3)
+    micro_forced_flag: bool        # micro signal likely caused by manip
+    pool_distortion_flag: bool     # pool boundary distorted by aggressive flow
+    micro_organic_score: float     # micro_score after removing forced component
+    pool_holding_strength: float   # pool_score after distortion adjustment
+
+    # Cross-layer interaction features (for the LightGBM input)
+    manip_micro_alignment: float   # signed agreement between manip and micro
+    manip_pool_alignment: float
+    regime_pool_alignment: float
+    macro_regime_alignment: float
+
+    # Summary scalar for human consumption only (the brief shows this)
+    lcs: float                     # cascade output per §3.4
+```
+
+The brief and the customer see the LCS scalar. The executor and the
+LightGBM force-entry classifier consume the full CCV. The scalar is
+a digest for humans; the vector is the actual signal.
+
+### §3.3 Local collapse — the causal adjustment layer
+
+When a layer fires strongly and the graph says it has a downstream
+effect, we apply a LOCAL adjustment. Not a global damping.
+
+```python
+def apply_causal_adjustments(raw: dict[str, float]) -> CCV:
+    # Start with raw scores
+    micro = raw["micro"]
+    pool = raw["pool"]
+    manip = raw["manipulation"]
+
+    micro_forced_flag = False
+    pool_distortion_flag = False
+
+    # ── Manipulation → microstructure ──────────────────────────────
+    # If manipulation is firing in the same direction as microstructure,
+    # the micro signal is partly EXPLAINED by manipulation. It is not
+    # additional independent evidence — it is the same evidence read
+    # through a different layer.
+    if abs(manip) >= 0.40 and sign(manip) == sign(micro):
+        micro_forced_flag = True
+        # Remove the manipulation-attributable component from micro.
+        # The remaining "organic" signal is what the model should weight.
+        explained_share = min(1.0, abs(manip))
+        micro_organic = micro * (1.0 - 0.6 * explained_share)
+    else:
+        micro_organic = micro
+
+    # ── Manipulation → pool distortion ─────────────────────────────
+    # Strong manipulation with sign opposite to pool means aggressive
+    # flow is pushing AGAINST the pool. The pool's holding power is
+    # weaker than its raw score suggests.
+    if abs(manip) >= 0.50 and sign(manip) != sign(pool):
+        pool_distortion_flag = True
+        pool_holding = pool * 0.6
+    else:
+        pool_holding = pool
+
+    # ── Cross-layer alignment features (for the model) ─────────────
+    return CCV(
+        macro_score=raw["macro"],
+        regime_score=raw["regime"],
+        pool_score=pool,
+        options_score=raw["options"],
+        micro_score=micro,
+        manipulation_score=manip,
+        micro_forced_flag=micro_forced_flag,
+        pool_distortion_flag=pool_distortion_flag,
+        micro_organic_score=micro_organic,
+        pool_holding_strength=pool_holding,
+        manip_micro_alignment=sign(manip) * sign(micro) * min(abs(manip), abs(micro)),
+        manip_pool_alignment=sign(manip) * sign(pool) * min(abs(manip), abs(pool)),
+        regime_pool_alignment=sign(raw["regime"]) * sign(pool) * min(abs(raw["regime"]), abs(pool)),
+        macro_regime_alignment=sign(raw["macro"]) * sign(raw["regime"]) * min(abs(raw["macro"]), abs(raw["regime"])),
+        lcs=_compute_lcs_scalar(raw, micro_organic, pool_holding),
+    )
+```
+
+Key points:
+- The adjustment is **LOCAL**: it affects micro and pool when
+  manipulation fires. It does NOT affect macro, regime, or options.
+  Macro is upstream; it cannot be forced by downstream manipulation.
+- The flags persist: `micro_forced_flag` is a feature the model
+  sees. The model learns that "micro is bullish + micro_forced_flag
+  is True" is a DIFFERENT regime than "micro is bullish +
+  micro_forced_flag is False."
+- Both raw and adjusted versions of micro/pool are kept. The model
+  decides which to rely on, per bucket.
+
+### §3.4 The LCS scalar — for human display only
+
+The LCS is now a digest of the adjusted state:
+
+```python
+def _compute_lcs_scalar(raw, micro_organic, pool_holding):
+    macro = raw["macro"]
     if abs(macro) < 0.10:
-        return 0.0
-
+        return 0.0                       # macro gate closed
     direction = +1.0 if macro > 0 else -1.0
 
-    # Each non-macro layer contributes a multiplicative agreement
-    # factor in [0.5, 1.5]. Aligned layers amplify; misaligned damp;
-    # silent (zero-score) layers contribute factor 1.0 and pass through.
-    factors = []
-    for key in ("regime", "pool", "options", "micro", "manipulation"):
-        s = scores[key]
-        alignment = direction * s            # +1 when same sign as macro
-        factor = 1.0 + 0.5 * alignment       # in [0.5, 1.5]
-        factors.append(factor)
-
-    # Geometric mean of the agreement factors. Using geometric mean
-    # (not arithmetic) means: a single near-zero factor damps the
-    # whole product more than a single high factor lifts it. That is
-    # the user's "string under tension" intuition: collapse of one
-    # dimension matters more than excitement of another.
+    # Use the ADJUSTED scores for micro and pool. Manipulation enters
+    # as its own factor (it is real causal evidence about institutional
+    # positioning).
+    adjusted = [
+        raw["regime"],
+        pool_holding,
+        raw["options"],
+        micro_organic,
+        raw["manipulation"],
+    ]
+    factors = [1.0 + 0.5 * (direction * s) for s in adjusted]
     n = len(factors)
     product = 1.0
     for f in factors:
         product *= f
     geom_mean = product ** (1.0 / n)
-
-    # LCS magnitude = macro strength × geometric mean of layer
-    # agreement, bounded to [0, 1].
-    magnitude = min(1.0, abs(macro) * geom_mean)
-
-    return direction * magnitude
+    return direction * min(1.0, abs(macro) * geom_mean)
 ```
 
-### §3.2 What this formula encodes
+The scalar is what gets rendered in the brief ("Today's LCS for
+NIFTY ATM-PE buying: +0.42"). It is convenient for human attention
+but is NOT what the executor or the model use for decisions.
 
-- **Macro is the gate.** When `|macro| < 0.10`, LCS = 0. No trade is
-  possible because no possibility-space exists today. The other
-  layers have nothing to refine.
-- **Direction follows macro.** Once the gate opens, sign(LCS) =
-  sign(macro). Even if every other layer screams the opposite
-  direction, the cascade respects the upstream causal layer.
-- **Magnitude is macro × geometric-mean of agreement.** Each non-
-  macro layer contributes a factor between 0.5 (strongly against)
-  and 1.5 (strongly with). Geometric mean means: layers that agree
-  amplify (multiplicative), layers that disagree damp (the same
-  multiplicative geometry working in reverse). A silent layer
-  (score = 0) gives factor 1.0 and is neutral.
-- **Saturation at 1.0.** The cascade cannot manufacture conviction
-  beyond a 5/5-layer-agreement at full macro strength. There is no
-  super-conviction tail.
+### §3.5 The LightGBM modifications — structural priors via
+        `interaction_constraints` and `monotone_constraints`
 
-### §3.3 Worked examples
+The OptionsExpectedReturnModel (§4 of the parent methodology doc) is
+a LightGBM Huber regressor. We use two LightGBM features to encode
+the causal graph as structural priors:
 
-| State | macro | regime | pool | options | micro | manip | → LCS |
-|---|---|---|---|---|---|---|---|
-| Macro silent | 0.05 | +0.9 | +0.9 | +0.9 | +0.9 | +0.9 | **0.00** (gate closed) |
-| Macro strong, all aligned | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | **+1.00** (saturated) |
-| Macro strong, mixed | +0.60 | +0.40 | +0.40 | 0.0 | +0.40 | 0.0 | **+0.62** |
-| Macro strong, all disagree | +0.80 | −0.80 | −0.80 | −0.80 | −0.80 | −0.80 | **+0.48** (macro still dominant, but damped) |
-| Macro moderate, all aligned | +0.30 | +0.80 | +0.80 | +0.80 | +0.80 | +0.80 | **+0.42** |
-| Macro moderate, structural disagrees | +0.30 | +0.60 | −0.80 | +0.60 | +0.60 | +0.60 | **+0.21** |
+**Interaction constraints** — restrict which features can appear
+together in the same tree-split path. This forces the model to
+respect the causal DAG:
 
-The last row matters. Yesterday's HDFC trade fits: macro moderate
-bearish, microstructure & manip aligned bearish, but a strong
-demand pool sat below. The cascade says: lower LCS, hold the
-trade with smaller size, watch for the layer that disagrees to
-flip first. That is exactly what the user did discretionarily.
-
-### §3.4 Why we do NOT pre-set fixed thresholds anymore
-
-The original §3 had:
-
-```
-LCS ≥ +0.50 → high
-LCS ≥ +0.30 → moderate (force-entry fires)
+```python
+# Group definitions encode the layer DAG of §3.1.
+# A feature can belong to multiple groups (overlap = allowed
+# interaction across groups). A split path can only combine features
+# that share at least one group.
+INTERACTION_GROUPS = [
+    # Top-of-cascade
+    ["macro_score", "regime_score", "macro_regime_alignment"],
+    # Mid-cascade
+    ["regime_score", "pool_score", "options_score",
+     "regime_pool_alignment", "pool_holding_strength"],
+    # Manipulation cluster (the local-collapse zone)
+    ["pool_score", "micro_score", "manipulation_score",
+     "manip_micro_alignment", "manip_pool_alignment",
+     "micro_forced_flag", "pool_distortion_flag",
+     "micro_organic_score", "pool_holding_strength"],
+    # Options-specific cluster
+    ["options_score", "iv_percentile", "theta_per_day_pct",
+     "dte_trading_days"],
+]
 ```
 
-These were guesses. The user pushed back: **the force-entry threshold
-is exactly the kind of decision the model should learn from data,
-not have hand-coded.**
+Effect: the model cannot fit a tree that splits on
+`{macro_score, options_score}` directly (those don't share a group),
+but it CAN split on `{macro_score, regime_score, pool_score,
+options_score}` because the chain connects through shared-group
+features. This enforces top-down information flow.
 
-The right framing: which `LCS_at_entry` values produce net-positive
-realized R for this (side × tenor × ToD) bucket, conditional on
-which layers are providing the agreement?
+**Monotone constraints** — pin known directional relationships so
+the model cannot learn implausible reversals:
 
-### §3.5 Force-entry: bootstrap rule at v1, learned post-bootstrap
+```python
+MONOTONE = {
+    # Higher macro (more bullish) → higher expected R for BUY side
+    "macro_score": +1,
+    # Higher micro_organic → higher expected R (after manipulation
+    # adjustment; organic micro is the trusted signal)
+    "micro_organic_score": +1,
+    # Higher options_score (better vol regime) → higher expected R
+    "options_score": +1,
+    # Higher theta_per_day_pct → lower expected R for BUY side
+    # (theta is a drag for premium buyers)
+    "theta_per_day_pct": -1,
+    # Higher IV percentile → lower expected R for BUY side
+    # (mean reversion risk)
+    "iv_percentile": -1,
+    # The flags and alignments are not monotone-constrained; let the
+    # model find the right shape.
+}
+```
 
-We need to ship something at first deploy because there is no OOS
-trade history to train a force-entry classifier against. So:
+Effect: the model is mathematically prevented from learning, e.g.,
+"more bullish macro → lower expected buy-side R." That kind of
+pattern can appear in noisy training data and would silently destroy
+the model. Monotone constraints kill it at the loss-function level.
 
-**v1 bootstrap (first ~30 days)**: rule-based fallback. ENTER fires
-at `|LCS| ≥ 0.30` so the system has a defined behaviour from day 1.
-This number is documented as a bootstrap, not as an answer.
+**Why this is a real LightGBM modification and not just "throw
+features at it"**: the standard ML practice is to add features and
+hope the model learns the right structure. With ~200 OOS trades per
+bucket the model does NOT have enough data to learn structure from
+scratch; it overfits the noise. Causal interaction constraints +
+monotone constraints encode the prior knowledge that we DO have
+(the layer DAG) and lets the model spend its limited data budget
+on the questions we don't already know the answers to (e.g.
+"how strongly does theta drag interact with vol regime?").
 
-**v1.1 (after ≥ 200 trades accumulate per bucket)**: a small per-
-bucket logistic regression replaces the threshold. Features:
-- LCS at entry
-- Each individual layer score at entry
-- Indicator: which layers are agreeing
-- Predicted_R from the §4 model
-- Bucket identity (side × tenor × ToD)
+### §3.6 What about the force-entry classifier (separate model)
 
-Target: `realized_R > rupee_floor_per_bucket` (binary).
+The force-entry classifier (introduced in §3.5 of the earlier draft,
+now reframed) is a SECOND LightGBM model — a binary classifier on
+`p_force_entry_profitable`. It uses the same CCV as input plus
+predicted_R from the regression model:
 
-The classifier outputs `p_force_entry_profitable`. ENTER fires when
-`p > 0.55` (50% would be coin-flip; +5% margin accounts for cost
-asymmetry).
+```python
+FORCE_ENTRY_INTERACTION_GROUPS = [
+    INTERACTION_GROUPS[0],
+    INTERACTION_GROUPS[1],
+    INTERACTION_GROUPS[2],     # manipulation cluster - most important here
+    INTERACTION_GROUPS[3],
+    ["predicted_R", "predicted_R_lower_ci", "predicted_R_upper_ci"],
+]
 
-The bootstrap rule and the learned classifier run in parallel for
-the first 90 days post-cutover; the audit shows their decisions
-side-by-side; we keep whichever beats the other on realized R.
+FORCE_ENTRY_MONOTONE = {
+    "predicted_R": +1,           # higher predicted R → more likely profitable
+    "micro_forced_flag": -1,     # forced micro is weaker evidence; reduce P
+    "pool_distortion_flag": -1,  # distorted pool is weaker holding; reduce P
+}
+```
 
-### §3.6 What this commits us to engineering-wise
+So the force-entry classifier is encouraged by the model structure
+itself to be SKEPTICAL of forced microstructure and distorted pools
+— exactly the user's "originality collapsed mean nearby thing also
+get distorted" intuition, encoded as monotone constraints.
 
-- `lib/options/lcs.py` ships the cascade formula at v1. Deterministic,
-  testable, no learned components.
-- `lib/options/force_entry.py` ships the bootstrap rule + a stub
-  classifier interface. The classifier is empty at v1; it gets fit
-  in a separate analysis script once trades accumulate.
-- Pin tests on the cascade: gate behaviour (macro < 0.10 → 0),
-  saturation, sign-from-macro, the worked-example table above.
-- The brief's executor block reports BOTH the bootstrap decision
-  and the (eventually) learned decision, alongside the per-layer
-  scores. The customer sees the full state, not a single number.
+### §3.7 What the brief actually displays
+
+The customer sees the LCS scalar but ALSO sees the causal flags
+when they fire. The renderer surface for an options strike entry:
+
+```
+NIFTY50 24500 PE — Buy-side analysis:
+  LCS = +0.42 (moderate bearish conviction on NIFTY)
+  Per-layer state:
+    macro: +0.55 (US closed -0.4%, SGX Nifty -0.3%)
+    regime: +0.40 (index trending down, mild)
+    pool: +0.60 (24500 is strong demand pool from prior session)
+    options: +0.30 (IV percentile 0.55, theta modest)
+    micro: +0.25 (EMA stack rolling down, modest)
+    manipulation: +0.45 ⚠ MICRO FORCED
+  Causal note: aggressive sell-side flow detected. The bearish
+    microstructure read is partly explained by recent stop-run
+    activity; the organic micro contribution is +0.10. Read with
+    caution.
+  Predicted net R (60min, buy-side): +0.31 ATR. Bootstrap rule says
+    ENTER (LCS ≥ 0.30). Learned classifier (when fitted) will weigh
+    the MICRO_FORCED flag and may downgrade.
+```
+
+This is the rich object. The customer sees not just "the model says
+ENTER" but the chain of why — including the warning that the
+microstructure read is forced. They can disagree.
+
+### §3.8 Engineering commitments
+
+- `lib/options/ccv.py` — CCV dataclass + `apply_causal_adjustments`
+  function (deterministic, no learned components).
+- `lib/options/lcs.py` — `_compute_lcs_scalar` (a pure function of
+  the adjusted scores).
+- `lib/options/featurizer.py` — when building the LightGBM input
+  frame, emits the full CCV per row + the cross-layer interaction
+  features.
+- `lib/options/model_config.py` — `INTERACTION_GROUPS` and
+  `MONOTONE` constraints; consumed by both the
+  OptionsExpectedReturnModel fit and the force-entry classifier fit.
+- Pin tests on the causal adjustments (manipulation aligned with
+  micro → forced flag fires + micro_organic damped; manipulation
+  opposite to pool → distortion flag fires + pool_holding damped;
+  no flags fire when manipulation is weak or absent).
+- Brief renderer surfaces the per-layer table + causal warnings
+  when flags fire.
 
 ### "Force entry" rule (the user's actual discipline)
 
