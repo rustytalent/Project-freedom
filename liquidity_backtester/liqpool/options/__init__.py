@@ -17,12 +17,52 @@ from .labels import (
     add_options_labels,
     LABEL_OUTPUT_COLUMNS,
 )
+from .model_config import (
+    NUMERIC_FEATURE_COLUMNS,
+    CATEGORICAL_FEATURE_COLUMNS,
+    MONEYNESS_BUCKET_LEVELS,
+    INTERACTION_GROUPS_TEMPLATE,
+    MONOTONE_BUY,
+    MONOTONE_SELL,
+    LIGHTGBM_PARAMS,
+    build_constraints,
+    derive_tenor,
+    expand_categorical_features,
+)
+from .expected_return_model import (
+    BucketKey,
+    CalibrationRow,
+    OptionsHeadMetrics,
+    OptionsExpectedReturnModel,
+    OptionsExpectedReturnModelSuite,
+    SuiteSummary,
+)
 
 __all__ = [
+    # Featurizer
     "OptionsFeaturizerParams",
     "build_options_feature_frame",
     "OPTIONS_FEATURE_COLUMNS",
+    # Labels
     "OptionsLabelParams",
     "add_options_labels",
     "LABEL_OUTPUT_COLUMNS",
+    # Model config
+    "NUMERIC_FEATURE_COLUMNS",
+    "CATEGORICAL_FEATURE_COLUMNS",
+    "MONEYNESS_BUCKET_LEVELS",
+    "INTERACTION_GROUPS_TEMPLATE",
+    "MONOTONE_BUY",
+    "MONOTONE_SELL",
+    "LIGHTGBM_PARAMS",
+    "build_constraints",
+    "derive_tenor",
+    "expand_categorical_features",
+    # Model
+    "BucketKey",
+    "CalibrationRow",
+    "OptionsHeadMetrics",
+    "OptionsExpectedReturnModel",
+    "OptionsExpectedReturnModelSuite",
+    "SuiteSummary",
 ]
