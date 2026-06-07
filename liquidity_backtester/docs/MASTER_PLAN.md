@@ -52,14 +52,23 @@ audit-patch batches were rebased and pushed as `52c88df`, `ce1ed40`,
 this commit. Work that was blocked only by missing audit patches is now
 unblocked, but implementation/training acceptance criteria still apply.
 
-**Current commercial-surface status (added 2026-06-05):** the
-customer-facing website is scaffolded under `website/` (commit
-`f2f77ac`) — Next.js 15, 25 routes, real copy, mock-data calibration
-dashboard, byte-aligned brief renderer, §2 moat-test guarding against
-methodology leakage. `pnpm typecheck`/`lint`/`test`/`build` clean.
-Deploy target: Vercel + Supabase + Razorpay + Resend. Brand
-parameters (`BRAND_NAME`, domain, founder name) placeholder pending
-user decision. See `website/README.md` and Deviation D10.
+**Current commercial-surface status (updated 2026-06-09):** the
+customer-facing website is live on Vercel as **Crux Research**
+(`cruxresearch.in`). Razorpay checkout, Supabase Google auth, and
+brief-ingest API are wired end-to-end; webhook + email delivery
+still pending. Engine→website artifact pipeline plumbed
+(`liqpool/products/artifact_pusher.py`) with bearer auth and
+fire-and-forget brief auto-publish hook in `generate_brief()`. See
+Deviation D10 and `website/docs/production_launch_steps.md`.
+
+**Current strategic focus (added 2026-06-09):** options vertical is
+now the top-priority commercial wedge per Deviation D11. The full
+methodology — feature stack, model heads per (side × tenor × ToD),
+the rule-based executor layer that is the actual moat, audit
+calibration, and four acceptance gates — is committed at
+`docs/options_strategy_methodology.md`. Implementation sub-streams
+D.1-D.8 are opened in §3. Streams E (live broker) and F (swing) move
+BEHIND options until at least Gate 3 ships.
 
 ---
 
@@ -359,34 +368,61 @@ verification deferred to next post-B retrain.
 
 ---
 
-### Stream D — Options vertical slice (Greeks → model → brief)
+### Stream D — Options vertical (the top-priority commercial wedge)
 
-**Layers**: L1 + L2 + L6
-**Owner**: Opus (design); Codex (training, post-B)
+**Layers**: L1 + L2 + L4 + L5 + L6
+**Owner**: Opus (design + executor); Codex (data, training, brief wiring)
 **Depends on**:
-- Warehouse Greeks parquet (✅ have it)
-- Stream B resolved; training now depends on Codex/VPS scheduling
-**During chokepoint?**: design portions YES, training portions NO
-**Status**: design ✅ DONE (`docs/options_expected_return_model_spec.md`);
-training unblocked/queued
-**Scope (this session, design only)**:
-- `OptionsExpectedReturnModel` specification: inputs (proximity h=12/36/60,
-  direction, path_efficiency, vol_regime_zscore_20d, distance-to-strike,
-  days-to-expiry, IV percentile, side), output (expected return per
-  ATM weekly option premium under (entry, side, time-of-day)).
-- Daily-Greeks-to-intraday-equity feature pipeline using
-  `align_daily_to_intraday` (the lagged join I already shipped).
-- Brief's `options_suitability` section schema update — populated
-  Greeks-aware output.
+- Warehouse Greeks parquet ✅ have it
+- Stream B resolved ✅
+- Warehouse reader ✅ shipped
+- Outcome log ✅ shipped (Stream G)
+**During chokepoint?**: N/A — chokepoint resolved
+**Status**: full strategy methodology ✅ DONE
+(`docs/options_strategy_methodology.md`); implementation streams D.1-D.8
+opened with explicit acceptance gates
+**Why this is now top priority**: equity-MIS post-touch was empirically
+closed at -0.4R net under user's actual sizing discipline (D5). The
+proximity head was correct (AUC 0.92-0.95); equity cost arithmetic
+killed the trade. Options invert that arithmetic — same prediction
+edge on an instrument where cost-to-target ratio drops from 17x to
+~0.5x. Concrete arithmetic in `§9` of the methodology doc.
 
-**Scope (post-B, training)**:
-- Train the head on the EOD options + spot + risk-free join.
-- Wire the brief.
+**Sub-streams** (each with acceptance, ETA in the methodology doc):
+- **D.1** — Feature joining (per-strike featurizer using
+  `align_daily_to_intraday`). 1 commit.
+- **D.2** — Label generation (`realized_premium_atr_units_60min` per
+  strike × side, slippage baked in). 1 commit.
+- **D.3** — Train `OptionsExpectedReturnModel` suite (one head per
+  side × tenor × ToD). 2 commits. **Gate 1**.
+- **D.4** — Brief integration (`predicted_net_return_*_atr` per
+  strike entry). 1 commit.
+- **D.5** — Executor layer — the moat. Rule-based ENTER/WAIT/SKIP
+  per-trade + 5-min state machine in-trade. 3 commits. **Gate 2**.
+- **D.6** — Outcome-log + Yesterday Audit for options including the
+  SKIP counter-factual row. 1 commit.
+- **D.7** — Live-publish hook (options PDF + CSV artifacts auto-
+  uploaded to website). 1 commit. **Gate 3**.
+- **D.8** — Live broker hardening for options. Deferred until first
+  customer demand; 3 commits post-revenue.
 
-**Acceptance**: design committed as spec doc this session. Training
-commit lands in a post-Stream-B training session.
+**Acceptance gates** (also in the methodology doc §11):
+1. **Gate 1** — at least one head has Spearman > 0.10 + top-decile
+   realized R > 0 + calibration error ≤ 0.15 across VIX deciles. If
+   fail, options vertical pauses; we re-evaluate D.1 features.
+2. **Gate 2** — executor's ENTER paths beat naive "always take
+   top-decile" baseline by ≥ +0.15 ATR on a 60-day OOS replay; SKIP
+   counter-factual mean ≤ +0.20 ATR.
+3. **Gate 3** — end-to-end pipeline ships cleanly, tipster guardrail
+   passes, smoke-test from VPS produces both PDF and CSV artifacts.
+4. **Gate 4** — first 30 trading days of live calibration hold within
+   ±0.15 ATR of OOS calibration error. Net realized R of executor's
+   ENTER paths positive on ≥ 50 live trades.
 
-**ETA**: design 1 commit this session; training 2-3 commits post-B.
+**ETA**: D.1-D.7 = 11 commits. At current velocity (~3 substantial
+commits per session), that's ~4 working sessions to Gate 3 if
+the data path is clean. Gate 4 is 30 trading days of paper / pilot
+data after Gate 3.
 
 ---
 
@@ -782,6 +818,59 @@ ROOT — Build a market-intelligence operating system
   finalising those is now a higher-priority decision than the next
   retrain.
 - **Status**: ADOPTED, code shipped, deploy pending laptop+keys.
+
+### Deviation D11 — Options promoted from "design ready" to top-priority commercial wedge
+
+- **Branch from**: Stream D scoped as "design done; training queued
+  post-Stream-B" in D10's planning context; treated as a parallel
+  effort to Streams D/F training equally.
+- **Trigger**: 2026-06-09. User explicitly refocused on options as
+  the primary trading and product line. The cost arithmetic
+  comparison the equity-MIS verdict (D2, D5) was always pointing at
+  — equity-MIS net -0.4R under user's real sizing — gets inverted
+  on index options where typical cost-to-target ratio drops from
+  17x (equity) to ~0.5x (ATM weekly options). Concrete arithmetic
+  in `docs/options_strategy_methodology.md` §9.
+- **Finding**: the equity failure was never a model failure. The
+  proximity head's OOS AUC was 0.92-0.95 overall and 0.73-0.76 at
+  0-1 ATR distance — that signal is real. It just could not survive
+  intraday equity friction. Options preserve the same signal in an
+  instrument that lets it monetise. The right framing is "same
+  edge, different cost structure", not "second try at the same
+  thing".
+- **Plan-change**:
+  - Stream D scope expanded from a single `OptionsExpectedReturnModel`
+    head into a full pipeline (D.1 features, D.2 labels, D.3 model
+    suite, D.4 brief integration, D.5 **executor layer** — the
+    moat — D.6 audit, D.7 publish hook, D.8 deferred broker work).
+  - Each sub-stream has explicit acceptance and ETA in §3 of this
+    master plan and in `docs/options_strategy_methodology.md` §10.
+  - Four explicit gates (Gate 1 model edge; Gate 2 executor value-
+    add; Gate 3 pipeline ship; Gate 4 live calibration hold) gate
+    each downstream stream.
+  - The methodology doc supersedes `options_expected_return_model_spec.md`
+    which covered only D.3. The older spec stays for diff history but
+    new work references the methodology doc.
+- **Why the executor layer is the moat (not the model)**: the model
+  is reproducible — anyone with our data + a LightGBM tutorial
+  could fit a head and read off `predicted_R`. The executor layer
+  — rule-based ENTER/WAIT/SKIP with the kill-conditions and
+  in-trade state machine specified in `§5` of the methodology doc
+  — is a layer over the calibrated model that does not exist in
+  the retail Indian options space today. Methodology doc §5 also
+  argues why we keep it rule-based at v1 (interpretable, fails
+  gracefully, sample-size honest) rather than learning it.
+- **Risk**: explicit list in `methodology §12` — top-decile realized
+  R might be zero (Gate 1 catches this), 60-min horizon might be
+  wrong (v2 widens), executor rules might be over-fit to backtest
+  (SKIP counter-factual at Gate 2 catches this). Each named so we
+  don't drift into denial.
+- **Downstream**: every commit between now and Gate 3 belongs to
+  D.1-D.7. Streams F (swing) and E (live broker) move BEHIND options.
+  The website is fine as it stands; further website polish is on
+  hold until first paying options pilot is reading briefs.
+- **Status**: ADOPTED. Methodology doc shipped this commit. D.1
+  is the next implementation step.
 
 ---
 
