@@ -397,8 +397,15 @@ edge on an instrument where cost-to-target ratio drops from 17x to
   side × tenor × ToD). 2 commits. **Gate 1**.
 - **D.4** — Brief integration (`predicted_net_return_*_atr` per
   strike entry). 1 commit.
-- **D.5** — Executor layer — the moat. Rule-based ENTER/WAIT/SKIP
-  per-trade + 5-min state machine in-trade. 3 commits. **Gate 2**.
+- **D.5** — Executor layer — the moat. **REDESIGNED 2026-06-09** as
+  a layered-conviction engine (see
+  `docs/options_executor_layered_conviction.md`). Six context layers
+  produce a Layered Conviction Score (LCS) ∈ [-1, +1]; force-entry
+  fires at |LCS| ≥ 0.30; hold-vs-exit during drawdown driven by LCS
+  collapse, not percent drawdown. Disaster-floor cap on absolute
+  rupee loss derived from `reward = risk^p` sizing. Rupee floor is
+  now **dynamic** — derived from per-bucket OOS p20 of top-decile
+  realized R, not hardcoded. 4 commits (was 3). **Gate 2 updated**.
 - **D.6** — Outcome-log + Yesterday Audit for options including the
   SKIP counter-factual row. 1 commit.
 - **D.7** — Live-publish hook (options PDF + CSV artifacts auto-
@@ -871,6 +878,66 @@ ROOT — Build a market-intelligence operating system
   hold until first paying options pilot is reading briefs.
 - **Status**: ADOPTED. Methodology doc shipped this commit. D.1
   is the next implementation step.
+
+### Deviation D12 — Executor redesigned around user's actual trading style (layered conviction)
+
+- **Branch from**: D11 / `docs/options_strategy_methodology.md §5`
+  scoped the executor as predictor + rule-based ENTER/WAIT/SKIP gate
+  with fixed-percent stops and targets.
+- **Trigger**: 2026-06-09 user briefing on their actual lived trading
+  style after a successful equities session (Infosys/HDFC/Wipro
+  scalps): they (a) read macro + global indexes overnight, (b) form
+  a directional hypothesis, (c) force entries when context aligns
+  (no waiting for clean intra-bar setup), (d) hold through initial
+  drawdown when "manipulation" reads agree, (e) exit only when the
+  layered context itself disagrees. Quote: "a correct model is which
+  can force trades like I do, then use advanced analysis and context
+  making to make that losing trade a winner."
+- **Finding**: my original §5 executor encoded none of that. It would
+  reject the user's actual style as "force-entries are bad,
+  conviction-holds are bad, drawdown is a stop trigger." That is a
+  retail-quant orthodoxy designed for purely-statistical edges and
+  doesn't capture multi-layer-context discretionary edge.
+- **Plan-change**: full executor redesign in
+  `docs/options_executor_layered_conviction.md`. Same goal (an
+  executor that does not exist in retail Indian options today) but
+  with the user's actual mechanics:
+  - Six explicit context layers (macro overnight, index regime,
+    structural pool, options-specific, microstructure including
+    AVWAP+SD+EMA stack, manipulation patterns).
+  - Each layer produces a bounded score in [-1, +1].
+  - Layered Conviction Score (LCS) is the weighted sum (starting
+    weights stated; learned at v2).
+  - **Force-entry** at |LCS| ≥ 0.30 regardless of intra-bar timing.
+  - **Hold-vs-exit during drawdown** is LCS-driven, not P&L-driven.
+    Strong drawdown with intact LCS = hold (it's manipulation).
+    Modest drawdown with LCS collapse = exit (real invalidation).
+  - **Sizing via `√risk = reward^p`** with `p = base + conviction
+    bonus + size bonus`, per the user's formula.
+  - **Disaster floor** caps absolute rupee loss per trade regardless
+    of conviction — explicit honesty about days the read is wrong.
+  - **Audit table B**: separate hit-rate tracking for
+    conviction-holds vs naive trades. Conviction-hold discipline
+    proves itself in the data or gets retired by Gate 2.
+- **Rupee floor change**: hardcoded `₹600` replaced with
+  data-derived per-bucket floor = `max(₹300, p20 of top-decile
+  realized R in rupees)`. Refreshes monthly.
+- **Why this is honest**: the user's style works on the days the
+  read is right and produces large losses on days it isn't. The
+  design encodes the style faithfully so it can reproduce the wins,
+  AND adds explicit guardrails (disaster floor; LCS-collapse exits;
+  Table-B audit) so it survives the losses. The audit publishes both
+  outcomes side-by-side; subscribers see calibrated honesty, not a
+  cherry-picked record.
+- **Downstream**: D.5 sub-stream now 4 commits instead of 3. Gate 2
+  updated (compare conviction-hold variant to naive percent-stop
+  baseline; ≥ +0.20 R improvement required). 5 open questions in §11
+  of the amendment doc need user input before D.5 begins (data
+  source for macro layer, AVWAP anchors, starting layer weights,
+  force-entry threshold, disaster floor coefficient).
+- **Status**: ADOPTED. Amendment doc shipped this commit. D.1 still
+  the next implementation step; D.5 design is finalised pending the
+  open-questions answers.
 
 ---
 
