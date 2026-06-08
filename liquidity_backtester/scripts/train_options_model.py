@@ -42,6 +42,7 @@ import os
 import pickle
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -101,6 +102,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--embargo-bars", type=int, default=13,
                    help="Bars to embargo between train and val.")
     p.add_argument("--seed", type=int, default=41)
+    p.add_argument("--workers", type=int, default=0,
+                   help="Threads for the per-expiry data-prep loop. "
+                        "0 = auto (min(8, cpu_count)). Pandas releases the "
+                        "GIL on the heavy numpy paths so threads scale well "
+                        "for the I/O + featurizer work. LightGBM itself "
+                        "uses all cores per head fit independently.")
     p.add_argument("--log-level", default="INFO",
                    choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return p.parse_args(argv)
@@ -299,6 +306,59 @@ def load_option_intraday_bars(reader: WarehouseReader, option_index: str,
 
 
 # ---------------------------------------------------------------------------
+# Per-expiry worker (thread pool)
+# ---------------------------------------------------------------------------
+
+def _process_one_expiry(
+    *,
+    expiry: str,
+    reader: WarehouseReader,
+    spot: pd.DataFrame,
+    greeks: pd.DataFrame,
+    macro_daily: Optional[pd.DataFrame],
+    option_index: str,
+    sides: List[str],
+    strikes_around_atm: int,
+    feat_params: OptionsFeaturizerParams,
+    label_params: OptionsLabelParams,
+) -> Tuple[Optional[pd.DataFrame], str, float]:
+    """Worker: build features + load bars + label for one expiry.
+
+    Returns ``(labelled_or_None, status_message, seconds_elapsed)``.
+    Safe to call from multiple threads concurrently — only reads from
+    ``spot`` / ``greeks`` / ``macro_daily``, and the WarehouseReader
+    parquet reads are independent per file.
+    """
+    t0 = time.perf_counter()
+    strikes = select_strikes_per_expiry(greeks, expiry, strikes_around_atm)
+    if not strikes:
+        return None, "no strikes", time.perf_counter() - t0
+    strike_dicts = [
+        {"strike": float(k), "side": s, "expiry_date": expiry}
+        for k in strikes for s in sides
+    ]
+    features = build_options_feature_frame(
+        underlying_bars=spot, greeks_daily=greeks,
+        macro_daily=macro_daily, strikes=strike_dicts,
+        underlying=option_index, params=feat_params,
+    )
+    if features.empty:
+        return None, "empty features", time.perf_counter() - t0
+    option_bars = load_option_intraday_bars(
+        reader, option_index, expiry, strikes, sides)
+    if option_bars.empty:
+        return None, "no option bars", time.perf_counter() - t0
+    labelled = add_options_labels(
+        features=features, option_bars=option_bars, params=label_params)
+    n_valid = int(labelled["label_valid"].sum())
+    elapsed = time.perf_counter() - t0
+    status = f"strikes={len(strikes)} valid={n_valid}/{len(labelled)}"
+    if n_valid == 0:
+        return None, status + " (no valid rows)", elapsed
+    return labelled, status, elapsed
+
+
+# ---------------------------------------------------------------------------
 # Layer-score join
 # ---------------------------------------------------------------------------
 
@@ -484,53 +544,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     expiries = discover_expiries(greeks, args.max_expiries)
     LOGGER.info("training on %d expiries", len(expiries))
 
-    # 6. Per-expiry: load option bars, build features, label rows
-    all_labelled: List[pd.DataFrame] = []
+    # 6. Per-expiry: load option bars, build features, label rows.
+    # Runs in a thread pool — pandas releases the GIL on the heavy paths
+    # (parquet I/O, groupby, numpy ops), so threads give a real speedup
+    # without the pickle overhead of multiprocessing.
     feat_params = OptionsFeaturizerParams()
     label_params = OptionsLabelParams()
-    for i, expiry in enumerate(expiries, start=1):
-        t0 = time.perf_counter()
-        strikes = select_strikes_per_expiry(
-            greeks, expiry, args.strikes_around_atm)
-        if not strikes:
-            LOGGER.debug("[%d/%d] %s: no strikes — skip",
-                          i, len(expiries), expiry)
-            continue
-        # Strike list for the featurizer
-        strike_dicts = [
-            {"strike": float(k), "side": s, "expiry_date": expiry}
-            for k in strikes for s in sides
-        ]
-        features = build_options_feature_frame(
-            underlying_bars=spot,
-            greeks_daily=greeks,
-            macro_daily=macro_daily,
-            strikes=strike_dicts,
-            underlying=args.option_index,
-            params=feat_params,
-        )
-        if features.empty:
-            LOGGER.debug("[%d/%d] %s: empty features — skip",
-                          i, len(expiries), expiry)
-            continue
-        # Load the intraday option bars for the label generator
-        option_bars = load_option_intraday_bars(
-            reader, args.option_index, expiry, strikes, sides)
-        if option_bars.empty:
-            LOGGER.debug("[%d/%d] %s: no option bars — skip",
-                          i, len(expiries), expiry)
-            continue
-        labelled = add_options_labels(
-            features=features, option_bars=option_bars,
-            params=label_params)
-        n_valid = int(labelled["label_valid"].sum())
-        LOGGER.info("[%d/%d] %s: strikes=%d valid_rows=%d / %d  (%.1fs)",
-                    i, len(expiries), expiry, len(strikes),
-                    n_valid, len(labelled),
-                    time.perf_counter() - t0)
-        if n_valid == 0:
-            continue
-        all_labelled.append(labelled)
+    n_workers = (args.workers or min(8, os.cpu_count() or 4))
+    LOGGER.info("processing %d expiries with %d worker thread(s)",
+                len(expiries), n_workers)
+    all_labelled: List[pd.DataFrame] = []
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        future_to_expiry = {
+            pool.submit(
+                _process_one_expiry,
+                expiry=e, reader=reader, spot=spot, greeks=greeks,
+                macro_daily=macro_daily,
+                option_index=args.option_index, sides=sides,
+                strikes_around_atm=args.strikes_around_atm,
+                feat_params=feat_params, label_params=label_params,
+            ): e for e in expiries
+        }
+        for i, fut in enumerate(as_completed(future_to_expiry), start=1):
+            expiry = future_to_expiry[fut]
+            try:
+                labelled, status, elapsed = fut.result()
+            except Exception as exc:                                  # noqa: BLE001
+                LOGGER.warning("[%d/%d] %s: FAILED — %s",
+                                i, len(expiries), expiry, exc)
+                continue
+            LOGGER.info("[%d/%d] %s: %s (%.1fs)",
+                        i, len(expiries), expiry, status, elapsed)
+            if labelled is not None:
+                all_labelled.append(labelled)
 
     if not all_labelled:
         LOGGER.error("no labelled data — aborting before fit")
