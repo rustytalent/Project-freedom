@@ -72,6 +72,23 @@ from .artifact_export import (
     push_options_executor_audit,
     push_options_strikes,
 )
+from .macro_scrape import (
+    MACRO_TICKERS,
+    MacroAdapter,
+    MacroOvernightSnapshot,
+    StubMacroAdapter,
+    YahooMacroAdapter,
+    empty_snapshot,
+)
+from .layer_scores import (
+    compute_layer_scores_from_inputs,
+    macro_score,
+    manipulation_score,
+    micro_score,
+    options_score,
+    pool_score,
+    regime_score,
+)
 
 __all__ = [
     # Featurizer
@@ -131,4 +148,19 @@ __all__ = [
     "options_strikes_csv",
     "push_options_executor_audit",
     "push_options_strikes",
+    # Macro scrape
+    "MACRO_TICKERS",
+    "MacroAdapter",
+    "MacroOvernightSnapshot",
+    "StubMacroAdapter",
+    "YahooMacroAdapter",
+    "empty_snapshot",
+    # Layer scores
+    "compute_layer_scores_from_inputs",
+    "macro_score",
+    "manipulation_score",
+    "micro_score",
+    "options_score",
+    "pool_score",
+    "regime_score",
 ]
