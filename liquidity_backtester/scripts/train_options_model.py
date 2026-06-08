@@ -86,9 +86,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--output-dir", required=True, type=Path,
                    help="Where to persist summary.pkl + reports")
     p.add_argument("--warehouse-root",
-                   default=os.environ.get("GFEED_WAREHOUSE_ROOT", None),
+                   default=os.environ.get("KITE_WAREHOUSE_ROOT", None),
                    help="Override warehouse root. Defaults to env "
-                        "GFEED_WAREHOUSE_ROOT or the WarehouseReader default.")
+                        "KITE_WAREHOUSE_ROOT or the WarehouseReader default.")
     p.add_argument("--max-expiries", type=int, default=0,
                    help="If > 0, cap the number of expiries loaded for a "
                         "smoke test. 0 = all expiries in the window.")
