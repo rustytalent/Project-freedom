@@ -18,6 +18,8 @@ export type ArtifactKind =
   | "outcome_log_export_csv"
   | "yesterday_audit_csv"
   | "options_strikes_csv"
+  | "options_executor_audit_csv"
+  | "options_executor_calls_csv"
   | "weekly_research_note_pdf";
 
 export const ARTIFACT_KIND_LABELS: Record<ArtifactKind, string> = {
@@ -29,6 +31,8 @@ export const ARTIFACT_KIND_LABELS: Record<ArtifactKind, string> = {
   outcome_log_export_csv: "Outcome log export",
   yesterday_audit_csv: "Yesterday Audit",
   options_strikes_csv: "Options strikes in play",
+  options_executor_calls_csv: "Options executor decisions",
+  options_executor_audit_csv: "Options executor audit",
   weekly_research_note_pdf: "Weekly research note",
 };
 
@@ -49,6 +53,10 @@ export const ARTIFACT_KIND_DESCRIPTIONS: Record<ArtifactKind, string> = {
     "Calibrated hit-rate audit for the previous IST trading session.",
   options_strikes_csv:
     "Index option strikes flagged in today's brief, with touch-watch numbers.",
+  options_executor_calls_csv:
+    "Per-strike executor decisions from today's options block — bucket, side, predicted net return, and the executor's action.",
+  options_executor_audit_csv:
+    "Calibration tables for the options executor — Table A (normal trades), Table B (conviction-holds bucketed by LCS-at-hold), SKIP counter-factual, and the Gate-2 verdict.",
   weekly_research_note_pdf:
     "Long-form Monday note on regime structure.",
 };

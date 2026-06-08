@@ -58,6 +58,8 @@ VALID_KINDS = frozenset({
     "outcome_log_export_csv",
     "yesterday_audit_csv",
     "options_strikes_csv",
+    "options_executor_audit_csv",       # Stream D.7: Table A/B/SKIP audit
+    "options_executor_calls_csv",       # per-strike executor decisions
     "weekly_research_note_pdf",
 })
 

@@ -82,7 +82,9 @@ class KindAndTierValidationTests(unittest.TestCase):
             "daily_brief_pdf", "daily_brief_email", "swing_brief_pdf",
             "diagnosis_report_pdf", "calibration_summary_csv",
             "outcome_log_export_csv", "yesterday_audit_csv",
-            "options_strikes_csv", "weekly_research_note_pdf",
+            "options_strikes_csv",
+            "options_executor_audit_csv", "options_executor_calls_csv",
+            "weekly_research_note_pdf",
         }
         self.assertEqual(set(VALID_KINDS), expected)
 

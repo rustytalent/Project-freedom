@@ -43,7 +43,11 @@ const SECTION_ORDER: Array<{
   },
   {
     heading: "Options",
-    kinds: ["options_strikes_csv"],
+    kinds: [
+      "options_strikes_csv",
+      "options_executor_calls_csv",
+      "options_executor_audit_csv",
+    ],
     empty: "No options exports for this date.",
   },
   {

@@ -66,6 +66,12 @@ from .audit import (
     options_executor_meta,
     options_skip_meta,
 )
+from .artifact_export import (
+    executor_audit_csv,
+    options_strikes_csv,
+    push_options_executor_audit,
+    push_options_strikes,
+)
 
 __all__ = [
     # Featurizer
@@ -120,4 +126,9 @@ __all__ = [
     "compute_executor_audit",
     "options_executor_meta",
     "options_skip_meta",
+    # Artifact export
+    "executor_audit_csv",
+    "options_strikes_csv",
+    "push_options_executor_audit",
+    "push_options_strikes",
 ]
