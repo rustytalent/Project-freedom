@@ -117,6 +117,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 # Data loading
 # ---------------------------------------------------------------------------
 
+def _to_naive(series: pd.Series) -> pd.Series:
+    """Drop tz attribute (keeping wall-clock) so comparisons with the
+    naive CLI start/end Timestamps don't blow up. The warehouse stores
+    Asia/Kolkata-aware timestamps; we work in one zone end-to-end so
+    naive wall-clock is fine downstream.
+    """
+    series = pd.to_datetime(series)
+    tz = getattr(series.dt, "tz", None)
+    if tz is not None:
+        series = series.dt.tz_localize(None)
+    return series
+
+
 def load_spot_bars(reader: WarehouseReader, underlying: str,
                     start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """Load 5-min spot bars in the window."""
@@ -126,7 +139,7 @@ def load_spot_bars(reader: WarehouseReader, underlying: str,
             f"warehouse returned empty spot frame for {underlying}; "
             f"report={rep}")
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = _to_naive(df["timestamp"])
     mask = (df["timestamp"] >= start) & (
         df["timestamp"] <= end + pd.Timedelta(days=1))
     df = df[mask].reset_index(drop=True)
@@ -146,7 +159,7 @@ def load_greeks(reader: WarehouseReader, option_index: str,
             f"warehouse returned empty Greeks frame for {option_index}; "
             f"report={rep}")
     df = df.copy()
-    df["trading_date"] = pd.to_datetime(df["trading_date"]).dt.normalize()
+    df["trading_date"] = _to_naive(df["trading_date"]).dt.normalize()
     mask = (df["trading_date"] >= start.normalize()) & (
         df["trading_date"] <= end.normalize())
     df = df[mask].copy()
@@ -191,7 +204,7 @@ def load_macro(reader: WarehouseReader,
     if df is None or df.empty:
         return None
     df = df.copy()
-    df["trading_date"] = pd.to_datetime(df["trading_date"]).dt.normalize()
+    df["trading_date"] = _to_naive(df["trading_date"]).dt.normalize()
     df = df[(df["trading_date"] >= start.normalize())
             & (df["trading_date"] <= end.normalize())]
     # The featurizer's `macro_daily` wants `india_vix_close` + `usdinr_close`.
@@ -202,7 +215,7 @@ def load_macro(reader: WarehouseReader,
             vix_df, _ = reader.load_spot("INDIAVIX", tf="day")
             if vix_df is not None and not vix_df.empty:
                 vix_df = vix_df.copy()
-                vix_df["trading_date"] = pd.to_datetime(
+                vix_df["trading_date"] = _to_naive(
                     vix_df["timestamp"]).dt.normalize()
                 df = df.merge(
                     vix_df[["trading_date", "close"]].rename(
@@ -289,7 +302,7 @@ def load_option_intraday_bars(reader: WarehouseReader, option_index: str,
             if df is None or df.empty:
                 continue
             df = df.copy()
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df["timestamp"] = _to_naive(df["timestamp"])
             df["underlying"] = option_index
             df["strike"] = float(strike)
             df["premium_close"] = df["close"]
