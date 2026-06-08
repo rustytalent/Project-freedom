@@ -2,10 +2,15 @@ import Link from "next/link";
 import { Hero } from "@/components/marketing/Hero";
 import { PitchSection } from "@/components/marketing/PitchSection";
 import { BriefExcerpt } from "@/components/marketing/BriefExcerpt";
+import { NumbersStrip } from "@/components/marketing/NumbersStrip";
+import { BuiltFor } from "@/components/marketing/BuiltFor";
+import { Principles } from "@/components/marketing/Principles";
+import { FAQ } from "@/components/marketing/FAQ";
 import { CalibrationSparkline } from "@/components/calibration/CalibrationSparkline";
 import { LinkButton } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/card";
 import { mockTimeSeries } from "@/lib/outcome-log-mock";
+import { plans } from "@/lib/pricing";
 
 const RESEARCH_EXCERPT = `WATCHLIST
   - BANKING basket: subscriber-only level cluster is near enough to
@@ -35,6 +40,8 @@ export default function LandingPage() {
   return (
     <>
       <Hero />
+
+      <NumbersStrip />
 
       <PitchSection
         eyebrow="Discipline 01"
@@ -158,6 +165,10 @@ export default function LandingPage() {
         }
       />
 
+      <BuiltFor />
+
+      <Principles />
+
       {/* Pricing teaser */}
       <section className="border-t border-border">
         <div className="max-w-dash mx-auto px-6 py-20">
@@ -173,45 +184,22 @@ export default function LandingPage() {
             archive inside the subscriber portal.
           </p>
           <div className="grid gap-4 md:grid-cols-3 mt-10">
-            <Card>
-              <CardTitle>Core Research</CardTitle>
-              <CardDescription>
-                Equity, options, and index research without live
-                intraday updates.
-              </CardDescription>
-              <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹6,999
-              </CardContent>
-              <CardContent className="text-xs text-fg-subtle mt-1">
-                per month
-              </CardContent>
-            </Card>
-            <Card>
-              <CardTitle>Live Desk</CardTitle>
-              <CardDescription>
-                Core Research plus live update stream and priority
-                delivery support.
-              </CardDescription>
-              <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹14,999
-              </CardContent>
-              <CardContent className="text-xs text-fg-subtle mt-1">
-                per month
-              </CardContent>
-            </Card>
-            <Card>
-              <CardTitle>Audit Base</CardTitle>
-              <CardDescription>
-                Base audit for research or infrastructure, expanded by
-                data size and scope.
-              </CardDescription>
-              <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                ₹2,000+
-              </CardContent>
-              <CardContent className="text-xs text-fg-subtle mt-1">
-                base + scope
-              </CardContent>
-            </Card>
+            {(["daily", "pro", "diagnosis"] as const).map((id) => {
+              const p = plans[id];
+              const isDiag = id === "diagnosis";
+              return (
+                <Card key={id}>
+                  <CardTitle>{p.name}</CardTitle>
+                  <CardDescription>{p.description}</CardDescription>
+                  <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
+                    {p.displayMonthly}
+                  </CardContent>
+                  <CardContent className="text-xs text-fg-subtle mt-1">
+                    {isDiag ? "base + scope" : "per month"}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
           <div className="mt-10">
             <LinkButton href="/pricing" variant="secondary">
@@ -221,22 +209,28 @@ export default function LandingPage() {
         </div>
       </section>
 
+      <FAQ />
+
       {/* Final CTA */}
       <section className="border-t border-border bg-bg-raised">
-        <div className="max-w-prose mx-auto px-6 py-20 text-center">
-          <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg">
+        <div className="max-w-prose mx-auto px-6 py-24 text-center">
+          <p className="text-xs uppercase tracking-[0.18em] text-accent mb-5">
+            One brief, then decide.
+          </p>
+          <h2 className="font-serif text-3xl md:text-5xl leading-[1.1] text-fg">
             Read one brief before deciding.
           </h2>
-          <p className="mt-4 text-fg-muted leading-relaxed">
+          <p className="mt-5 text-fg-muted leading-relaxed">
             The sample brief is a real published artifact, redacted for
-            public view. It will take six minutes to read.
+            public view. It will take six minutes to read. No card, no
+            signup, no follow-up sequence.
           </p>
-          <div className="mt-8 flex flex-wrap justify-center gap-3">
+          <div className="mt-10 flex flex-wrap justify-center gap-3">
             <LinkButton href="/sample-brief" variant="primary">
               View sample brief
             </LinkButton>
             <LinkButton href="/contact" variant="secondary">
-              Talk to us
+              Talk to the founder
             </LinkButton>
           </div>
         </div>

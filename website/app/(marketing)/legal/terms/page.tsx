@@ -65,12 +65,12 @@ export default function TermsPage() {
 
       <h2 className="text-xl text-fg font-serif">6. Liability</h2>
       <p>
-        To the maximum extent permitted by Indian law, {brand.name},
-        {brand.legalEntity}, and our affiliates shall not be liable
-        for any direct, indirect, incidental, or consequential
-        damages arising out of or in connection with the use of, or
-        reliance on, any content published or made available through
-        this service.
+        To the maximum extent permitted by Indian law, {brand.name}
+        {brand.legalEntity ? `, ${brand.legalEntity},` : ""} and our
+        affiliates shall not be liable for any direct, indirect,
+        incidental, or consequential damages arising out of or in
+        connection with the use of, or reliance on, any content
+        published or made available through this service.
       </p>
 
       <h2 className="text-xl text-fg font-serif">7. Jurisdiction</h2>

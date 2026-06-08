@@ -12,13 +12,16 @@ export const brand = {
     "A research brief in your inbox before NSE opens, followed by a " +
     "public audit of yesterday's calls.",
   founder: {
-    name: "(founder name)",
+    name: "Garvit Katyal",
   },
   contact: {
     email: "hello@cruxresearch.in",
     calendly: null as string | null,
   },
-  legalEntity: "(legal entity TBD)",
+  // Set once the operating entity is registered. Until then, the
+  // footer copyright line falls back to `brand.name` so we never ship
+  // the placeholder string in production.
+  legalEntity: null as string | null,
   sebi: {
     // We are NOT a SEBI-registered investment advisor. The disclosures
     // page makes this explicit. Every page footer carries the short form.

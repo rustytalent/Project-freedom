@@ -22,7 +22,8 @@ export default function DisclosuresPage() {
 
       <h2 className="text-xl text-fg font-serif">Not an investment adviser</h2>
       <p>
-        {brand.name} (the {brand.legalEntity}) is{" "}
+        {brand.name}
+        {brand.legalEntity ? ` (${brand.legalEntity})` : ""} is{" "}
         <strong>not registered with the Securities and Exchange Board of
         India (SEBI) as an Investment Adviser</strong> under the SEBI
         (Investment Advisers) Regulations, 2013, and is not registered

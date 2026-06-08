@@ -84,8 +84,8 @@ export function Footer() {
             .
           </p>
           <p className="mt-2">
-            © {new Date().getFullYear()} {brand.legalEntity}. All rights
-            reserved.
+            © {new Date().getFullYear()} {brand.legalEntity ?? brand.name}.
+            All rights reserved.
           </p>
         </div>
       </div>

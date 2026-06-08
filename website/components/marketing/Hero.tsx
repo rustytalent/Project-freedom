@@ -32,13 +32,17 @@ export function Hero() {
           <LinkButton href="/track-record" variant="secondary">
             See track record
           </LinkButton>
+        </div>
+        <p className="mt-5 text-sm text-fg-subtle">
+          Or read{" "}
           <Link
             href="/philosophy"
-            className="ml-2 text-sm text-fg-muted hover:text-fg transition-colors underline-offset-4"
+            className="text-fg-muted hover:text-fg transition-colors underline underline-offset-4 decoration-fg-subtle"
           >
-            Read our philosophy
-          </Link>
-        </div>
+            the philosophy
+          </Link>{" "}
+          first — six minutes, no signup.
+        </p>
       </div>
     </section>
   );

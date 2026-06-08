@@ -62,9 +62,14 @@ export default function AboutPage() {
       </section>
 
       <section className="mt-16 pt-12 border-t border-border">
-        <h2 className="font-serif text-2xl text-fg mb-4">Contact</h2>
-        <p className="text-fg-muted leading-relaxed">
-          Founder + brand only for now. Reach us at{" "}
+        <p className="text-xs uppercase tracking-[0.18em] text-accent mb-3">
+          Founder
+        </p>
+        <h2 className="font-serif text-2xl text-fg mb-3">
+          {brand.founder.name}
+        </h2>
+        <p className="text-fg-muted leading-relaxed max-w-2xl">
+          Reaches you at{" "}
           <a
             href={`mailto:${brand.contact.email}`}
             className="text-accent underline underline-offset-4"
@@ -72,7 +77,7 @@ export default function AboutPage() {
             {brand.contact.email}
           </a>{" "}
           for product questions, partnerships, or to book a 30-minute
-          intake call for Audit Base.
+          intake call for Audit Base. Founder + brand only for now.
         </p>
       </section>
 
