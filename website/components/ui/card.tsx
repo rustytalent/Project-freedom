@@ -9,9 +9,9 @@ export function Card({
     <div
       className={cn(
         "bg-bg-raised border border-border rounded-sm p-6",
-        "transition-[border-color,transform,box-shadow] duration-200",
-        "hover:border-accent/60 hover:-translate-y-0.5",
-        "hover:shadow-[0_8px_24px_-12px_rgba(124,155,184,0.18)]",
+        "transition-[border-color,transform,box-shadow,background-color] duration-200",
+        "hover:border-warm/55 hover:-translate-y-0.5 hover:bg-bg-raised/95",
+        "hover:shadow-[0_10px_28px_-14px_rgba(183,146,104,0.22),inset_0_0_0_1px_rgba(183,146,104,0.06)]",
         className,
       )}
       {...rest}

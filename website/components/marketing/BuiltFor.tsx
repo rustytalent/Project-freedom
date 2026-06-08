@@ -34,7 +34,7 @@ const personas = [
 export function BuiltFor() {
   return (
     <section className="border-t border-border">
-      <div className="max-w-dash mx-auto px-6 py-20">
+      <div className="max-w-dash mx-auto px-6 py-24 md:py-28">
         <Reveal>
           <div className="max-w-2xl mb-14">
             <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">

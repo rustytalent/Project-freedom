@@ -1,12 +1,14 @@
 import { mockLatestSummary, mockTimeSeries } from "@/lib/outcome-log-mock";
 import { AnimatedCounter, type CounterFormat } from "@/components/ui/AnimatedCounter";
 import { Reveal } from "@/components/ui/Reveal";
+import { StatMark } from "./StatMark";
 
 type Stat = {
   label: string;
   raw: number;
   format: CounterFormat;
   sub: string;
+  mark: "staircase" | "tally" | "oscillation" | "disc";
 };
 
 function buildStats(): Stat[] {
@@ -22,24 +24,28 @@ function buildStats(): Stat[] {
       raw: series.length,
       format: { kind: "int" },
       sub: "since launch, across equity, options, index",
+      mark: "staircase",
     },
     {
       label: "Predictions audited",
       raw: summary.reduce((a, r) => a + r.n, 0),
       format: { kind: "int" },
       sub: "every claim resolved, hit or miss, on the next session",
+      mark: "tally",
     },
     {
       label: "Mean calibration error",
       raw: meanAbsErr * 100,
       format: { kind: "decimal", decimals: 1, suffix: "%" },
       sub: "rolling 30 trading days, touch-watch head",
+      mark: "oscillation",
     },
     {
       label: "Audit transparency",
       raw: 100,
       format: { kind: "decimal", decimals: 0, suffix: "%" },
       sub: "no claim is published without an outcome the next day",
+      mark: "disc",
     },
   ];
 }
@@ -48,9 +54,9 @@ export function NumbersStrip() {
   const stats = buildStats();
   return (
     <section className="border-t border-border bg-bg-raised/40">
-      <div className="max-w-dash mx-auto px-6 py-16">
+      <div className="max-w-dash mx-auto px-6 py-24 md:py-28">
         <Reveal>
-          <div className="flex flex-wrap items-end justify-between gap-6 mb-12">
+          <div className="flex flex-wrap items-end justify-between gap-6 mb-14">
             <div className="max-w-xl">
               <p className="text-xs uppercase tracking-[0.18em] text-accent mb-3">
                 The record so far
@@ -66,14 +72,15 @@ export function NumbersStrip() {
             </p>
           </div>
         </Reveal>
-        <dl className="grid gap-x-6 gap-y-10 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="grid gap-x-6 gap-y-12 sm:grid-cols-2 lg:grid-cols-4">
           {stats.map((s, i) => (
-            <Reveal key={s.label} delay={i * 90}>
-              <div className="border-l-2 border-accent/40 pl-5">
-                <dd className="font-serif text-4xl text-fg tabnum leading-none">
+            <Reveal key={s.label} delay={i * 110}>
+              <div className="group border-l-2 border-accent/40 pl-5 transition-colors hover:border-warm/60">
+                <StatMark kind={s.mark} className="mb-4 transition-opacity group-hover:opacity-100 opacity-80" />
+                <dd className="font-serif text-4xl md:text-5xl text-fg tabnum leading-none">
                   <AnimatedCounter value={s.raw} format={s.format} />
                 </dd>
-                <dt className="mt-3 text-xs uppercase tracking-wider text-fg-muted">
+                <dt className="mt-4 text-xs uppercase tracking-[0.14em] text-fg-muted">
                   {s.label}
                 </dt>
                 <p className="mt-2 text-sm text-fg-subtle leading-relaxed">

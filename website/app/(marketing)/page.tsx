@@ -11,6 +11,7 @@ import { LinkButton } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/card";
 import { mockTimeSeries } from "@/lib/outcome-log-mock";
 import { plans } from "@/lib/pricing";
+import { Reveal } from "@/components/ui/Reveal";
 
 const RESEARCH_EXCERPT = `WATCHLIST
   - BANKING basket: subscriber-only level cluster is near enough to
@@ -171,37 +172,41 @@ export default function LandingPage() {
 
       {/* Pricing teaser */}
       <section className="border-t border-border">
-        <div className="max-w-dash mx-auto px-6 py-20">
-          <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
-            Pricing
-          </p>
-          <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg max-w-2xl">
-            Pricing for a research product, not a tip sheet.
-          </h2>
-          <p className="mt-4 text-fg-muted max-w-xl leading-relaxed">
-            Google sign-in starts a five-day preview automatically.
-            Paid plans run through Razorpay and keep the exact research
-            archive inside the subscriber portal.
-          </p>
-          <div className="grid gap-4 md:grid-cols-3 mt-10">
-            {(["daily", "pro", "diagnosis"] as const).map((id) => {
+        <div className="max-w-dash mx-auto px-6 py-24 md:py-28">
+          <Reveal>
+            <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
+              Pricing
+            </p>
+            <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg max-w-2xl">
+              Pricing for a research product, not a tip sheet.
+            </h2>
+            <p className="mt-5 text-fg-muted max-w-xl leading-relaxed">
+              Google sign-in starts a five-day preview automatically.
+              Paid plans run through Razorpay and keep the exact research
+              archive inside the subscriber portal.
+            </p>
+          </Reveal>
+          <div className="grid gap-4 md:grid-cols-3 mt-12">
+            {(["daily", "pro", "diagnosis"] as const).map((id, i) => {
               const p = plans[id];
               const isDiag = id === "diagnosis";
               return (
-                <Card key={id}>
-                  <CardTitle>{p.name}</CardTitle>
-                  <CardDescription>{p.description}</CardDescription>
-                  <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
-                    {p.displayMonthly}
-                  </CardContent>
-                  <CardContent className="text-xs text-fg-subtle mt-1">
-                    {isDiag ? "base + scope" : "per month"}
-                  </CardContent>
-                </Card>
+                <Reveal key={id} delay={i * 110}>
+                  <Card>
+                    <CardTitle>{p.name}</CardTitle>
+                    <CardDescription>{p.description}</CardDescription>
+                    <CardContent className="mt-6 font-mono text-2xl text-fg tabnum">
+                      {p.displayMonthly}
+                    </CardContent>
+                    <CardContent className="text-xs text-fg-subtle mt-1">
+                      {isDiag ? "base + scope" : "per month"}
+                    </CardContent>
+                  </Card>
+                </Reveal>
               );
             })}
           </div>
-          <div className="mt-10">
+          <div className="mt-12">
             <LinkButton href="/pricing" variant="secondary">
               Full pricing
             </LinkButton>
@@ -212,27 +217,32 @@ export default function LandingPage() {
       <FAQ />
 
       {/* Final CTA */}
-      <section className="border-t border-border bg-bg-raised">
-        <div className="max-w-prose mx-auto px-6 py-24 text-center">
-          <p className="text-xs uppercase tracking-[0.18em] text-accent mb-5">
-            One brief, then decide.
-          </p>
-          <h2 className="font-serif text-3xl md:text-5xl leading-[1.1] text-fg">
-            Read one brief before deciding.
-          </h2>
-          <p className="mt-5 text-fg-muted leading-relaxed">
-            The sample brief is a real published artifact, redacted for
-            public view. It will take six minutes to read. No card, no
-            signup, no follow-up sequence.
-          </p>
-          <div className="mt-10 flex flex-wrap justify-center gap-3">
-            <LinkButton href="/sample-brief" variant="primary">
-              View sample brief
-            </LinkButton>
-            <LinkButton href="/contact" variant="secondary">
-              Talk to the founder
-            </LinkButton>
-          </div>
+      <section className="border-t border-border bg-bg-raised relative overflow-hidden">
+        <div className="absolute inset-0 hero-glow pointer-events-none opacity-70" aria-hidden="true" />
+        <div className="relative max-w-prose mx-auto px-6 py-28 md:py-32 text-center">
+          <Reveal>
+            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-warm-glow mb-6">
+              Six minutes · no signup · no card
+            </p>
+            <h2 className="font-serif text-3xl md:text-5xl leading-[1.05] text-fg tracking-[-0.01em]">
+              Read one brief
+              <span className="text-warm"> before deciding</span>.
+            </h2>
+            <p className="mt-6 text-fg-muted leading-relaxed">
+              The sample brief is a real published artifact, redacted
+              for public view. No follow-up sequence, no aggressive
+              retargeting. Read it, close the tab, come back when you
+              want to.
+            </p>
+            <div className="mt-10 flex flex-wrap justify-center gap-3">
+              <LinkButton href="/sample-brief" variant="primary">
+                View sample brief
+              </LinkButton>
+              <LinkButton href="/contact" variant="secondary">
+                Talk to the founder
+              </LinkButton>
+            </div>
+          </Reveal>
         </div>
       </section>
     </>

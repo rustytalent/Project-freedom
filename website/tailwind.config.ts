@@ -26,6 +26,15 @@ const config: Config = {
           dim: "#5A7691",
           glow: "#9FB6CB",
         },
+        // Deliberate warm second accent. Used sparingly - the headline
+        // focal word, the edition tag, the brand reticle hover state,
+        // the friction-reducing microcopy near CTAs. One warm note in
+        // a cool composition. Burnished bronze, not yellow gold.
+        warm: {
+          DEFAULT: "#B79268",
+          dim: "#8C6F4F",
+          glow: "#D4B68A",
+        },
         drift: "#C66B5C",         // error / drift
         calibrated: "#7DA982",    // success / calibrated
         border: "#23262B",

@@ -27,10 +27,11 @@
     font-weight: 500;
     letter-spacing: -0.01em;
   }
-  /* Editorial selection: muted steel wash, never the OS-default blue. */
+  /* Editorial selection: warm bronze wash. Reinforces the focal-word
+     identity and keeps the OS-default blue from leaking through. */
   ::selection {
-    background-color: rgba(124, 155, 184, 0.32);
-    color: #e8e6e1;
+    background-color: rgba(183, 146, 104, 0.36);
+    color: #f5f3ee;
   }
   /* Loud focus rings, but on our muted accent rather than browser blue. */
   *:focus-visible {
@@ -56,19 +57,38 @@
       linear-gradient(90deg, rgba(124, 155, 184, 0.05) 1px, transparent 1px);
     background-size: 14px 14px;
   }
-  /* Soft accent glow that washes the hero - calm, not flashy. */
+  /* Soft accent glow that washes the hero - calm, not flashy.
+     Cool steel from the upper-left, a warm bronze pool from the
+     upper-right behind the dashboard artifact, and a sage trace
+     at lower-right. The composition reads as one warm note in a
+     cool field - the focal word echo. */
   .hero-glow {
     background:
       radial-gradient(
-        60% 50% at 20% 0%,
+        60% 50% at 18% 0%,
         rgba(124, 155, 184, 0.10) 0%,
         rgba(124, 155, 184, 0.0) 60%
       ),
       radial-gradient(
-        50% 40% at 90% 30%,
-        rgba(125, 169, 130, 0.06) 0%,
-        rgba(125, 169, 130, 0.0) 60%
+        55% 45% at 86% 18%,
+        rgba(183, 146, 104, 0.08) 0%,
+        rgba(183, 146, 104, 0.0) 65%
+      ),
+      radial-gradient(
+        45% 35% at 95% 75%,
+        rgba(125, 169, 130, 0.05) 0%,
+        rgba(125, 169, 130, 0.0) 65%
       );
+  }
+  /* Warm under-glow for the hero artifact card. Sits behind the
+     card and bleeds out about an inch on every side, so the panel
+     reads as a "lit" object rather than a flat rectangle. The
+     Apple-style candle-on-a-cold-desk effect. */
+  .hero-artifact {
+    box-shadow:
+      0 24px 60px -28px rgba(0, 0, 0, 0.70),
+      0 8px 32px -12px rgba(183, 146, 104, 0.18),
+      0 0 0 1px rgba(183, 146, 104, 0.08) inset;
   }
   /* Mono-font tabular numerals for tables and data strips. */
   .tabnum {

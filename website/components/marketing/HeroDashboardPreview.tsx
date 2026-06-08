@@ -1,17 +1,22 @@
 import { CalibrationSparkline } from "@/components/calibration/CalibrationSparkline";
-import { mockTimeSeries } from "@/lib/outcome-log-mock";
+import { mockLatestSummary, mockTimeSeries } from "@/lib/outcome-log-mock";
 
 /**
  * HeroDashboardPreview: the right-side artifact that fills the hero.
  *
  * Renders a small, redacted facsimile of a live calibration panel:
  * a header strip with publish timestamp, a 30-day touch-watch
- * sparkline, three status chips for the three prediction heads,
- * and a footer line with predictions resolved overnight.
+ * sparkline, a per-confidence-bucket distribution strip, three
+ * status rows for the three prediction heads, and a footer line
+ * with predictions resolved overnight.
+ *
+ * The bucket strip is the precision signal - the detail only someone
+ * who actually thinks about calibration would design. It makes the
+ * "this works" click in the first few seconds of looking.
  *
  * Numbers come from the same mock outcome-log view that powers
  * /track-record so the artifact and dashboard always agree.
- * Nothing here exposes private technique names or per-symbol data.
+ * Nothing exposes private technique names or per-symbol data.
  */
 function Row({
   label,
@@ -43,6 +48,67 @@ function Row({
   );
 }
 
+/**
+ * Per-confidence-bucket distribution strip. Four bars (very-high,
+ * high, moderate, low) showing the touch-watch head's bucket sizes.
+ * Height encodes N (count of predictions resolved). Bar fill colour
+ * encodes whether that bucket is calibrated, drifting, or neutral
+ * based on the published calibration_error vs a small tolerance.
+ */
+function BucketStrip() {
+  const summary = mockLatestSummary();
+  const tw = summary.filter((r) => r.prediction_type === "touch_watch");
+  // Stable ordering for the visual; never sort by N or the bars dance.
+  const order = ["very_high", "high", "moderate", "low"] as const;
+  const rows = order.map((b) => tw.find((r) => r.confidence_bucket === b)!);
+  const maxN = Math.max(...rows.map((r) => r.n));
+  const TOL = 0.05;
+  return (
+    <div className="px-5 pt-4 pb-2">
+      <div className="flex items-baseline justify-between mb-2.5">
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-muted">
+          Confidence buckets · touch-watch
+        </p>
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-subtle">
+          n / bucket
+        </p>
+      </div>
+      <div className="flex items-end gap-2 h-12">
+        {rows.map((r) => {
+          const h = Math.max(12, Math.round((r.n / maxN) * 100));
+          const within = Math.abs(r.calibration_error) <= TOL;
+          const fill = within ? "bg-calibrated/80" : "bg-drift/80";
+          return (
+            <div
+              key={r.confidence_bucket}
+              className="flex-1 flex flex-col items-center justify-end h-full gap-1.5"
+            >
+              <span className="font-mono text-[9px] text-fg-muted tabnum">
+                {r.n}
+              </span>
+              <div
+                className={`w-full ${fill} transition-colors`}
+                style={{ height: `${h}%` }}
+                aria-hidden="true"
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-end gap-2 mt-1.5">
+        {(["VH", "H", "M", "L"] as const).map((l) => (
+          <span
+            key={l}
+            className="flex-1 text-center font-mono text-[9px] uppercase tracking-[0.16em] text-fg-subtle"
+          >
+            {l}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function HeroDashboardPreview() {
   const series = mockTimeSeries();
   const last30 = series.slice(-30);
@@ -52,7 +118,7 @@ export function HeroDashboardPreview() {
 
   return (
     <div
-      className="relative rounded-sm border border-border bg-bg-raised shadow-[0_24px_64px_-32px_rgba(0,0,0,0.6)] overflow-hidden"
+      className="relative rounded-sm border border-border bg-bg-raised overflow-hidden hero-artifact"
       aria-hidden="true"
     >
       <div className="absolute inset-0 panel-grid opacity-60 pointer-events-none" />
@@ -77,17 +143,22 @@ export function HeroDashboardPreview() {
         <div className="px-4 pt-4 pb-1">
           <div className="flex items-baseline justify-between mb-2 px-1">
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-muted">
-              Touch-watch calibration error · 30d
+              Calibration error · 30d
             </p>
             <p className="font-mono text-xs text-fg tabnum">
               mean {(meanAbsErr * 100).toFixed(1)}%
             </p>
           </div>
-          <CalibrationSparkline data={last30} height={120} showAxes={false} />
+          <CalibrationSparkline data={last30} height={100} showAxes={false} />
+        </div>
+
+        {/* Bucket distribution strip - the precision signal */}
+        <div className="border-t border-border">
+          <BucketStrip />
         </div>
 
         {/* Status rows */}
-        <div className="px-5 pt-2 pb-4">
+        <div className="px-5 pt-2 pb-4 border-t border-border">
           <Row label="Touch-watch head" value="On target" tone="calibrated" />
           <Row label="Avoidance head" value="Within tolerance" tone="calibrated" />
           <Row label="Options-strike head" value="Drift flagged · +11%" tone="drift" />
@@ -98,7 +169,7 @@ export function HeroDashboardPreview() {
           <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-subtle">
             247 predictions audited overnight
           </span>
-          <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-accent">
+          <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-warm-glow">
             Next · 08:30 IST
           </span>
         </div>

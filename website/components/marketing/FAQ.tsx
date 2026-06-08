@@ -60,7 +60,7 @@ const faqs = [
 export function FAQ() {
   return (
     <section className="border-t border-border">
-      <div className="max-w-dash mx-auto px-6 py-20 grid gap-12 md:grid-cols-[1fr_2fr]">
+      <div className="max-w-dash mx-auto px-6 py-24 md:py-28 grid gap-12 md:grid-cols-[1fr_2fr]">
         <Reveal>
           <div className="md:sticky md:top-28">
             <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
