@@ -95,8 +95,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--strikes-around-atm", type=int, default=3,
                    help="Strikes per side per expiry (ATM±N).")
     p.add_argument("--sides", default="buy",
-                   help="Comma-separated sides to train: buy / sell / both. "
-                        "Both fits 2x heads; buy alone for v1 quick path.")
+                   help="Comma-separated trade directions to train: "
+                        "buy / sell / both. Buy alone for v1 quick path.")
+    p.add_argument("--option-type", default="CE", choices=("CE", "PE"),
+                   help="Option contract type to train on (CE = calls, "
+                        "PE = puts). v1 narrow scope = one model per type; "
+                        "run twice if you want both.")
     p.add_argument("--min-trades", type=int, default=200)
     p.add_argument("--val-frac", type=float, default=0.25)
     p.add_argument("--embargo-bars", type=int, default=13,
@@ -149,9 +153,11 @@ def load_spot_bars(reader: WarehouseReader, underlying: str,
 
 
 def load_greeks(reader: WarehouseReader, option_index: str,
-                start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Load EOD Greeks for the window. Returns columns the featurizer
-    expects (renaming implied_volatility → iv, etc.)."""
+                start: pd.Timestamp, end: pd.Timestamp,
+                option_type: str = "CE") -> pd.DataFrame:
+    """Load EOD Greeks for the window, filtered to a single option type
+    (CE or PE). Returns columns the featurizer expects (renaming
+    implied_volatility → iv, etc.)."""
     df, rep = reader.load_model_options_with_greeks(option_index,
                                                       drop_missing_iv=True)
     if df is None or df.empty:
@@ -160,34 +166,36 @@ def load_greeks(reader: WarehouseReader, option_index: str,
             f"report={rep}")
     df = df.copy()
     df["trading_date"] = _to_naive(df["trading_date"]).dt.normalize()
+    if "expiry_date" in df.columns:
+        df["expiry_date"] = _to_naive(df["expiry_date"]).dt.normalize()
     mask = (df["trading_date"] >= start.normalize()) & (
         df["trading_date"] <= end.normalize())
     df = df[mask].copy()
+    # Filter to one option type. The bhavcopy `side` column carries
+    # CE/PE (contract type), and the BS-inversion `flag` column carries
+    # c/p — try both so we work regardless of which is populated.
+    n_before = len(df)
+    want = option_type.upper()
+    if "side" in df.columns:
+        side_norm = df["side"].astype(str).str.upper()
+        df = df[side_norm == want].copy()
+    elif "flag" in df.columns:
+        flag_norm = df["flag"].astype(str).str.lower()
+        df = df[flag_norm == ("c" if want == "CE" else "p")].copy()
+    if df.empty:
+        raise RuntimeError(
+            f"no {want} Greeks rows after filter (had {n_before} mixed "
+            "rows); check the warehouse `side`/`flag` column values")
     # Rename to featurizer schema.
     df = df.rename(columns={
         "implied_volatility": "iv",
         "option_price_for_iv": "premium_close",
         "symbol": "underlying",
     })
-    # Some Greeks frames carry both CALL and PUT rows per (date, strike).
-    # The featurizer asks for one Greeks row per (underlying × strike ×
-    # date). We aggregate by averaging the call/put Greeks (delta sign
-    # cancels for puts so we use the absolute value to keep magnitude
-    # interpretable for the model; the executor sign-flips per side).
-    if "side" in df.columns:
-        df["delta"] = df["delta"].abs()
-        df = (df.groupby(["underlying", "strike", "trading_date"],
-                          as_index=False)
-                .agg({
-                    "delta": "mean", "gamma": "mean",
-                    "theta": "mean", "vega": "mean",
-                    "iv": "mean", "premium_close": "mean",
-                    "days_to_expiry": "min",
-                    "spot_close": "first",
-                }))
     # Featurizer also wants pcr_oi optionally; we don't have it daily here.
     df["pcr_oi"] = np.nan
-    LOGGER.info("loaded Greeks: %s rows in window", f"{len(df):,}")
+    LOGGER.info("loaded Greeks: %s rows (%s filter, was %s)",
+                f"{len(df):,}", want, f"{n_before:,}")
     return df
 
 
@@ -232,19 +240,21 @@ def load_macro(reader: WarehouseReader,
 def discover_expiries(greeks: pd.DataFrame, max_expiries: int) -> List[str]:
     """Return distinct expiry dates from the Greeks frame, ascending.
 
-    The warehouse Greeks frame doesn't carry an explicit expiry column,
-    only days_to_expiry. We approximate: each (trading_date,
-    days_to_expiry) → expiry_date = trading_date + days_to_expiry. The
-    distinct set of expiry_dates lands here.
+    Prefers the explicit `expiry_date` column (from the bhavcopy schema);
+    falls back to deriving from days_to_expiry if absent.
     """
-    if "days_to_expiry" not in greeks.columns:
-        raise RuntimeError("Greeks frame lacks days_to_expiry column")
-    expiry_dates = (
-        pd.to_datetime(greeks["trading_date"])
-        + pd.to_timedelta(greeks["days_to_expiry"], unit="D")
-    ).dt.normalize().unique()
+    if "expiry_date" in greeks.columns:
+        expiry_dates = pd.to_datetime(greeks["expiry_date"]).dt.normalize()
+    elif "days_to_expiry" in greeks.columns:
+        expiry_dates = (
+            pd.to_datetime(greeks["trading_date"])
+            + pd.to_timedelta(greeks["days_to_expiry"], unit="D")
+        ).dt.normalize()
+    else:
+        raise RuntimeError(
+            "Greeks frame lacks both expiry_date and days_to_expiry")
     expiry_strs = sorted(
-        pd.to_datetime(expiry_dates).strftime("%Y-%m-%d").tolist())
+        pd.to_datetime(expiry_dates.unique()).strftime("%Y-%m-%d").tolist())
     if max_expiries and len(expiry_strs) > max_expiries:
         LOGGER.info("capping to %d of %d expiries (smoke test mode)",
                     max_expiries, len(expiry_strs))
@@ -257,11 +267,16 @@ def select_strikes_per_expiry(greeks: pd.DataFrame, expiry: str,
     """For an expiry, pick ATM ± N strikes from the earliest day
     available in the Greeks frame for that expiry."""
     e_norm = pd.to_datetime(expiry).normalize()
-    sub = greeks[
-        (pd.to_datetime(greeks["trading_date"])
-         + pd.to_timedelta(greeks["days_to_expiry"], unit="D")
-        ).dt.normalize() == e_norm
-    ].copy()
+    if "expiry_date" in greeks.columns:
+        sub = greeks[
+            pd.to_datetime(greeks["expiry_date"]).dt.normalize() == e_norm
+        ].copy()
+    else:
+        sub = greeks[
+            (pd.to_datetime(greeks["trading_date"])
+             + pd.to_timedelta(greeks["days_to_expiry"], unit="D")
+            ).dt.normalize() == e_norm
+        ].copy()
     if sub.empty:
         return []
     earliest_day = sub["trading_date"].min()
@@ -283,34 +298,34 @@ def select_strikes_per_expiry(greeks: pd.DataFrame, expiry: str,
 
 def load_option_intraday_bars(reader: WarehouseReader, option_index: str,
                                 expiry: str, strikes: List[float],
-                                sides: List[str]) -> pd.DataFrame:
-    """Load intraday option bars for the given (expiry × strike × side)
-    grid. Returns a frame with columns expected by add_options_labels:
-    timestamp, underlying, strike, premium_close, premium_volume."""
+                                option_type: str = "CE") -> pd.DataFrame:
+    """Load intraday option bars for the given (expiry × strike) grid
+    at a single contract type (CE or PE). Returns a frame with columns
+    expected by add_options_labels: timestamp, underlying, strike,
+    premium_close, premium_volume."""
     pieces: List[pd.DataFrame] = []
     for strike in strikes:
-        for side in sides:
-            try:
-                df, _ = reader.load_option_active(
-                    option_index, expiry, int(strike), side,
-                    normalize_utc=False,
-                )
-            except Exception as exc:                              # noqa: BLE001
-                LOGGER.debug("skipping %s %s %s %s (%s)",
-                             option_index, expiry, strike, side, exc)
-                continue
-            if df is None or df.empty:
-                continue
-            df = df.copy()
-            df["timestamp"] = _to_naive(df["timestamp"])
-            df["underlying"] = option_index
-            df["strike"] = float(strike)
-            df["premium_close"] = df["close"]
-            df["premium_volume"] = df["volume"]
-            pieces.append(df[[
-                "timestamp", "underlying", "strike",
-                "premium_close", "premium_volume",
-            ]])
+        try:
+            df, _ = reader.load_option_active(
+                option_index, expiry, int(strike), option_type,
+                normalize_utc=False,
+            )
+        except Exception as exc:                                  # noqa: BLE001
+            LOGGER.debug("skipping %s %s %s %s (%s)",
+                         option_index, expiry, strike, option_type, exc)
+            continue
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df["timestamp"] = _to_naive(df["timestamp"])
+        df["underlying"] = option_index
+        df["strike"] = float(strike)
+        df["premium_close"] = df["close"]
+        df["premium_volume"] = df["volume"]
+        pieces.append(df[[
+            "timestamp", "underlying", "strike",
+            "premium_close", "premium_volume",
+        ]])
     if not pieces:
         return pd.DataFrame(columns=[
             "timestamp", "underlying", "strike",
@@ -330,6 +345,7 @@ def _process_one_expiry(
     greeks: pd.DataFrame,
     macro_daily: Optional[pd.DataFrame],
     option_index: str,
+    option_type: str,
     sides: List[str],
     strikes_around_atm: int,
     feat_params: OptionsFeaturizerParams,
@@ -358,7 +374,7 @@ def _process_one_expiry(
     if features.empty:
         return None, "empty features", time.perf_counter() - t0
     option_bars = load_option_intraday_bars(
-        reader, option_index, expiry, strikes, sides)
+        reader, option_index, expiry, strikes, option_type)
     if option_bars.empty:
         return None, "no option bars", time.perf_counter() - t0
     labelled = add_options_labels(
@@ -536,8 +552,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 1. Spot bars
     spot = load_spot_bars(reader, args.underlying, start, end)
 
-    # 2. Greeks
-    greeks = load_greeks(reader, args.option_index, start, end)
+    # 2. Greeks (filtered to one option type — CE or PE)
+    greeks = load_greeks(reader, args.option_index, start, end,
+                          option_type=args.option_type)
 
     # 3. Macro (daily, lagged)
     macro_daily = load_macro(reader, start, end)
@@ -573,7 +590,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _process_one_expiry,
                 expiry=e, reader=reader, spot=spot, greeks=greeks,
                 macro_daily=macro_daily,
-                option_index=args.option_index, sides=sides,
+                option_index=args.option_index,
+                option_type=args.option_type, sides=sides,
                 strikes_around_atm=args.strikes_around_atm,
                 feat_params=feat_params, label_params=label_params,
             ): e for e in expiries
