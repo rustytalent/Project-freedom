@@ -53,6 +53,19 @@ from .executor import (
     agreeing_layer_count,
     causal_warnings,
 )
+from .audit import (
+    OPTIONS_EXECUTOR_PREDICTION_TYPE,
+    OPTIONS_SKIP_PREDICTION_TYPE,
+    ExecutorAuditReport,
+    SkipCounterfactual,
+    TableARow,
+    TableB,
+    TableBLcsBucketRow,
+    audit_to_yesterday_audit_payload,
+    compute_executor_audit,
+    options_executor_meta,
+    options_skip_meta,
+)
 
 __all__ = [
     # Featurizer
@@ -95,4 +108,16 @@ __all__ = [
     "in_trade_decision",
     "agreeing_layer_count",
     "causal_warnings",
+    # Audit
+    "OPTIONS_EXECUTOR_PREDICTION_TYPE",
+    "OPTIONS_SKIP_PREDICTION_TYPE",
+    "ExecutorAuditReport",
+    "SkipCounterfactual",
+    "TableARow",
+    "TableB",
+    "TableBLcsBucketRow",
+    "audit_to_yesterday_audit_payload",
+    "compute_executor_audit",
+    "options_executor_meta",
+    "options_skip_meta",
 ]
