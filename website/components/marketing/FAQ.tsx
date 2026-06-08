@@ -1,3 +1,5 @@
+import { Reveal } from "@/components/ui/Reveal";
+
 const faqs = [
   {
     q: "Is this a tip service or a signal service?",
@@ -59,41 +61,45 @@ export function FAQ() {
   return (
     <section className="border-t border-border">
       <div className="max-w-dash mx-auto px-6 py-20 grid gap-12 md:grid-cols-[1fr_2fr]">
-        <div>
-          <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
-            Common questions
-          </p>
-          <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg">
-            Direct answers to the questions we get most.
-          </h2>
-          <p className="mt-5 text-sm text-fg-muted leading-relaxed max-w-sm">
-            If your question isn&rsquo;t here, the contact page reaches
-            the founder directly.
-          </p>
-        </div>
-        <dl className="divide-y divide-border border-t border-border">
-          {faqs.map((f) => (
-            <details
-              key={f.q}
-              className="group py-5 [&_summary]:list-none"
-            >
-              <summary className="flex cursor-pointer items-start justify-between gap-6">
-                <span className="font-serif text-lg text-fg leading-snug">
-                  {f.q}
-                </span>
-                <span
-                  aria-hidden="true"
-                  className="mt-1 inline-block font-mono text-xs text-fg-subtle transition-transform group-open:rotate-45"
-                >
-                  +
-                </span>
-              </summary>
-              <p className="mt-4 text-sm text-fg-muted leading-relaxed max-w-2xl">
-                {f.a}
-              </p>
-            </details>
-          ))}
-        </dl>
+        <Reveal>
+          <div className="md:sticky md:top-28">
+            <p className="text-xs uppercase tracking-[0.18em] text-accent mb-4">
+              Common questions
+            </p>
+            <h2 className="font-serif text-3xl md:text-4xl leading-tight text-fg">
+              Direct answers to the questions we get most.
+            </h2>
+            <p className="mt-5 text-sm text-fg-muted leading-relaxed max-w-sm">
+              If your question isn&rsquo;t here, the contact page reaches
+              the founder directly.
+            </p>
+          </div>
+        </Reveal>
+        <Reveal delay={120}>
+          <dl className="divide-y divide-border border-t border-border">
+            {faqs.map((f) => (
+              <details
+                key={f.q}
+                className="group py-5 [&_summary]:list-none"
+              >
+                <summary className="flex cursor-pointer items-start justify-between gap-6">
+                  <span className="font-serif text-lg text-fg leading-snug">
+                    {f.q}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="mt-1 inline-block font-mono text-xs text-fg-subtle transition-transform group-open:rotate-45"
+                  >
+                    +
+                  </span>
+                </summary>
+                <p className="mt-4 text-sm text-fg-muted leading-relaxed max-w-2xl">
+                  {f.a}
+                </p>
+              </details>
+            ))}
+          </dl>
+        </Reveal>
       </div>
     </section>
   );

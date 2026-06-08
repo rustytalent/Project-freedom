@@ -11,6 +11,11 @@
     color: #e8e6e1;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
   }
   body {
     font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -21,6 +26,11 @@
     font-family: Fraunces, ui-serif, Georgia, serif;
     font-weight: 500;
     letter-spacing: -0.01em;
+  }
+  /* Editorial selection: muted steel wash, never the OS-default blue. */
+  ::selection {
+    background-color: rgba(124, 155, 184, 0.32);
+    color: #e8e6e1;
   }
   /* Loud focus rings, but on our muted accent rather than browser blue. */
   *:focus-visible {
@@ -37,6 +47,14 @@
       linear-gradient(rgba(124, 155, 184, 0.04) 1px, transparent 1px),
       linear-gradient(90deg, rgba(124, 155, 184, 0.04) 1px, transparent 1px);
     background-size: 48px 48px;
+  }
+  /* Denser grid used inside the hero dashboard preview to mimic the
+     gridded surface of a real data terminal. */
+  .panel-grid {
+    background-image:
+      linear-gradient(rgba(124, 155, 184, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(124, 155, 184, 0.05) 1px, transparent 1px);
+    background-size: 14px 14px;
   }
   /* Soft accent glow that washes the hero - calm, not flashy. */
   .hero-glow {
@@ -101,10 +119,94 @@
       transform: translateY(0);
     }
   }
+  /* Continuous left-scrolling ticker tape, used in the top status bar.
+     The track must be duplicated and 200% wide so the -50% translate
+     produces a seamless loop. Hover pauses, focus inside also pauses. */
+  .ticker-track {
+    animation: ticker-scroll 60s linear infinite;
+    width: max-content;
+  }
+  .ticker-host:hover .ticker-track,
+  .ticker-host:focus-within .ticker-track {
+    animation-play-state: paused;
+  }
+  @keyframes ticker-scroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+  /* Soft top-and-bottom fade mask for the ticker so the row reads as
+     a strip rather than a hard rectangle. */
+  .ticker-fade-mask {
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 4rem,
+      black calc(100% - 4rem),
+      transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 4rem,
+      black calc(100% - 4rem),
+      transparent 100%
+    );
+  }
+  /* Reveal-on-scroll primitive's resting state. The Reveal client
+     component flips data-revealed=true once the section enters the
+     viewport; we transition opacity and a small Y nudge. */
+  .reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 700ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 700ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: opacity, transform;
+  }
+  .reveal[data-revealed="true"] {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  /* Crosshair brand mark used next to the wordmark - a calibration
+     reticle that ties into the "calibrated context" identity. */
+  .reticle {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 1px solid currentColor;
+    border-radius: 9999px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .reticle::before, .reticle::after {
+    content: "";
+    position: absolute;
+    background: currentColor;
+  }
+  .reticle::before {
+    left: 50%;
+    top: -3px;
+    bottom: -3px;
+    width: 1px;
+    transform: translateX(-50%);
+  }
+  .reticle::after {
+    top: 50%;
+    left: -3px;
+    right: -3px;
+    height: 1px;
+    transform: translateY(-50%);
+  }
   @media (prefers-reduced-motion: reduce) {
     .live-dot::before,
-    .fade-in-up {
+    .fade-in-up,
+    .ticker-track {
       animation: none;
+    }
+    .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
     }
   }
 }

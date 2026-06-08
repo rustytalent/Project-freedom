@@ -22,10 +22,14 @@ export function Nav() {
       <div className="max-w-dash mx-auto px-6 py-4 flex items-center gap-8">
         <Link
           href="/"
-          className="font-serif text-lg tracking-tight text-fg hover:text-accent-glow transition-colors"
+          className="group flex items-center gap-2.5 text-fg hover:text-accent-glow transition-colors"
           onClick={() => setOpen(false)}
+          aria-label={`${brand.name} home`}
         >
-          {brand.name}
+          <span className="reticle text-accent group-hover:text-accent-glow transition-colors" aria-hidden="true" />
+          <span className="font-serif text-lg tracking-tight leading-none">
+            {brand.name}
+          </span>
         </Link>
         <ul className="hidden md:flex items-center gap-6 text-sm text-fg-muted">
           {links.map((l) => (
