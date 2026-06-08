@@ -585,6 +585,72 @@ def _confidence_notes_block(report) -> ConfidenceNotes:
 # Top-level generator
 # ---------------------------------------------------------------------------
 
+def _augment_strikes_with_predicted_r(
+    *,
+    idx_name: str,
+    strike_levels: List[Any],
+    options_er_suite: Optional[Any],
+    options_feature_rows: Optional[Dict[Any, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Build the ``strike_levels_in_play`` list and, when an
+    ``OptionsExpectedReturnModelSuite`` + per-strike feature rows are
+    provided, augment each entry with ``predicted_net_return_buy_atr``
+    and ``predicted_net_return_sell_atr``.
+
+    When the suite or features are missing, the predictions are
+    ``None`` and the renderer falls back to the existing prose.
+    The function never raises — Daily Brief generation must survive
+    any model-side hiccup.
+    """
+    base_rows: List[Dict[str, Any]] = []
+    for s in strike_levels:
+        base_rows.append({
+            "strike": s.strike,
+            "p_test_today": s.p_test_today,
+            "p_test_within_60min": s.p_test_within_60min,
+            "side_from_open": s.side_from_open,
+            "key_level_type": s.key_level_type,
+            "underlying_level": s.underlying_level,
+            "predicted_net_return_buy_atr": None,
+            "predicted_net_return_sell_atr": None,
+            "executor_decision_buy": None,
+            "executor_decision_sell": None,
+        })
+    if options_er_suite is None or not options_feature_rows or not base_rows:
+        return base_rows
+
+    # Build a list of feature dicts for buy and sell sides per strike,
+    # passed to the suite's predict_strikes helper. Missing features
+    # are NaN — LightGBM handles missing natively. The suite returns
+    # `predicted_net_return_atr` per input dict.
+    try:
+        score_inputs: List[Dict[str, Any]] = []
+        for row in base_rows:
+            base_feats = options_feature_rows.get((idx_name, row["strike"]))
+            if base_feats is None:
+                base_feats = options_feature_rows.get(row["strike"]) or {}
+            for side in ("buy", "sell"):
+                merged = dict(base_feats)
+                merged["side"] = side
+                merged.setdefault("dte_trading_days",
+                                  base_feats.get("dte_trading_days"))
+                merged.setdefault("tod_bucket",
+                                  base_feats.get("tod_bucket", "open"))
+                score_inputs.append(merged)
+        scored = options_er_suite.predict_strikes(score_inputs)
+        # Each strike has TWO score_inputs (buy, sell) in order.
+        for i, row in enumerate(base_rows):
+            buy_r = scored[2 * i].get("predicted_net_return_atr")
+            sell_r = scored[2 * i + 1].get("predicted_net_return_atr")
+            row["predicted_net_return_buy_atr"] = buy_r
+            row["predicted_net_return_sell_atr"] = sell_r
+    except Exception:
+        # The brief must not fail on a model-side error. We simply
+        # leave the predicted_R fields as None and continue.
+        pass
+    return base_rows
+
+
 def _safe_attr(obj: Any, name: str, default: Any) -> Any:
     try:
         v = getattr(obj, name, default)
@@ -603,6 +669,9 @@ def generate_brief(report: Any,
                    retrospective: bool = False,
                    publish_to_website: bool = False,
                    website_tier: str = "paid_intraday",
+                   options_er_suite: Optional[Any] = None,
+                   options_feature_rows: Optional[
+                       Dict[Any, Dict[str, Any]]] = None,
                    ) -> BriefDocument:
     """Top-level: produce a BriefDocument from a fitted report bundle.
 
@@ -762,17 +831,12 @@ def generate_brief(report: Any,
             "movement_quality_prediction": idx_payload.get(
                 "movement_quality_prediction"),
             "theta_danger_score": theta_score,
-            "strike_levels_in_play": [
-                {
-                    "strike": s.strike,
-                    "p_test_today": s.p_test_today,
-                    "p_test_within_60min": s.p_test_within_60min,
-                    "side_from_open": s.side_from_open,
-                    "key_level_type": s.key_level_type,
-                    "underlying_level": s.underlying_level,
-                }
-                for s in strike_levels
-            ],
+            "strike_levels_in_play": _augment_strikes_with_predicted_r(
+                idx_name=idx_name,
+                strike_levels=strike_levels,
+                options_er_suite=options_er_suite,
+                options_feature_rows=options_feature_rows,
+            ),
             **regime_pair,
             "session_recommendation": "context_only_no_directional_call",
         }

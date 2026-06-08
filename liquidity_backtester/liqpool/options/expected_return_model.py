@@ -466,6 +466,56 @@ class OptionsExpectedReturnModelSuite:
                 slab.drop(columns="_bucket")).values
         return out
 
+    def predict_strikes(self, strike_inputs: List[Dict[str, Any]]
+                        ) -> List[Dict[str, Any]]:
+        """Brief-time scoring helper.
+
+        ``strike_inputs`` is a list of dicts. Each dict must carry the
+        routing columns (``side``, ``dte_trading_days``, ``tod_bucket``)
+        and may carry any subset of the model's feature columns. Missing
+        features are passed to LightGBM as NaN (LightGBM handles missing
+        natively).
+
+        Returns a list of the same shape with each dict augmented by:
+
+          predicted_net_return_atr      — the model's R prediction in
+                                          ATR units. NaN when the
+                                          routing bucket has no fit.
+          bucket_key                    — ``side/tenor/tod`` for audit.
+          predict_status                — "ok" | "no_head" | "out_of_scope"
+
+        The brief generator does NOT need to know the model's full
+        feature set; it passes what it has, and the model uses it. v1
+        production paths should aim for the full feature row to avoid
+        feature-imputation drift; the brief renderer should surface a
+        "thin features" hint when it detects many NaNs (deferred to
+        the renderer-side change in D.4).
+        """
+        if not strike_inputs:
+            return []
+        frame = pd.DataFrame(strike_inputs)
+        preds = self.predict_frame(frame)
+        out: List[Dict[str, Any]] = []
+        for i, row in enumerate(strike_inputs):
+            tenor = derive_tenor(row.get("dte_trading_days"))
+            side = row.get("side")
+            tod = row.get("tod_bucket")
+            if not tenor:
+                status, key = "out_of_scope", None
+            else:
+                key = BucketKey(side=side, tenor=tenor, tod=tod)
+                head = self.heads.get(key)
+                status = "ok" if head is not None and head._gbm is not None \
+                    else "no_head"
+            augmented = dict(row)
+            augmented["predicted_net_return_atr"] = (
+                float(preds.iloc[i]) if pd.notna(preds.iloc[i]) else None
+            )
+            augmented["bucket_key"] = key.as_label() if key else None
+            augmented["predict_status"] = status
+            out.append(augmented)
+        return out
+
     @staticmethod
     def _gate1_status(summary: SuiteSummary) -> Tuple[bool, List[str]]:
         """Gate 1: at least one head with

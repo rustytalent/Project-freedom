@@ -139,6 +139,119 @@ def _render_pending_stub(section_name: str, stub: dict) -> str:
     return f"{section_name.upper()} — pending: {reason}."
 
 
+def _render_options_suitability(payload: dict) -> str:
+    """Render the OPTIONS SUITABILITY section.
+
+    Falls back to a pending stub when:
+      * the payload itself is a `_status: "pending"` block (no indexes
+        covered), or
+      * every per-index block is a pending stub (no usable index data).
+
+    When populated, surfaces per-index theta context + per-strike rows
+    with predicted_net_return prose. Tipster guardrail (no "buy" /
+    "sell" verbs) still applies; we use the descriptive phrasing
+    "buying-side net expected return" / "selling-side net expected
+    return".
+    """
+    if not isinstance(payload, dict):
+        return _render_pending_stub("Options suitability",
+                                     {"_reason": "data unavailable"})
+    if payload.get("_status") == "pending":
+        return _render_pending_stub("Options suitability", payload)
+    # Collect the populated per-index blocks.
+    blocks: List[str] = []
+    pending_idxs: List[str] = []
+    for idx_name, idx_block in payload.items():
+        if not isinstance(idx_block, dict):
+            continue
+        if idx_block.get("_status") == "pending":
+            pending_idxs.append(f"{idx_name} ({idx_block.get('_reason')})")
+            continue
+        blocks.append(_render_options_one_index(idx_name, idx_block))
+    if not blocks:
+        return (
+            "OPTIONS SUITABILITY — pending: no per-index data populated"
+            + (f" ({'; '.join(pending_idxs)})" if pending_idxs else "")
+            + "."
+        )
+    header = "OPTIONS SUITABILITY —"
+    if pending_idxs:
+        header += (
+            f" partial coverage; pending for: {', '.join(pending_idxs)}.\n"
+        )
+    return header + "\n" + "\n\n".join(blocks)
+
+
+def _render_options_one_index(idx_name: str, idx_block: dict) -> str:
+    """Render one index's options block.
+
+    Tipster guardrail compliance: we describe net expected return in
+    ATR units for both the buying-side thesis and the selling-side
+    thesis. We never instruct the reader to "buy" or "sell".
+    """
+    lines: List[str] = []
+    bias = idx_block.get("directional_bias", "neutral")
+    expected_range = idx_block.get("expected_range_today_atr")
+    theta_score = idx_block.get("theta_danger_score")
+    buyers_regime = idx_block.get("regime_for_premium_buyers", "unknown")
+    sellers_regime = idx_block.get("regime_for_premium_sellers", "unknown")
+
+    intro = f"  {idx_name}: directional bias = {bias}"
+    if expected_range is not None:
+        intro += f"; expected session range ≈ {float(expected_range):.2f} ATR"
+    if theta_score is not None:
+        intro += f"; theta-danger {float(theta_score):.2f}"
+    intro += "."
+    lines.append(intro)
+    lines.append(
+        f"    Premium-buying regime: {buyers_regime}. "
+        f"Premium-selling regime: {sellers_regime}."
+    )
+    strikes = idx_block.get("strike_levels_in_play") or []
+    if not strikes:
+        lines.append("    No strikes flagged in-play for this index.")
+        return "\n".join(lines)
+    for s in strikes:
+        if not isinstance(s, dict):
+            continue
+        strike = s.get("strike")
+        p_today = s.get("p_test_today")
+        p_60 = s.get("p_test_within_60min")
+        level_type = s.get("key_level_type", "unknown")
+        line = (
+            f"    Strike {strike}: {level_type}, "
+            f"P(test today) = {float(p_today) * 100:.0f}%, "
+            f"P(within 60min) = {float(p_60) * 100:.0f}%."
+        )
+        lines.append(line)
+        buy_r = s.get("predicted_net_return_buy_atr")
+        sell_r = s.get("predicted_net_return_sell_atr")
+        if buy_r is not None or sell_r is not None:
+            r_parts: List[str] = []
+            if buy_r is not None:
+                r_parts.append(
+                    f"buying-side net expected return (60min) "
+                    f"= {float(buy_r):+.2f} ATR"
+                )
+            if sell_r is not None:
+                r_parts.append(
+                    f"selling-side net expected return (60min) "
+                    f"= {float(sell_r):+.2f} ATR"
+                )
+            if r_parts:
+                lines.append("      " + "; ".join(r_parts) + ".")
+        ex_buy = s.get("executor_decision_buy")
+        ex_sell = s.get("executor_decision_sell")
+        if ex_buy or ex_sell:
+            ex_parts: List[str] = []
+            if ex_buy:
+                ex_parts.append(f"buying-side executor: {ex_buy}")
+            if ex_sell:
+                ex_parts.append(f"selling-side executor: {ex_sell}")
+            lines.append("      " + "; ".join(ex_parts) + ".")
+    return "\n".join(lines)
+
+
 def _render_yesterday_audit(audit: dict) -> str:
     """Render the YESTERDAY AUDIT section.
 
@@ -209,7 +322,7 @@ def render_email(brief: BriefDocument) -> str:
 
     parts.append(_render_tldr(brief))
     parts.append(_render_pending_stub("Index regime", brief.index_regime))
-    parts.append(_render_pending_stub("Options suitability", brief.options_suitability))
+    parts.append(_render_options_suitability(brief.options_suitability))
     parts.append(_render_sector_regime(brief.sector_regime))
     parts.append(_render_watchlist(brief.top_watchlist))
     parts.append(_render_avoid_list(brief.avoid_list))
