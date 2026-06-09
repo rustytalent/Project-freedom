@@ -22,10 +22,12 @@ function Row({
   label,
   value,
   tone,
+  delayMs,
 }: {
   label: string;
   value: string;
   tone: "calibrated" | "drift" | "neutral";
+  delayMs: number;
 }) {
   const dot =
     tone === "calibrated"
@@ -36,7 +38,10 @@ function Row({
   const valColor =
     tone === "drift" ? "text-drift" : tone === "calibrated" ? "text-calibrated" : "text-fg";
   return (
-    <div className="flex items-center justify-between gap-4 py-2.5 border-t border-border first:border-t-0">
+    <div
+      className="row-fade-in flex items-center justify-between gap-4 py-2.5 border-t border-border first:border-t-0"
+      style={{ ["--row-delay" as string]: `${delayMs}ms` }}
+    >
       <div className="flex items-center gap-2.5 min-w-0">
         <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot} shrink-0`} />
         <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-fg-muted truncate">
@@ -74,7 +79,7 @@ function BucketStrip() {
         </p>
       </div>
       <div className="flex items-end gap-2 h-12">
-        {rows.map((r) => {
+        {rows.map((r, i) => {
           const h = Math.max(12, Math.round((r.n / maxN) * 100));
           const within = Math.abs(r.calibration_error) <= TOL;
           const fill = within ? "bg-calibrated/80" : "bg-drift/80";
@@ -87,8 +92,11 @@ function BucketStrip() {
                 {r.n}
               </span>
               <div
-                className={`w-full ${fill} transition-colors`}
-                style={{ height: `${h}%` }}
+                className={`w-full ${fill} bar-rise transition-colors`}
+                style={{
+                  height: `${h}%`,
+                  ["--bar-delay" as string]: `${600 + i * 60}ms`,
+                }}
                 aria-hidden="true"
               />
             </div>
@@ -118,7 +126,7 @@ export function HeroDashboardPreview() {
 
   return (
     <div
-      className="relative rounded-sm border border-border bg-bg-raised overflow-hidden hero-artifact"
+      className="materialize-in relative rounded-sm border border-border bg-bg-raised overflow-hidden hero-artifact"
       aria-hidden="true"
     >
       <div className="absolute inset-0 panel-grid opacity-60 pointer-events-none" />
@@ -149,7 +157,14 @@ export function HeroDashboardPreview() {
               mean {(meanAbsErr * 100).toFixed(1)}%
             </p>
           </div>
-          <CalibrationSparkline data={last30} height={100} showAxes={false} />
+          <CalibrationSparkline
+            data={last30}
+            height={100}
+            showAxes={false}
+            animate
+            animationBeginMs={500}
+            animationDurationMs={900}
+          />
         </div>
 
         {/* Bucket distribution strip - the precision signal */}
@@ -159,9 +174,9 @@ export function HeroDashboardPreview() {
 
         {/* Status rows */}
         <div className="px-5 pt-2 pb-4 border-t border-border">
-          <Row label="Touch-watch head" value="On target" tone="calibrated" />
-          <Row label="Avoidance head" value="Within tolerance" tone="calibrated" />
-          <Row label="Options-strike head" value="Drift flagged · +11%" tone="drift" />
+          <Row label="Touch-watch head" value="On target" tone="calibrated" delayMs={1000} />
+          <Row label="Avoidance head" value="Within tolerance" tone="calibrated" delayMs={1080} />
+          <Row label="Options-strike head" value="Drift flagged · +11%" tone="drift" delayMs={1160} />
         </div>
 
         {/* Footer strip */}

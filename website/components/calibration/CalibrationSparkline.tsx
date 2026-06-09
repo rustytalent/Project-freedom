@@ -20,10 +20,19 @@ export function CalibrationSparkline({
   data,
   height = 220,
   showAxes = true,
+  animate = false,
+  animationBeginMs = 0,
+  animationDurationMs = 900,
 }: {
   data: SparklinePoint[];
   height?: number;
   showAxes?: boolean;
+  /** When true, the line draws in on mount via Recharts animation. */
+  animate?: boolean;
+  /** Delay before the draw begins (used for hero choreography). */
+  animationBeginMs?: number;
+  /** Total draw duration. */
+  animationDurationMs?: number;
 }) {
   return (
     <div className="w-full" style={{ height }}>
@@ -79,7 +88,10 @@ export function CalibrationSparkline({
             strokeWidth={1.5}
             dot={false}
             activeDot={{ r: 3, fill: "#9FB6CB" }}
-            isAnimationActive={false}
+            isAnimationActive={animate}
+            animationBegin={animationBeginMs}
+            animationDuration={animationDurationMs}
+            animationEasing="ease-out"
           />
         </LineChart>
       </ResponsiveContainer>

@@ -139,6 +139,53 @@
       transform: translateY(0);
     }
   }
+  /* Hero artifact materializes in - subtle scale + fade. Used once,
+     on first paint, on the dashboard preview wrapper. The "Apple
+     unbox" cue: the object settles into place rather than appears. */
+  .materialize-in {
+    animation: materialize-in 700ms cubic-bezier(0.16, 1, 0.3, 1) 200ms both;
+  }
+  @keyframes materialize-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97) translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+  /* Bucket bar rises from height 0 inside the hero artifact. The
+     caller supplies an --animation-delay inline so the four bars
+     rise in sequence (60ms apart). */
+  .bar-rise {
+    transform-origin: bottom;
+    animation: bar-rise 600ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: var(--bar-delay, 0ms);
+  }
+  @keyframes bar-rise {
+    from { transform: scaleY(0); opacity: 0; }
+    to   { transform: scaleY(1); opacity: 1; }
+  }
+  /* Status row fades in with a small translateX inside the hero
+     artifact. Per-row delay supplied inline. Pairs with the bar
+     rise to give the panel a left-to-right, bottom-up settling
+     pattern - reads as a system coming online. */
+  .row-fade-in {
+    animation: row-fade-in 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: var(--row-delay, 0ms);
+    opacity: 0;
+  }
+  @keyframes row-fade-in {
+    from {
+      opacity: 0;
+      transform: translateX(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
   /* Continuous left-scrolling ticker tape, used in the top status bar.
      The track must be duplicated and 200% wide so the -50% translate
      produces a seamless loop. Hover pauses, focus inside also pauses. */
@@ -220,8 +267,20 @@
   @media (prefers-reduced-motion: reduce) {
     .live-dot::before,
     .fade-in-up,
-    .ticker-track {
+    .ticker-track,
+    .materialize-in,
+    .bar-rise,
+    .row-fade-in {
       animation: none;
+    }
+    .materialize-in,
+    .row-fade-in {
+      opacity: 1;
+      transform: none;
+    }
+    .bar-rise {
+      transform: none;
+      opacity: 1;
     }
     .reveal {
       opacity: 1;
