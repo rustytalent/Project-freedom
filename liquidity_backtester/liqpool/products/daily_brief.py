@@ -42,6 +42,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .shadow_log import (
+    EVENT_KIND_AVOIDANCE_FLAG,
+    ShadowLogger,
+)
 from .outcome_log import (
     OutcomeLogWriter,
     PredictionRecord,
@@ -727,6 +731,7 @@ def generate_brief(report: Any,
                    model_bundle_version: str = "unknown_bundle",
                    feature_version: str = "42_features_v3",
                    outcome_log_writer: Optional[OutcomeLogWriter] = None,
+                   shadow_log_writer: Optional[ShadowLogger] = None,
                    index_data: Optional[Dict[str, Dict[str, Any]]] = None,
                    retrospective: bool = False,
                    publish_to_website: bool = False,
@@ -833,6 +838,30 @@ def generate_brief(report: Any,
     watchlist = _watchlist_block(predictions, sector_regime)
     key_zones = _key_zones_block(predictions)
     avoid_list = _avoid_list_block(report, predictions, sector_regime, watchlist)
+
+    # Stream L hook: every avoidance flag is a paired training row —
+    # the basket might actually have had a winner tomorrow. The
+    # nightly counterfactual replay resolves this against next-session
+    # data. Defensive: shadow logging never blocks brief generation.
+    if shadow_log_writer is not None:
+        for av in avoid_list:
+            try:
+                shadow_log_writer.record(
+                    event_kind=EVENT_KIND_AVOIDANCE_FLAG,
+                    trading_date_ist=trading_date_ist,
+                    symbol=av.symbol,
+                    detail_token=av.reason,
+                    decision_context={
+                        "reason": av.reason,
+                        "model_confidence": av.model_confidence,
+                        "regime_tags": list(av.regime_tags),
+                    },
+                    regime_tags=list(av.regime_tags),
+                )
+            except Exception:
+                # Brief generation MUST NOT fail because of shadow logging.
+                # Operator catches missed events via shadow-log audit cron.
+                pass
 
     try:
         confidence_notes = _confidence_notes_block(report)
