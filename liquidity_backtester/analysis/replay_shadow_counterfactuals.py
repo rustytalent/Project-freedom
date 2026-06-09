@@ -38,6 +38,11 @@ import pandas as pd
 
 from liqpool.products.shadow_log import (
     EVENT_KIND_AVOIDANCE_FLAG,
+    EVENT_KIND_BELOW_TARGET_TO_COST,
+    EVENT_KIND_DRIFT_FLAG_FIRED,
+    EVENT_KIND_MACRO_GATE_CLOSED,
+    EVENT_KIND_Q_BELOW_THRESHOLD,
+    EVENT_KIND_SKIP_OPTIONS,
     ShadowLogger,
     read_shadow_events,
 )
@@ -121,9 +126,120 @@ def _resolve_avoidance(
     }
 
 
+def _resolve_below_threshold_long_signal(
+    bundle_root: Path,
+    event: pd.Series,
+) -> Optional[Dict[str, Any]]:
+    """For Q-below-threshold / below-target-to-cost rejections that
+    look like a "would have been a long if not for the gate" — did
+    the next session actually reach the predicted level?
+
+    Uses the decision_context.key_level (for Q-below-threshold) or
+    derived target from entry+target_atr (for below-target-to-cost).
+    """
+    symbol = event.get("symbol")
+    if symbol is None or pd.isna(symbol):
+        return None
+    after_date = event["trading_date_ist"]
+    try:
+        ctx = json.loads(event["decision_context"])
+    except Exception:
+        return None
+    bars = _next_session_bars(bundle_root, str(symbol), after_date)
+    if bars is None or bars.empty:
+        return None
+    # Find the implied target. Two payload shapes both supported:
+    target = ctx.get("key_level")
+    side = ctx.get("side_trade") or ctx.get("side")
+    if target is None and "entry_price" in ctx and "target_atr" in ctx:
+        entry = float(ctx["entry_price"])
+        target_atr = float(ctx["target_atr"])
+        atr_at_entry = float(ctx.get("atr_at_entry", 0.0))
+        if atr_at_entry > 0:
+            if side == "long":
+                target = entry + target_atr * atr_at_entry
+            else:
+                target = entry - target_atr * atr_at_entry
+    if target is None or side is None:
+        return None
+    try:
+        target = float(target)
+    except (TypeError, ValueError):
+        return None
+    high_px = float(bars["high"].max())
+    low_px = float(bars["low"].min())
+    if side == "long":
+        touched = high_px >= target
+    else:
+        touched = low_px <= target
+    verdict = (
+        "rejection_regret" if touched else "rejection_vindicated"
+    )
+    return {
+        "next_session_date_ist": str(bars.index[0].date()),
+        "target_level": target,
+        "next_session_high": high_px,
+        "next_session_low": low_px,
+        "side": side,
+        "target_touched": bool(touched),
+        "verdict": verdict,
+    }
+
+
+def _resolve_macro_gate_closed(
+    bundle_root: Path,
+    event: pd.Series,
+) -> Optional[Dict[str, Any]]:
+    """For macro-gate-closed days: did the broader market actually
+    move next session? Without an explicit underlying we can't grade
+    the SKIP precisely, but we can record next-session range info to
+    let the future drift-imminent / macro-gate-cost model see whether
+    the gate's caution was justified."""
+    symbol = event.get("symbol")
+    if symbol is None or pd.isna(symbol):
+        return None
+    after_date = event["trading_date_ist"]
+    bars = _next_session_bars(bundle_root, str(symbol), after_date)
+    if bars is None or bars.empty:
+        return None
+    open_px = float(bars["open"].iloc[0])
+    if open_px <= 0:
+        return None
+    high_px = float(bars["high"].max())
+    low_px = float(bars["low"].min())
+    close_px = float(bars["close"].iloc[-1])
+    realised_range_atr = (high_px - low_px) / open_px
+    return {
+        "next_session_date_ist": str(bars.index[0].date()),
+        "realised_range_open_norm": realised_range_atr,
+        "realised_close_over_open": (close_px - open_px) / open_px,
+    }
+
+
+def _resolve_drift_alert(
+    bundle_root: Path,
+    event: pd.Series,
+) -> Optional[Dict[str, Any]]:
+    """Drift events resolve over a longer window than next-session;
+    the recovery / non-recovery pattern is what the M.6 drift-imminent
+    model needs. For now we just record that the event happened on
+    `trading_date_ist`; a downstream batch can pair it with later
+    drift checks. Returns a stub outcome marking it as "deferred"
+    so it's countable but not yet truly resolved."""
+    return {
+        "resolution_kind": "deferred",
+        "note": "drift events resolve over multi-session recovery windows",
+    }
+
+
 # Map event_kind to its resolver. Adding a new kind = adding a new entry.
 RESOLVERS = {
     EVENT_KIND_AVOIDANCE_FLAG: _resolve_avoidance,
+    EVENT_KIND_Q_BELOW_THRESHOLD: _resolve_below_threshold_long_signal,
+    EVENT_KIND_BELOW_TARGET_TO_COST: _resolve_below_threshold_long_signal,
+    EVENT_KIND_MACRO_GATE_CLOSED: _resolve_macro_gate_closed,
+    EVENT_KIND_SKIP_OPTIONS: _resolve_macro_gate_closed,  # same shape: range-norm read
+    EVENT_KIND_DRIFT_FLAG_FIRED: _resolve_drift_alert,
 }
 
 

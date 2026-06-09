@@ -94,6 +94,10 @@ def _execute_signal(signal: AlphaSignal,
                     sector: str,
                     config: EvaluatorConfig,
                     state_featurizer: Optional[Any] = None,
+                    shadow_log_writer: Optional[Any] = None,
+                    trading_date_ist: Optional[str] = None,
+                    symbol: Optional[str] = None,
+                    alpha_name: Optional[str] = None,
                     ) -> Optional[Dict[str, Any]]:
     """Run a single AlphaSignal through the shared pipeline. Returns a
     dict matching :data:`TRADE_COLUMNS` or None if the signal was filtered
@@ -144,6 +148,44 @@ def _execute_signal(signal: AlphaSignal,
             side="short" if signal.side == "short" else "long",
         )
         if target_reward_inr < config.min_target_to_cost_ratio * float(rt_cost["total_cost"]):
+            # Stream L hook: record the rejection BEFORE returning so the
+            # Stream M.4 regret estimator can learn whether the threshold
+            # is too tight. Defensive: never block evaluation.
+            if shadow_log_writer is not None and trading_date_ist is not None:
+                try:
+                    from ..products.shadow_log import (
+                        EVENT_KIND_BELOW_TARGET_TO_COST,
+                    )
+                    shadow_log_writer.record(
+                        event_kind=EVENT_KIND_BELOW_TARGET_TO_COST,
+                        trading_date_ist=trading_date_ist,
+                        symbol=symbol,
+                        detail_token=(
+                            f"{alpha_name or 'unknown'}_"
+                            f"{int(signal.decision_idx)}"
+                        ),
+                        decision_context={
+                            "alpha_name": alpha_name,
+                            "side": signal.side,
+                            "entry_price": float(entry_price),
+                            "target_atr": float(signal.target_atr),
+                            "stop_atr": float(signal.stop_atr),
+                            "atr_at_entry": atr_val,
+                            "target_reward_inr": float(target_reward_inr),
+                            "round_trip_cost_inr": float(rt_cost["total_cost"]),
+                            "target_to_cost_ratio": (
+                                float(target_reward_inr) /
+                                max(float(rt_cost["total_cost"]), 1e-9)
+                            ),
+                            "min_target_to_cost_ratio": float(
+                                config.min_target_to_cost_ratio
+                            ),
+                            "qty_check": int(qty_check),
+                            "sector": sector,
+                        },
+                    )
+                except Exception:
+                    pass
             return None
 
     pool_mid_at_touch = float(signal.state.get("pool_mid", np.nan))
@@ -267,6 +309,8 @@ class ArsenalEvaluator:
 
     def run(self, report,
             extras_by_alpha: Optional[Dict[str, Dict[str, Any]]] = None,
+            shadow_log_writer: Optional[Any] = None,
+            trading_date_ist: Optional[str] = None,
             ) -> pd.DataFrame:
         """Walk every asset × every alpha, produce a unified trade frame.
 
@@ -307,6 +351,10 @@ class ArsenalEvaluator:
                     row = _execute_signal(
                         sig, df_base, atr_series, sec, self.config,
                         state_featurizer=state_featurizer,
+                        shadow_log_writer=shadow_log_writer,
+                        trading_date_ist=trading_date_ist,
+                        symbol=symbol,
+                        alpha_name=alpha.name,
                     )
                     if row is None:
                         continue

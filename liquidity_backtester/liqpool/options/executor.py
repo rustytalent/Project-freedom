@@ -33,7 +33,7 @@ There is NO drawdown floor in production. See D13 for the rationale.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .ccv import CCV, MACRO_GATE_THRESHOLD
 
@@ -108,6 +108,72 @@ def pre_trade_decision(ccv: CCV) -> PreTradeDecision:
         lcs=lcs,
         side_thesis=None,
     )
+
+
+def record_pre_trade_skip_shadow(
+    writer: Any,
+    decision: PreTradeDecision,
+    ccv: CCV,
+    trading_date_ist: str,
+    underlying: str,
+    strike_label: str,
+) -> Optional[str]:
+    """Stream L hook — record a SKIP (or macro-gate close) decision.
+
+    Two ENTER actions are NOT logged; they take the trade. Only SKIP
+    and WAIT are training rows for the Stream M.4 regret model (was
+    this the right call?) and the Stream M.5 detector-trust router
+    (which layers should have weighed in?). Defensive: returns None
+    on any exception; never blocks the pre-trade pipeline.
+
+    The function dispatches between two event kinds based on the
+    SKIP reason — macro-gate-closed days have very different
+    counterfactual semantics from "lcs too weak" days.
+
+    Caller does:
+        d = pre_trade_decision(ccv)
+        record_pre_trade_skip_shadow(
+            writer, d, ccv, today_ist, "NIFTY", "24500_PE",
+        )
+    """
+    if writer is None:
+        return None
+    if decision.action == "ENTER":
+        # Entries become live trades and get logged in the outcome log
+        # via the normal pipeline. Nothing to shadow.
+        return None
+    try:
+        from .ccv import CCV as _CCV  # noqa: F401 (kind hint at call time)
+        from ..products.shadow_log import (
+            EVENT_KIND_MACRO_GATE_CLOSED,
+            EVENT_KIND_SKIP_OPTIONS,
+        )
+        if decision.reason.startswith("macro_gate_closed"):
+            kind = EVENT_KIND_MACRO_GATE_CLOSED
+        else:
+            kind = EVENT_KIND_SKIP_OPTIONS
+        return writer.record(
+            event_kind=kind,
+            trading_date_ist=trading_date_ist,
+            symbol=underlying,
+            detail_token=strike_label,
+            decision_context={
+                "action": decision.action,
+                "reason": decision.reason,
+                "lcs": decision.lcs,
+                "side_thesis": decision.side_thesis,
+                "macro_score": ccv.macro_score,
+                "regime_score": ccv.regime_score,
+                "options_score": ccv.options_score,
+                "micro_organic_score": ccv.micro_organic_score,
+                "pool_holding_strength": ccv.pool_holding_strength,
+                "manipulation_score": ccv.manipulation_score,
+                "micro_forced_flag": ccv.micro_forced_flag,
+                "pool_distortion_flag": ccv.pool_distortion_flag,
+            },
+        )
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ State is persisted to `drift_state.json` so we can compare current run to histor
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import pandas as pd
 
@@ -223,6 +223,56 @@ def save_baseline(metrics: DriftMetrics, path: Path | str) -> None:
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
+
+def record_drift_alerts_to_shadow(
+    writer: Any,
+    report: DriftReport,
+    trading_date_ist: str,
+    model_bundle_version: str = "unknown_bundle",
+) -> int:
+    """Stream L hook — record one shadow event per drift alert.
+
+    Adding this to the drift-check cron lets the Stream M.6 drift-
+    imminent model train on the precursor trajectory of every alert
+    that has fired: which metric, what value, what threshold, how it
+    cleared (or didn't). Defensive: if anything goes wrong with the
+    writer, we swallow and return 0 — drift monitoring MUST NOT crash
+    because of shadow logging.
+
+    Caller does:
+        rpt = check_drift(current, baseline)
+        record_drift_alerts_to_shadow(writer, rpt, today_ist)
+
+    Returns the number of events successfully buffered. The caller
+    still needs to call ``writer.commit()`` to flush them.
+    """
+    if writer is None or not report.alerts:
+        return 0
+    from .products.shadow_log import EVENT_KIND_DRIFT_FLAG_FIRED
+    written = 0
+    for alert_payload in report.alerts:
+        try:
+            metric = str(alert_payload.get("metric", "unknown"))
+            writer.record(
+                event_kind=EVENT_KIND_DRIFT_FLAG_FIRED,
+                trading_date_ist=trading_date_ist,
+                symbol=None,  # drift is on the unified-model layer
+                detail_token=f"{metric}_{model_bundle_version}",
+                decision_context={
+                    "metric": metric,
+                    "value": alert_payload.get("value"),
+                    "threshold": alert_payload.get("threshold"),
+                    "severity": alert_payload.get("severity"),
+                    "msg": alert_payload.get("msg"),
+                    "model_bundle_version": model_bundle_version,
+                    "overall_status": report.overall_status,
+                },
+            )
+            written += 1
+        except Exception:
+            continue
+    return written
+
 
 def print_drift_report(report: DriftReport, file=None) -> None:
     print("\n================ MODEL DRIFT CHECK ================", file=file)

@@ -44,6 +44,7 @@ import pandas as pd
 
 from .shadow_log import (
     EVENT_KIND_AVOIDANCE_FLAG,
+    EVENT_KIND_Q_BELOW_THRESHOLD,
     ShadowLogger,
 )
 from .outcome_log import (
@@ -862,6 +863,40 @@ def generate_brief(report: Any,
                 # Brief generation MUST NOT fail because of shadow logging.
                 # Operator catches missed events via shadow-log audit cron.
                 pass
+
+        # Stream L hook: pools whose P(touch_today) was BELOW the
+        # watchlist threshold are dropped silently today. Tomorrow's
+        # data tells us whether the threshold was too tight (the pool
+        # actually got touched -> regret signal feeds Stream M.4 / M.8).
+        # We pull the set from `predictions` minus the entries that
+        # actually made the watchlist; those rejected rows are the
+        # training data.
+        try:
+            watch_keys = {(e.symbol, e.key_level) for e in watchlist}
+            for rec in predictions:
+                key = (rec.get("symbol"), rec.get("key_level"))
+                if key in watch_keys:
+                    continue
+                # This prediction was below the watchlist threshold.
+                shadow_log_writer.record(
+                    event_kind=EVENT_KIND_Q_BELOW_THRESHOLD,
+                    trading_date_ist=trading_date_ist,
+                    symbol=rec.get("symbol"),
+                    detail_token=f"level_{rec.get('key_level', 0):.2f}",
+                    decision_context={
+                        "side_trade": rec.get("side_trade"),
+                        "key_level": rec.get("key_level"),
+                        "key_level_type": rec.get("key_level_type"),
+                        "dist_atr_at_last_bar": rec.get("dist_atr_at_last_bar"),
+                        "q_pred": rec.get("q_pred"),
+                        "p_long": rec.get("p_long"),
+                        "p_short": rec.get("p_short"),
+                        "sector": rec.get("sector"),
+                    },
+                )
+        except Exception:
+            # Same defensive posture as the avoidance hook.
+            pass
 
     try:
         confidence_notes = _confidence_notes_block(report)
