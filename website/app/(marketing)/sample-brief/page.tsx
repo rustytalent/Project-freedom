@@ -13,6 +13,11 @@ export const metadata: Metadata = {
     "A real historical Daily Brief, redacted for public view. Real shape, real prose, levels and symbols masked.",
 };
 
+// Hourly ISR so the ticker / footer datelines on this page track
+// the current trading day. The sample brief itself is the same
+// historical artifact (14 MAR 2026).
+export const revalidate = 3600;
+
 export default function SampleBriefPage() {
   // Cast: the JSON file is type-checked at build time against the
   // tsconfig resolveJsonModule path. At runtime we trust the shape.

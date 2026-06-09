@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { brand } from "@/lib/brand";
+import { buildDateline } from "@/lib/clock";
 
 const groups: Array<{
   heading: string;
@@ -49,6 +50,7 @@ const dontDoList: string[] = [
 ];
 
 function StatusStrip() {
+  const dl = buildDateline();
   return (
     <div className="border-t border-b border-border bg-bg-raised/40">
       <div className="max-w-dash mx-auto px-6 py-3 flex flex-wrap items-center gap-x-8 gap-y-2 text-[11px] font-mono uppercase tracking-[0.16em] text-fg-muted">
@@ -57,12 +59,10 @@ function StatusStrip() {
           <span className="text-fg">System operational</span>
         </span>
         <span className="text-fg-subtle">·</span>
-        <span>Next brief · Tomorrow 08:30 IST</span>
+        <span>Edition {dl.edition} · published {dl.todayShort}</span>
         <span className="text-fg-subtle hidden md:inline">·</span>
-        <span className="hidden md:inline">Audit transparency · 100%</span>
-        <span className="ml-auto text-fg-subtle">
-          {brand.domain}
-        </span>
+        <span className="hidden md:inline">Next · {dl.nextBriefLabel}</span>
+        <span className="ml-auto text-fg-subtle">{brand.domain}</span>
       </div>
     </div>
   );

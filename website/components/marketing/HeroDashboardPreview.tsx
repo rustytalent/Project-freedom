@@ -1,5 +1,6 @@
 import { CalibrationSparkline } from "@/components/calibration/CalibrationSparkline";
 import { mockLatestSummary, mockTimeSeries } from "@/lib/outcome-log-mock";
+import { buildDateline } from "@/lib/clock";
 
 /**
  * HeroDashboardPreview: the right-side artifact that fills the hero.
@@ -123,6 +124,7 @@ export function HeroDashboardPreview() {
   const meanAbsErr =
     last30.reduce((a, d) => a + Math.abs(d.touch_watch_calibration_error), 0) /
     last30.length;
+  const dl = buildDateline();
 
   return (
     <div
@@ -139,7 +141,7 @@ export function HeroDashboardPreview() {
               Today&rsquo;s brief
             </span>
             <span className="font-mono text-[11px] text-fg-subtle">
-              · 06 JUN · 08:30 IST
+              · {dl.todayShort} · 08:30 IST
             </span>
           </div>
           <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-subtle">
@@ -185,7 +187,7 @@ export function HeroDashboardPreview() {
             247 predictions audited overnight
           </span>
           <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-warm-glow">
-            Next · 08:30 IST
+            Next · {dl.nextBriefLabel}
           </span>
         </div>
       </div>

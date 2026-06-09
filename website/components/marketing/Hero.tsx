@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { brand } from "@/lib/brand";
+import { buildDateline } from "@/lib/clock";
 import { LinkButton } from "@/components/ui/button";
 import { LatestPublishedTicker } from "./LatestPublishedTicker";
 import { LivePulse } from "./LivePulse";
@@ -27,6 +28,7 @@ function Headline() {
 }
 
 export function Hero() {
+  const dl = buildDateline();
   return (
     <section className="relative grid-backdrop overflow-hidden">
       <div className="absolute inset-0 hero-glow pointer-events-none" aria-hidden="true" />
@@ -42,11 +44,11 @@ export function Hero() {
             className="font-mono text-[11px] uppercase tracking-[0.18em] text-warm-glow px-2 py-0.5 border border-warm/40 rounded-sm"
             aria-label="Edition number"
           >
-            Edition #006
+            Edition {dl.edition}
           </span>
           <span className="hidden sm:inline-block w-px h-3 bg-border" />
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-fg-subtle">
-            06 JUN 2026 · IST
+            {dl.todayLong} · IST
           </span>
           <span className="hidden sm:inline-block w-px h-3 bg-border" />
           <Suspense fallback={<LivePulse label="Loading status…" />}>

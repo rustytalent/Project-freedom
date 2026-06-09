@@ -1,4 +1,5 @@
 import { mockLatestSummary } from "@/lib/outcome-log-mock";
+import { buildDateline } from "@/lib/clock";
 
 /**
  * CalibrationLedger: a small ledger panel showing a handful of
@@ -78,6 +79,7 @@ function buildRows(): LedgerRow[] {
 export function CalibrationLedger({ label }: { label: string }) {
   const rows = buildRows();
   const hits = rows.filter((r) => r.hit).length;
+  const dl = buildDateline();
   return (
     <figure
       className="bg-bg-raised border border-border rounded-sm overflow-hidden"
@@ -91,7 +93,7 @@ export function CalibrationLedger({ label }: { label: string }) {
             Yesterday ledger
           </span>
           <span className="font-mono text-[11px] text-fg-subtle">
-            · 05 JUN
+            · {dl.yesterdayShort}
           </span>
         </div>
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-fg-subtle">

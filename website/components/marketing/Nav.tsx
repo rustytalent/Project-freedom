@@ -3,18 +3,75 @@
 import { useState } from "react";
 import Link from "next/link";
 import { brand } from "@/lib/brand";
+import { plans } from "@/lib/pricing";
+import { buildDateline } from "@/lib/clock";
 import { ScrollProgress } from "./ScrollProgress";
+import { NavMenu, type MenuItem, type MenuFeature } from "./NavMenu";
 
-const links: Array<{ href: string; label: string }> = [
-  { href: "/philosophy", label: "Philosophy" },
-  { href: "/products", label: "Products" },
-  { href: "/track-record", label: "Track record" },
-  { href: "/sample-brief", label: "Sample brief" },
-  { href: "/pricing", label: "Pricing" },
+const productItems: MenuItem[] = [
+  {
+    href: "/products/daily-brief",
+    label: "Core Research",
+    desc: `Pre-market briefs, full archive. ${plans.daily.displayMonthly}.`,
+  },
+  {
+    href: "/products/swing-brief",
+    label: "Live Desk",
+    desc: `Core + intraday updates, calibration dashboard. ${plans.pro.displayMonthly}.`,
+  },
+  {
+    href: "/products/diagnosis",
+    label: "Audit Base",
+    desc: `One-off research or infra audit. ${plans.diagnosis.displayMonthly}.`,
+  },
+  {
+    href: "/products/audit-infrastructure",
+    label: "Audit infrastructure",
+    desc: "Calibration cron, drift flags, public dashboard — for desks.",
+  },
+];
+
+const productFeature: MenuFeature = {
+  eyebrow: "Compare",
+  title: "Pricing for a research product.",
+  body: "Side-by-side comparison of all plans, billing cycles, and what each includes.",
+  href: "/pricing",
+  cta: "See pricing",
+};
+
+const researchItems: MenuItem[] = [
+  {
+    href: "/sample-brief",
+    label: "Sample brief",
+    desc: "A real published brief, redacted for public view. 6-minute read.",
+  },
+  {
+    href: "/track-record",
+    label: "Track record",
+    desc: "Per-bucket calibration, drift flags, 90-day series. Updated nightly.",
+  },
+  {
+    href: "/yesterday-audit",
+    label: "Yesterday audit",
+    desc: "How yesterday's brief resolved against actual outcomes.",
+  },
+  {
+    href: "/philosophy",
+    label: "Philosophy",
+    desc: "Why we publish probabilities and audit them in public.",
+  },
 ];
 
 export function Nav() {
   const [open, setOpen] = useState(false);
+  const dl = buildDateline();
+  const researchFeature: MenuFeature = {
+    eyebrow: `Edition ${dl.edition}`,
+    title: `${dl.todayLong}'s brief.`,
+    body: "View the redacted sample, or the live calibration dashboard.",
+    href: "/sample-brief",
+    cta: "View sample",
+  };
   return (
     <nav
       className="relative border-b border-border bg-bg/80 backdrop-blur-md sticky top-0 z-40"
@@ -33,17 +90,19 @@ export function Nav() {
             {brand.name}
           </span>
         </Link>
-        <ul className="hidden md:flex items-center gap-6 text-sm text-fg-muted">
-          {links.map((l) => (
-            <li key={l.href}>
-              <Link
-                href={l.href}
-                className="hover:text-fg transition-colors"
-              >
-                {l.label}
-              </Link>
-            </li>
-          ))}
+        <ul className="hidden md:flex items-center gap-7 text-sm text-fg-muted">
+          <NavMenu label="Research" items={researchItems} feature={researchFeature} />
+          <NavMenu label="Products" items={productItems} feature={productFeature} />
+          <li>
+            <Link href="/pricing" className="hover:text-fg transition-colors">
+              Pricing
+            </Link>
+          </li>
+          <li>
+            <Link href="/about" className="hover:text-fg transition-colors">
+              About
+            </Link>
+          </li>
         </ul>
         <div className="ml-auto flex items-center gap-3">
           <Link
@@ -94,28 +153,67 @@ export function Nav() {
       </div>
       {open && (
         <div className="md:hidden border-t border-border bg-bg-raised">
-          <ul className="px-6 py-4 space-y-3">
-            {links.map((l) => (
-              <li key={l.href}>
-                <Link
-                  href={l.href}
-                  className="block py-1 text-fg-muted hover:text-fg transition-colors"
-                  onClick={() => setOpen(false)}
-                >
-                  {l.label}
-                </Link>
-              </li>
-            ))}
-            <li className="pt-2 border-t border-border">
+          <div className="px-6 py-5 space-y-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.18em] text-fg-subtle mb-3">
+                Research
+              </p>
+              <ul className="space-y-2.5">
+                {researchItems.map((it) => (
+                  <li key={it.href}>
+                    <Link
+                      href={it.href}
+                      className="block text-fg-muted hover:text-fg transition-colors"
+                      onClick={() => setOpen(false)}
+                    >
+                      {it.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-[0.18em] text-fg-subtle mb-3">
+                Products
+              </p>
+              <ul className="space-y-2.5">
+                {productItems.map((it) => (
+                  <li key={it.href}>
+                    <Link
+                      href={it.href}
+                      className="block text-fg-muted hover:text-fg transition-colors"
+                      onClick={() => setOpen(false)}
+                    >
+                      {it.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="pt-3 border-t border-border space-y-2.5">
+              <Link
+                href="/pricing"
+                className="block text-fg-muted hover:text-fg transition-colors"
+                onClick={() => setOpen(false)}
+              >
+                Pricing
+              </Link>
+              <Link
+                href="/about"
+                className="block text-fg-muted hover:text-fg transition-colors"
+                onClick={() => setOpen(false)}
+              >
+                About
+              </Link>
               <Link
                 href="/sign-in"
-                className="block py-1 text-accent hover:text-accent-glow transition-colors"
+                className="block text-accent hover:text-accent-glow transition-colors"
                 onClick={() => setOpen(false)}
               >
                 Subscriber sign in
               </Link>
-            </li>
-          </ul>
+            </div>
+          </div>
         </div>
       )}
     </nav>

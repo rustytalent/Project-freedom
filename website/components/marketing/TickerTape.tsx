@@ -1,4 +1,5 @@
 import { mockLatestSummary, mockTimeSeries } from "@/lib/outcome-log-mock";
+import { buildDateline } from "@/lib/clock";
 
 /**
  * TickerTape: a Bloomberg-style strip pinned above the primary nav.
@@ -20,20 +21,21 @@ type Item = {
 function buildItems(): Item[] {
   const series = mockTimeSeries();
   const summary = mockLatestSummary();
+  const dl = buildDateline();
   const last30 = series.slice(-30);
   const meanAbsErr =
     last30.reduce((a, d) => a + Math.abs(d.touch_watch_calibration_error), 0) /
     last30.length;
   const predictions = summary.reduce((a, r) => a + r.n, 0);
   return [
-    { kind: "info",       label: "Brief #" + series.length, value: "Published 08:30 IST" },
+    { kind: "info",       label: "Edition " + dl.edition, value: "Published " + dl.todayShort + " · 08:30 IST" },
     { kind: "calibrated", label: "Touch-watch error", value: "−" + (meanAbsErr * 100).toFixed(1) + "% / 30d" },
     { kind: "calibrated", label: "Avoidance head", value: "Within tolerance" },
     { kind: "drift",      label: "Options-strike head", value: "Drift flagged" },
     { kind: "info",       label: "Predictions audited", value: predictions.toLocaleString("en-IN") },
     { kind: "calibrated", label: "Audit transparency", value: "100%" },
     { kind: "info",       label: "Retrospective share", value: "35%" },
-    { kind: "info",       label: "Next brief", value: "Tomorrow 08:30 IST" },
+    { kind: "info",       label: "Next brief", value: dl.nextBriefLabel },
     { kind: "calibrated", label: "System", value: "Operational" },
     { kind: "info",       label: "Research stream", value: "Live" },
   ];

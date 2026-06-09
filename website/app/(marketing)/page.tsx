@@ -9,6 +9,7 @@ import { Principles } from "@/components/marketing/Principles";
 import { ProcessTimeline } from "@/components/marketing/ProcessTimeline";
 import { PullQuote } from "@/components/marketing/PullQuote";
 import { SectionStamp } from "@/components/marketing/SectionStamp";
+import { FoundersLetter } from "@/components/marketing/FoundersLetter";
 import { FAQ } from "@/components/marketing/FAQ";
 import { CalibrationSparkline } from "@/components/calibration/CalibrationSparkline";
 import { LinkButton } from "@/components/ui/button";
@@ -16,6 +17,12 @@ import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/c
 import { mockTimeSeries } from "@/lib/outcome-log-mock";
 import { plans } from "@/lib/pricing";
 import { Reveal } from "@/components/ui/Reveal";
+
+// ISR: regenerate hourly so the editorial datelines (Edition #,
+// "Today's brief", "Tomorrow 08:30 IST" etc.) reflect the current
+// trading day. The brand voice is "this is a serially published
+// research product" - the datelines have to keep up.
+export const revalidate = 3600;
 
 // Public-facing brief excerpts. The redaction-token treatment in the
 // first excerpt makes the subscriber-only material visible AS REDACTED
@@ -194,10 +201,13 @@ export default function LandingPage() {
         }
       />
 
-      <SectionStamp stamp="S/05" label="The engine room" />
+      <SectionStamp stamp="S/05" label="From the desk" tone="warm" />
+      <FoundersLetter />
+
+      <SectionStamp stamp="S/06" label="The engine room" />
       <ProcessTimeline />
 
-      <SectionStamp stamp="S/06" label="Built for" />
+      <SectionStamp stamp="S/07" label="Built for" />
       <BuiltFor />
 
       <PullQuote
@@ -205,10 +215,10 @@ export default function LandingPage() {
         attribution="Research desk principles · §1"
       />
 
-      <SectionStamp stamp="S/07" label="How we publish" tone="warm" />
+      <SectionStamp stamp="S/08" label="How we publish" tone="warm" />
       <Principles />
 
-      <SectionStamp stamp="S/08" label="Pricing" />
+      <SectionStamp stamp="S/09" label="Pricing" />
       <section>
         <div className="max-w-dash mx-auto px-6 py-24 md:py-28">
           <Reveal>
@@ -254,10 +264,10 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <SectionStamp stamp="S/09" label="Common questions" />
+      <SectionStamp stamp="S/10" label="Common questions" />
       <FAQ />
 
-      <SectionStamp stamp="S/10" label="Decide" tone="warm" />
+      <SectionStamp stamp="S/11" label="Decide" tone="warm" />
       {/* Final CTA */}
       <section className="bg-bg-raised relative overflow-hidden">
         <div className="absolute inset-0 hero-glow pointer-events-none opacity-70" aria-hidden="true" />
