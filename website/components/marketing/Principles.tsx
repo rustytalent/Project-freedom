@@ -38,7 +38,7 @@ const principles = [
 
 export function Principles() {
   return (
-    <section className="border-t border-border bg-bg-raised/40">
+    <section className="bg-bg-raised/40">
       <div className="max-w-dash mx-auto px-6 py-24 md:py-28">
         <Reveal>
           <div className="mb-14 flex flex-wrap items-end justify-between gap-6">

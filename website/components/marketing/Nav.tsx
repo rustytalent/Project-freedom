@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { brand } from "@/lib/brand";
+import { ScrollProgress } from "./ScrollProgress";
 
 const links: Array<{ href: string; label: string }> = [
   { href: "/philosophy", label: "Philosophy" },
@@ -16,9 +17,10 @@ export function Nav() {
   const [open, setOpen] = useState(false);
   return (
     <nav
-      className="border-b border-border bg-bg/80 backdrop-blur-md sticky top-0 z-40"
+      className="relative border-b border-border bg-bg/80 backdrop-blur-md sticky top-0 z-40"
       aria-label="Primary"
     >
+      <ScrollProgress />
       <div className="max-w-dash mx-auto px-6 py-4 flex items-center gap-8">
         <Link
           href="/"
