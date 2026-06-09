@@ -139,8 +139,16 @@ class StateFeaturizer:
                        if "volume" in df_base.columns
                        else np.zeros(len(df_base), dtype=float))
         self.idx = df_base.index
-        self.roll_mean_50 = df_base["close"].rolling(50, min_periods=10).mean().bfill().values
-        self.roll_std_50 = df_base["close"].rolling(50, min_periods=10).std().bfill().values
+        # Causal warmup: the first 9 bars are NaN under min_periods=10. A
+        # naive .bfill() copies bar 10's mean+std backward into bars 0-9,
+        # which is a small but real look-ahead. Instead, fill warmup with
+        # the CAUSAL expanding mean/std (uses only bars i <= j), and only
+        # fall back to NaN -> 0 when even the expanding window is empty.
+        _close = df_base["close"]
+        _r50_mean = _close.rolling(50, min_periods=10).mean()
+        _r50_std = _close.rolling(50, min_periods=10).std()
+        self.roll_mean_50 = _r50_mean.fillna(_close.expanding(min_periods=1).mean()).values
+        self.roll_std_50 = _r50_std.fillna(_close.expanding(min_periods=1).std()).fillna(0.0).values
         self._precompute_session_relative_arrays()
         self._precompute_avwap_arrays()
         self._precompute_frvp_arrays()

@@ -318,32 +318,56 @@ class OutcomeLogWriter:
 # ---------------------------------------------------------------------------
 
 def calibration_by_bucket(joined: pd.DataFrame) -> pd.DataFrame:
-    """Per (prediction_type, confidence_bucket): n, hit_rate, mean_p,
-    calibration_error.
+    """Per (prediction_type, confidence_bucket): n_logged, n_resolved,
+    coverage_pct, hit_rate, mean_predicted_p, calibration_error.
 
-    Used to populate the ``hit_rate_by_confidence_bucket`` block of
-    the Yesterday Audit and to compute the ``drifting_today`` list
-    in the next morning's confidence_notes.
+    The audit MUST disclose how many logged predictions resolved and
+    how many didn't. A previous version silently filtered to
+    outcome_boolean.notna() rows, producing a bucket "n" that
+    counted only resolved predictions — biased upward against the
+    unresolved tail (narrow misses, gap-day disappearances). The
+    Yesterday Audit consumer had no way to see the gap.
+
+    Now: hit_rate and calibration_error are computed on the resolved
+    subset (you can't grade an unresolved prediction), but n_logged
+    counts everything written for that (type, bucket) and coverage_pct
+    is exposed so the public audit can disclose any gap.
+
+    Used by the brief generator's Yesterday Audit and by the
+    confidence_notes "drifting_today" list.
     """
     if joined.empty or "outcome_boolean" not in joined.columns:
         return pd.DataFrame()
-    sub = joined[joined["outcome_boolean"].notna()].copy()
-    if sub.empty:
-        return pd.DataFrame()
-    sub["hit"] = sub["outcome_boolean"].astype(int)
+    j = joined.copy()
+    j["_resolved"] = j["outcome_boolean"].notna()
     rows = []
-    grouped = sub.groupby(["prediction_type", "confidence_bucket"])
+    grouped = j.groupby(["prediction_type", "confidence_bucket"])
     for (ptype, bucket), g in grouped:
-        n = int(len(g))
-        hit_rate = float(g["hit"].mean())
-        mean_p = float(g["predicted_value"].mean())
+        n_logged = int(len(g))
+        g_res = g[g["_resolved"]]
+        n_resolved = int(len(g_res))
+        coverage_pct = float(n_resolved / n_logged) if n_logged > 0 else 0.0
+        if n_resolved > 0:
+            hit_rate = float(g_res["outcome_boolean"].astype(int).mean())
+            mean_p = float(g_res["predicted_value"].mean())
+            calibration_error = mean_p - hit_rate
+        else:
+            # All unresolved: surface the bucket but flag it ungradable.
+            hit_rate = float("nan")
+            mean_p = float(g["predicted_value"].mean())
+            calibration_error = float("nan")
         rows.append({
             "prediction_type": ptype,
             "confidence_bucket": bucket,
-            "n": n,
+            "n_logged": n_logged,
+            "n_resolved": n_resolved,
+            "coverage_pct": coverage_pct,
+            # `n` kept as an alias for n_resolved for back-compat with the
+            # brief renderer's existing template; remove in a future cycle.
+            "n": n_resolved,
             "hit_rate": hit_rate,
             "mean_predicted_p": mean_p,
-            "calibration_error": mean_p - hit_rate,
+            "calibration_error": calibration_error,
         })
     return pd.DataFrame(rows)
 

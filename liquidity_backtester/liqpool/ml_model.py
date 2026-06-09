@@ -75,9 +75,26 @@ class PurgedFoldStats:
 
 
 def label_end_time(pool: Pool, result: PoolResult) -> pd.Timestamp:
-    """Best available end of the pool's evaluation window for purging overlap checks."""
+    """Best available end of the pool's evaluation window for purging overlap checks.
+
+    Picks the latest of {available_at, touched_at, broken_at} that is
+    non-null. ``available_at`` is always set by the pool builder so
+    this is normally well-defined. If somehow all three are None (a
+    corrupt result), we raise rather than silently returning a
+    zero-width window — that would create unembargoable label
+    intervals for adjacent pools, exactly the boundary the purge is
+    supposed to enforce.
+    """
     candidates = [pool.available_at, result.touched_at, result.broken_at]
-    return max(ts for ts in candidates if ts is not None)
+    valid = [ts for ts in candidates if ts is not None]
+    if not valid:
+        raise ValueError(
+            f"label_end_time: no end candidate for pool "
+            f"{getattr(pool, 'pool_id', '?')} - "
+            f"available_at={pool.available_at}, "
+            f"touched_at={result.touched_at}, broken_at={result.broken_at}"
+        )
+    return max(valid)
 
 
 def _lgb_params(seed: int, regularization_preset: str) -> Dict:

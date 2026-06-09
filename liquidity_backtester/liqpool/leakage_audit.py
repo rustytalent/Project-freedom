@@ -312,6 +312,23 @@ def _audit_embargo(report, cfg: Config,
 
 
 def _truncate_closed(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    """Return only the bars whose CLOSE timestamp is <= ``as_of``.
+
+    Engine-wide convention (asserted on load in ``warehouse.py``):
+        ``df.index[i]`` is the OPEN timestamp of bar i, in tz-naive
+        UTC. The bar represents the half-open interval
+        ``[index[i], index[i] + period)`` and closes at
+        ``index[i] + period``.
+
+    Under this convention, ``index[i] + period`` is the close
+    timestamp, and a bar is "knowable" at time ``as_of`` only when
+    its close <= as_of. That's what this function returns.
+
+    If warehouse data ever changes the convention to bar-close
+    timestamps, this filter shifts by one bar in the wrong direction
+    and the replay audit produces silent off-by-ones. Keep the
+    convention pinned at the loader.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
     period = pd.Timedelta(seconds=_bar_period_seconds(df.index))

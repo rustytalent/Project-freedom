@@ -109,6 +109,20 @@ class AvoidEntry:
 
 @dataclass
 class KeyZone:
+    """One key zone the brief flags as in-play for the session.
+
+    Note on ``side_from_open`` field name:
+        The field is historically misnamed. It is computed from the
+        prior session's CLOSE (``last_close`` in
+        ``_gather_active_pool_predictions``), not the upcoming
+        session's open. The value is correct ("above" iff the level
+        sits above the prior close, otherwise "below"); only the name
+        misleads. Downstream consumers (outcome-log resolver, website
+        brief renderer, JSON contract) treat it consistently as
+        from-close, so this stays as-is for schema stability. A
+        coordinated rename to ``side_from_prior_close`` is a future
+        migration.
+    """
     symbol: str
     level: float
     level_type: str
@@ -238,6 +252,54 @@ def _sector_regime_block(report, as_of_ist: str) -> SectorRegime:
 # ---------------------------------------------------------------------------
 # Watchlist + key zones — drawn from the OOS pool population + proximity
 # ---------------------------------------------------------------------------
+
+
+class PublishCutoffViolation(ValueError):
+    """Raised when a brief tries to publish using data later than the
+    pre-open cutoff for ``trading_date_ist``. See ``_assert_publish_cutoff``.
+    """
+
+
+def _assert_publish_cutoff(report: Any, trading_date_ist: str) -> None:
+    """Hard guard against using same-day intraday data in a non-
+    retrospective brief.
+
+    The brief targets a 08:30 IST publish time. Every per-asset
+    base_df last bar must be strictly before 08:30 IST on
+    ``trading_date_ist``. We allow the prior session's close (which
+    is what the model actually trains on) — that's the most recent
+    data the brief is supposed to know about.
+
+    Raises ``PublishCutoffViolation`` listing the violating symbols
+    so the operator can re-fit the bundle on truncated data.
+    """
+    cutoff = pd.Timestamp(f"{trading_date_ist}T08:30:00+05:30").tz_convert("UTC").tz_localize(None)
+    violations: List[Tuple[str, pd.Timestamp]] = []
+    assets = getattr(report, "assets", None)
+    if not assets:
+        return  # Nothing to check; the brief will degrade to stubs naturally.
+    for symbol, ad in assets.items():
+        df = getattr(ad, "base_df", None)
+        if df is None or len(df) == 0:
+            continue
+        last_ts = df.index[-1]
+        # Normalise to tz-naive UTC for comparison; warehouse convention.
+        if getattr(last_ts, "tzinfo", None) is not None:
+            last_ts = last_ts.tz_convert("UTC").tz_localize(None)
+        if last_ts >= cutoff:
+            violations.append((str(symbol), pd.Timestamp(last_ts)))
+    if violations:
+        msg = (
+            f"brief for {trading_date_ist} reads data past 08:30 IST cutoff "
+            f"({cutoff.isoformat()}) for {len(violations)} symbol(s); "
+            f"first 3 = {violations[:3]}; "
+            f"this would silently leak post-publish data into the "
+            f"calibrated probabilities — refit the bundle truncated "
+            f"to the prior session, or pass retrospective=True if "
+            f"this is a backfill replay"
+        )
+        raise PublishCutoffViolation(msg)
+
 
 def _gather_active_pool_predictions(report,
                                      max_entries: int = 200,
@@ -733,6 +795,17 @@ def generate_brief(report: Any,
     indexes_covered = indexes_covered or []
     index_data = index_data or {}
     as_of_ist = f"{trading_date_ist}T09:15:00+05:30"
+
+    # Publish-time data-cutoff guard. The brief is supposed to land at
+    # 08:30 IST using only data available before the pre-open session.
+    # If the report bundle was accidentally fit on intraday data from
+    # `trading_date_ist` itself (e.g., a re-run with stale args), the
+    # brief would silently use post-publish data and the calibration
+    # claim would be a lie. We enforce the cutoff here, raising on
+    # violation. ``retrospective=True`` skips this — backfill replays
+    # legitimately use end-of-day data for the date they're replaying.
+    if not retrospective:
+        _assert_publish_cutoff(report, trading_date_ist)
 
     metadata = BriefMetadata(
         brief_id=f"BRIEF_{trading_date_ist.replace('-', '_')}",
