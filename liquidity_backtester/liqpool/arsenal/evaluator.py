@@ -371,18 +371,38 @@ class ArsenalEvaluator:
 
     @staticmethod
     def per_alpha_summary(trades: pd.DataFrame) -> pd.DataFrame:
+        """Per-alpha aggregate. Now includes Bailey-style honesty
+        columns alongside the raw means:
+
+          * ``sharpe`` — per-trade Sharpe = mean_R / std_R
+          * ``psr`` — Probabilistic Sharpe Ratio vs 0 (Bailey 2012)
+          * ``dsr`` — Deflated Sharpe Ratio across the alphas in
+            *this* run (Bailey 2014). Deflates by the search budget
+            implied by this evaluator's alpha registry.
+
+        The DSR is the headline number that survives the search.
+        A DSR > 0.95 means: even after correcting for trying multiple
+        alphas, the strategy's true Sharpe is positive with 95%
+        confidence.
+        """
+        from .honesty import deflated_sharpe, probabilistic_sharpe
         if trades.empty:
             return pd.DataFrame()
-        rows = []
+        # First pass: per-alpha raw stats + raw Sharpe.
+        per_alpha_returns: Dict[str, np.ndarray] = {}
+        per_alpha_basics: List[Dict[str, Any]] = []
         for alpha_name, g in trades.groupby("alpha_name"):
             r = g["net_r"].astype(float).to_numpy()
             r = r[np.isfinite(r)]
             n = int(len(r))
             mean_R = float(r.mean()) if n else 0.0
-            se = float(r.std(ddof=1) / math.sqrt(n)) if n > 1 else 0.0
+            std_R = float(r.std(ddof=1)) if n > 1 else 0.0
+            se = std_R / math.sqrt(n) if n > 1 else 0.0
+            sharpe = (mean_R / std_R) if std_R > 0 else 0.0
             gw = float(g.loc[g["net_pnl"] > 0, "net_pnl"].sum())
             gl = float(-g.loc[g["net_pnl"] < 0, "net_pnl"].sum())
-            rows.append({
+            per_alpha_returns[str(alpha_name)] = r
+            per_alpha_basics.append({
                 "alpha_name": alpha_name,
                 "trades": n,
                 "win": float((g["net_pnl"] > 0).mean()),
@@ -393,7 +413,24 @@ class ArsenalEvaluator:
                 "ci95_hi": mean_R + 1.96 * se,
                 "PF": (gw / gl) if gl > 0 else float("inf"),
                 "avg_cost_inr": float(g["cost_inr"].mean()) if n else 0.0,
+                "sharpe": sharpe,
+                "_returns": r,
             })
+
+        # Second pass: PSR (each alpha vs 0) and DSR (each alpha vs
+        # the max-of-N-trials null built from THIS registry's Sharpes).
+        all_sharpes = [b["sharpe"] for b in per_alpha_basics]
+        rows = []
+        for b in per_alpha_basics:
+            r = b.pop("_returns")
+            psr = probabilistic_sharpe(r) if len(r) >= 3 else float("nan")
+            dsr = (
+                deflated_sharpe(r, all_sharpes) if len(r) >= 3 and len(all_sharpes) >= 2
+                else psr
+            )
+            b["psr"] = psr
+            b["dsr"] = dsr
+            rows.append(b)
         return pd.DataFrame(rows).sort_values("mean_R", ascending=False).reset_index(drop=True)
 
     @staticmethod

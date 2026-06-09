@@ -168,13 +168,19 @@ def _signal_executor(alpha: Alpha, signals: Sequence[AlphaSignal],
 
 def time_shuffle_null(alpha: Alpha, report,
                       config: Optional[EvaluatorConfig] = None,
-                      n_trials: int = 100, seed: int = 17,
+                      n_trials: int = 1000, seed: int = 17,
                       atr_period: int = 14,
                       extras: Optional[dict] = None,
                       ) -> NullResult:
     """Permutation null: scramble signal decision indices within each
     asset's bar range, re-execute, measure mean R per trial. Returns the
-    one-sided p-value vs the actual alpha's mean R."""
+    one-sided p-value vs the actual alpha's mean R.
+
+    Default ``n_trials=1000``. With fewer trials the minimum reportable
+    p-value floors at 1/N — at N=100 you can't distinguish a real edge
+    with p~0.001 from random with p~0.01. 1000 is the entry bar for an
+    audited probability product; 10000 is publication-quality.
+    """
     config = config or EvaluatorConfig()
     extras = extras or {}
     actual_signals = collect_signals_per_asset(alpha, report, atr_period, extras)
@@ -220,7 +226,7 @@ def time_shuffle_null(alpha: Alpha, report,
 
 def sign_flip_null(alpha: Alpha, report,
                    config: Optional[EvaluatorConfig] = None,
-                   n_trials: int = 50, flip_fraction: float = 0.50,
+                   n_trials: int = 1000, flip_fraction: float = 0.50,
                    seed: int = 23, atr_period: int = 14,
                    extras: Optional[dict] = None,
                    ) -> NullResult:
