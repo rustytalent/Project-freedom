@@ -78,7 +78,12 @@ class LGBMRegressorWrapper:
         import lightgbm as lgb
 
         y_arr = np.asarray(y, dtype=float)
-        mask = np.isfinite(y_arr) & X.notna().all(axis=1).to_numpy()
+        # Require finite TARGETS only. NaN features are fine —
+        # LightGBM handles missing values natively, and several
+        # callers (regret model especially) have wide feature sets
+        # where most context keys are absent per event kind. Rows
+        # that are ENTIRELY NaN carry no signal and are dropped.
+        mask = np.isfinite(y_arr) & X.notna().any(axis=1).to_numpy()
         X, y_arr = X.loc[mask], y_arr[mask]
         if weight is not None:
             weight = np.asarray(weight, dtype=float)[mask]
