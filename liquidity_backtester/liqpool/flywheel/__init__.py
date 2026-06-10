@@ -27,6 +27,13 @@ from .reaction_archetypes import ReactionArchetypeModel
 from .bucket_aging import BucketAgingModel
 from .cross_asset import CrossAssetTransferMatrix
 from .brief_meta_calibrator import BriefConfidenceMetaCalibrator
+from .hub import FlywheelHub
+from .extractors import (
+    bucket_aging_history_from_joined,
+    co_occurrences_from_report,
+    detector_outcomes_from_report,
+    reaction_paths_from_report,
+)
 
 __all__ = [
     "RegretEstimator",
@@ -36,4 +43,9 @@ __all__ = [
     "BucketAgingModel",
     "CrossAssetTransferMatrix",
     "BriefConfidenceMetaCalibrator",
+    "FlywheelHub",
+    "bucket_aging_history_from_joined",
+    "co_occurrences_from_report",
+    "detector_outcomes_from_report",
+    "reaction_paths_from_report",
 ]

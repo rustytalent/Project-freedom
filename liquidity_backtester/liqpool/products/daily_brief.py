@@ -733,6 +733,7 @@ def generate_brief(report: Any,
                    feature_version: str = "42_features_v3",
                    outcome_log_writer: Optional[OutcomeLogWriter] = None,
                    shadow_log_writer: Optional[ShadowLogger] = None,
+                   flywheel_hub: Optional[Any] = None,
                    index_data: Optional[Dict[str, Dict[str, Any]]] = None,
                    retrospective: bool = False,
                    publish_to_website: bool = False,
@@ -836,6 +837,29 @@ def generate_brief(report: Any,
         predictions = _gather_active_pool_predictions(report)
     except Exception:
         predictions = []
+
+    # Flywheel pathway: the M.10 meta-calibrator recalibrates the
+    # published probabilities from the outcome log's recent history
+    # BEFORE the watchlist threshold sees them — so a drifting head's
+    # overconfidence is corrected at the same gate that selects what
+    # the customer reads. Rank-preserving (watchlist ordering is
+    # unchanged), bounded, and disclosed in the confidence notes
+    # below. An absent/unfit hub is a no-op.
+    _meta_temp_applied: Optional[float] = None
+    if flywheel_hub is not None:
+        try:
+            for rec in predictions:
+                rec["p_long"] = flywheel_hub.adjust_probability(
+                    "proximity", float(rec.get("p_long", 0.0)))
+                rec["p_short"] = flywheel_hub.adjust_probability(
+                    "proximity", float(rec.get("p_short", 0.0)))
+            t = float(flywheel_hub.meta_calibrator.applied_temperature(
+                "proximity"))
+            if abs(t - 1.0) > 1e-9:
+                _meta_temp_applied = t
+        except Exception:
+            _meta_temp_applied = None
+
     watchlist = _watchlist_block(predictions, sector_regime)
     key_zones = _key_zones_block(predictions)
     avoid_list = _avoid_list_block(report, predictions, sector_regime, watchlist)
@@ -906,6 +930,19 @@ def generate_brief(report: Any,
             drift_reason={}, overall_brief_confidence="unknown",
             operator_note="confidence_notes_unavailable",
         )
+
+    # Flywheel disclosure: when the meta-calibrator adjusted today's
+    # probabilities, the brief SAYS so. Silent recalibration would
+    # undermine the audit contract the product is built on.
+    if _meta_temp_applied is not None:
+        note = (
+            f"probabilities recalibrated from recent outcome history "
+            f"(temperature {_meta_temp_applied:.2f} applied to proximity)"
+        )
+        if confidence_notes.operator_note:
+            confidence_notes.operator_note += "; " + note
+        else:
+            confidence_notes.operator_note = note
 
     # Index regime stays a stub block per-index until index OHLCV is
     # wired into the bundle. When index_data carries it, the per-index

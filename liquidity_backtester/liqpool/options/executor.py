@@ -65,29 +65,68 @@ BROKER_OUTAGE_KILL_SECONDS: float = 60.0
 class PreTradeDecision:
     """Output of the pre-trade gate. ``side_thesis`` is what direction
     the executor recommends the position be opened on (``buy`` or
-    ``sell``) — derived from sign(LCS). ``None`` when SKIP."""
+    ``sell``) — derived from sign(LCS). ``None`` when SKIP.
+
+    ``regret_advisory`` — when a trained M.4 regret estimator is
+    supplied to ``pre_trade_decision``, SKIP/WAIT decisions carry
+    P(regret | this context). ADVISORY ONLY at v1: it never changes
+    the action (that requires Gate-2-style validation), but the
+    operator sees which declines the flywheel thinks are mistakes,
+    and the value is logged with the shadow event so the threshold
+    debate is fought with data."""
     action: str                     # "ENTER" | "WAIT" | "SKIP"
     reason: str
     lcs: float
     side_thesis: Optional[str]
+    regret_advisory: Optional[float] = None
 
 
-def pre_trade_decision(ccv: CCV) -> PreTradeDecision:
+def pre_trade_decision(ccv: CCV,
+                       regret_model: Any = None) -> PreTradeDecision:
     """Bootstrap rule from §3.5 of the executor doc.
 
     No model-derived threshold at v1. Once enough trades have been
     observed to fit the force-entry classifier, the threshold becomes
     data-driven; this function is the structural fallback when the
     classifier hasn't been trained yet for this bucket.
+
+    ``regret_model`` — optional trained M.4 RegretEstimator. When
+    supplied, SKIP/WAIT decisions carry an advisory P(regret); the
+    action itself is unchanged (see PreTradeDecision docstring).
     """
     lcs = ccv.lcs
+
+    def _advise(decision: PreTradeDecision) -> PreTradeDecision:
+        if regret_model is None or decision.action == "ENTER":
+            return decision
+        try:
+            if not getattr(regret_model, "is_fitted", False):
+                return decision
+            kind = ("macro_gate_closed"
+                    if decision.reason.startswith("macro_gate_closed")
+                    else "skip_options_executor")
+            decision.regret_advisory = float(regret_model.predict_regret(
+                kind, {
+                    "lcs": lcs,
+                    "macro_score": ccv.macro_score,
+                    "regime_score": ccv.regime_score,
+                    "options_score": ccv.options_score,
+                    "micro_organic_score": ccv.micro_organic_score,
+                    "pool_holding_strength": ccv.pool_holding_strength,
+                    "manipulation_score": ccv.manipulation_score,
+                },
+            ))
+        except Exception:
+            pass
+        return decision
+
     if abs(ccv.macro_score) < MACRO_GATE_THRESHOLD:
-        return PreTradeDecision(
+        return _advise(PreTradeDecision(
             action="SKIP",
             reason="macro_gate_closed_no_possibility_space",
             lcs=lcs,
             side_thesis=None,
-        )
+        ))
     if abs(lcs) >= FORCE_ENTRY_THRESHOLD:
         return PreTradeDecision(
             action="ENTER",
@@ -96,18 +135,18 @@ def pre_trade_decision(ccv: CCV) -> PreTradeDecision:
             side_thesis="buy" if lcs > 0 else "sell",
         )
     if abs(lcs) > WAIT_THRESHOLD:
-        return PreTradeDecision(
+        return _advise(PreTradeDecision(
             action="WAIT",
             reason="lcs_in_wait_band",
             lcs=lcs,
             side_thesis=None,
-        )
-    return PreTradeDecision(
+        ))
+    return _advise(PreTradeDecision(
         action="SKIP",
         reason="lcs_below_signal_floor",
         lcs=lcs,
         side_thesis=None,
-    )
+    ))
 
 
 def record_pre_trade_skip_shadow(

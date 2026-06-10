@@ -69,6 +69,11 @@ class DriftReport:
     alerts: List[Dict] = field(default_factory=list)
     feature_importance_corr: Optional[float] = None
     overall_status: str = "OK"     # "OK" | "WARNING" | "DRIFT_DETECTED"
+    # M.6 flywheel pathway: P(a drift alert fires within the next few
+    # runs | metric trajectory). Set by attach_imminence(); None when
+    # no trained DriftImminentModel was supplied. Advisory — the
+    # absolute-threshold alerts above remain the alarm of record.
+    imminence: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +228,27 @@ def save_baseline(metrics: DriftMetrics, path: Path | str) -> None:
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
+
+def attach_imminence(report: DriftReport,
+                     imminence_model: Any,
+                     metric_history: "pd.DataFrame") -> DriftReport:
+    """Flywheel pathway (M.6): score the latest metric trajectory and
+    attach P(drift within horizon) to the report. The static alerts
+    fire AFTER calibration degrades; the imminence score warns while
+    the trajectory is still forming. Defensive: unfit model, empty
+    history, or scorer exceptions leave imminence as None — drift
+    monitoring never depends on the flywheel being healthy."""
+    try:
+        if (imminence_model is not None
+                and getattr(imminence_model, "is_fitted", False)
+                and metric_history is not None
+                and not metric_history.empty):
+            report.imminence = float(
+                imminence_model.predict_imminence(metric_history))
+    except Exception:
+        report.imminence = None
+    return report
+
 
 def record_drift_alerts_to_shadow(
     writer: Any,
