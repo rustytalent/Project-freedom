@@ -561,6 +561,47 @@ line until live outcomes accumulate.
 
 ---
 
+### Stream Q — Market valuation state + gap-behaviour model
+
+**Layers**: L1 + L2 + L6
+**Owner**: design captured; build queued behind index OHLCV
+**Depends on**: index OHLCV (T3.5), F&O bhavcopy ingest, FII/DII flows
+**Status**: 📐 SPEC DONE — `docs/valuation_state_spec.md`
+**Origin**: founder's "compressible bubble" / insider-footprint thesis
+from live pre-market gap trading, 2026-06.
+**Scope**: a latent fair-value state (anchored at arbitrary X) over
+nested year/month/day frames built from orthogonal channels (breadth,
+flows, macro pressure, futures basis — NOT price alone), feeding a
+gap-behaviour head: P(gap fades | valuation-state, gap context). The
+existing `is_gap_up_trap_fade` features are its primitive ancestor.
+Upgrades the options CCV macro layer as a side effect.
+**Acceptance gates**: Q1 anti-circularity (full state beats price-only
+ablation by ≥0.03 AUC), Q2 calibration ≤0.10, Q3 economic (gap-fade
+alpha DSR > 0.90 through the arsenal). See spec §4.
+
+---
+
+### Stream R — Delta-implied limit probe + move-magnitude calibrator
+
+**Layers**: L2 + L4 + L5
+**Owner**: design captured; build queued behind options Greeks intraday
+**Depends on**: per-strike premium + Greeks time series, K.2 fill model
+**Status**: 📐 SPEC DONE — `docs/delta_limit_probe_spec.md`
+**Origin**: founder's live options entry method, 2026-06.
+**Scope**: convert a directional view into a Greeks-implied target
+premium and place a limit there — the order IS a falsifiable
+experiment the exchange scores for free (fill = right, gap-to-fill =
+magnitude error). New shadow event kind `delta_limit_probe` rides the
+existing Stream L collector/replay. Trains M.11 MoveMagnitudeCalibrator,
+turning direction-strong/magnitude-weak heads into magnitude-calibrated
+ones from free labels. Includes the gamma convexity correction the
+founder's first-order delta*move estimate omits.
+**Acceptance gates**: R1 IV/delta/vega attribution ≥80% (the make-or-
+break — fills must be price-driven not vol-driven), R2 magnitude
+calibration ≤0.15 ATR, R3 sizing lift ≥0.10 R. See spec §5.
+
+---
+
 ## §4. The Decision Tree
 
 The original plan as a tree. Each branch annotated with status. When we
