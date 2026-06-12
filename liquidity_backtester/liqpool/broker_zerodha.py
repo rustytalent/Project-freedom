@@ -221,6 +221,37 @@ class ZerodhaBroker:
                           **order_summary},
         )
 
+    def place_market_order(self, *, tradingsymbol: str, side: str, quantity: int,
+                            exchange: Optional[str] = None,
+                            confirm: bool = False) -> OrderResult:
+        """Plain MARKET order. The trailing-stop bot's exit path: when the
+        trail cushion fires, this is what lifts/dumps the position
+        immediately. ``side`` is the EXIT side ("SELL" to exit a long
+        option, "BUY" to exit a short option). ``confirm=True`` is
+        required to actually send; otherwise simulated."""
+        exchange = exchange or self.config.exchange_default
+        summary = {"tradingsymbol": tradingsymbol, "exchange": exchange,
+                    "side": side, "quantity": quantity,
+                    "product": self.config.product, "order_type": "MARKET"}
+        if self.config.dry_run or not confirm:
+            sim_id = f"SIM-MKT-{int(time.time() * 1000)}"
+            print(f"[zerodha] SIMULATED MARKET: {summary}")
+            return OrderResult(sim_id, "simulated", dry_run=True, raw_response=summary)
+        try:
+            kite = self._conn()
+            resp = kite.place_order(
+                variety=self.config.variety, exchange=exchange,
+                tradingsymbol=tradingsymbol, transaction_type=side,
+                quantity=int(quantity), product=self.config.product,
+                order_type="MARKET",
+            )
+            oid = resp if isinstance(resp, str) else resp.get("order_id", "")
+            return OrderResult(oid, "submitted", dry_run=False,
+                                raw_response={**summary, "order_id": oid})
+        except Exception as e:
+            return OrderResult("", "rejected", dry_run=False, error=str(e),
+                                raw_response=summary)
+
     def place_stop_loss(self, *, tradingsymbol: str, side: str, quantity: int,
                          trigger_price: float, exchange: Optional[str] = None,
                          confirm: bool = False) -> OrderResult:
