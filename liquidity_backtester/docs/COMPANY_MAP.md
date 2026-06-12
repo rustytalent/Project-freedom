@@ -6,8 +6,9 @@ genuinely changes; everything tactical lives in `COORDINATION.md`.
 
 ## What this is
 
-A market-intelligence operating system for NSE Indian equities and (soon)
-index options. **One engine answering one question at multiple horizons.**
+A market-intelligence operating system for NSE Indian equities and,
+after the historical data gap is closed, index options. **One engine
+answering one question at multiple horizons.**
 
 The engine: a calibrated probability that price will reach a level L within
 a time horizon T, conditioned on rich market context.
@@ -15,7 +16,8 @@ a time horizon T, conditioned on rich market context.
 The question changes only its (L, T) parameters:
 - **Swing** — large T (days–weeks), L = structural pools.
 - **Intraday MIS** — small T (minutes–hours), L = same-session pools.
-- **Index options** — T = expiry, L = the strike grid.
+- **Index options** — T = expiry, L = the strike grid, deferred until
+  historical intraday option OHLCV bars exist.
 
 This framing is load-bearing. We do not build three separate strategy
 systems. We build one engine and three presentation layers.
@@ -45,9 +47,9 @@ because other quants face the same necessity.
 
 | Horizon | Question | Customer | Status |
 |---------|----------|----------|--------|
-| Swing (days–weeks) | "Will price reach L by end-of-week?" | Positional + option-buy-and-hold | Engine ready; presentation layer not built |
-| Intraday MIS (minutes–hours) | "Will price reach L same-session?" | Day-traders + intraday algo | Engine + MIS labels + ProximityFilteredPoolAlpha built |
-| Index options (T = expiry, L = strike) | "Will Nifty/BankNifty test strike K before expiry?" | Our actual customer pool today | Engine ready; presentation layer not built — **this is the next product** |
+| Equity Daily Brief (minutes–hours) | "Which equities are likely to test important levels today, and when should we stand aside?" | Active equity traders + research subscribers | Built; active commercial vertical |
+| Swing (days–weeks) | "Will price reach L by end-of-week?" | Positional equity traders | Engine ready; presentation layer next |
+| Index options (T = expiry, L = strike) | "Will Nifty/BankNifty test strike K before expiry?" | Future options customers | Methodology ready; blocked by missing historical option OHLCV |
 
 ## Commercial layer — three revenue lines, sequenced
 
@@ -111,8 +113,10 @@ separately or bundled.
 - No mobile app, no public community, no copy-trading, no signal room.
 - No new alpha modules until the daily brief deliverable is live and
   paying customers exist.
-- No simultaneous building of all three horizon products. Pick one
-  (options first, given the customer pool), ship, then expand.
+- No simultaneous building of all three horizon products. Pick one,
+  ship, then expand. Current pick: equity research product first,
+  swing equity second, options after the option-bar warehouse is funded
+  or built.
 
 ## Update protocol for this document
 

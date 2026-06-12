@@ -25,6 +25,20 @@ Append-only log of decisions. One line each.
 Format: `YYYY-MM-DD [agent] commit_sha — decision`
 
 ```
+2026-06-12 [codex] (this) — EQUITY-VERTICAL-ACTIVE:
+                            historical options Gate-1 failed because
+                            the warehouse has Greeks and current active
+                            option contracts, but not historical
+                            intraday option OHLCV across old expiries.
+                            Options remain a future vertical. Equity is
+                            now the active commercial vertical using
+                            the owned core25 equity data, Daily Brief,
+                            outcome log, customer delivery pack, and
+                            the planned swing extension. Added
+                            docs/equity_strategy_methodology.md and
+                            updated MASTER_PLAN / COMPANY_MAP to stop
+                            future sessions from treating options as
+                            runnable without the missing data.
 2026-06-08 [codex] (this) — WEBSITE-RAZORPAY-READY:
                             production Razorpay flow wired for the
                             customer website. Checkout now uses

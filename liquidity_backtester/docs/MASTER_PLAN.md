@@ -61,14 +61,15 @@ still pending. Engine→website artifact pipeline plumbed
 fire-and-forget brief auto-publish hook in `generate_brief()`. See
 Deviation D10 and `website/docs/production_launch_steps.md`.
 
-**Current strategic focus (added 2026-06-09):** options vertical is
-now the top-priority commercial wedge per Deviation D11. The full
-methodology — feature stack, model heads per (side × tenor × ToD),
-the rule-based executor layer that is the actual moat, audit
-calibration, and four acceptance gates — is committed at
-`docs/options_strategy_methodology.md`. Implementation sub-streams
-D.1-D.8 are opened in §3. Streams E (live broker) and F (swing) move
-BEHIND options until at least Gate 3 ships.
+**Current strategic focus (updated 2026-06-12):** equity is the active
+commercial vertical because it is the dataset we actually own end to
+end. Options remain strategically correct but are deferred until
+historical option intraday OHLCV bars exist across old expiries. The
+full equity methodology is committed at
+`docs/equity_strategy_methodology.md`. The customer-facing priority is
+therefore: equity Daily Brief + outcome log + delivery pack first,
+equity swing vertical next, options after the missing option-bar data
+gap is closed.
 
 ---
 
@@ -100,7 +101,7 @@ report generation).
 |---|---|---|---|
 | Swing (days–weeks) | "Will price reach L by end-of-week?" | Positional, option-buyers | Engine ready; presentation not built |
 | Intraday MIS (minutes–hours) | "Will price reach L same-session?" | Day-traders | Engine + brief built |
-| Index options (T = expiry, L = strike) | "Will Nifty/BankNifty test strike K before expiry?" | Our pilot customers | Engine ready; level-to-strike translator built; Greeks dataset ready |
+| Index options (T = expiry, L = strike) | "Will Nifty/BankNifty test strike K before expiry?" | Future options customers | Methodology ready; historical intraday option OHLCV missing, so model training is deferred |
 
 ### The Eight Parallel Streams (§3 has the detail)
 
@@ -109,9 +110,9 @@ report generation).
 | **A** | Rupee-sizing experiment | L4 | Codex | ✅ done — failed to resurrect post-touch |
 | **B** | Audit-patch branch hygiene | L0–L5 | Codex + user | ✅ RESOLVED — pushed/reconciled at `ab7d57d` |
 | **C** | Detector batch v1 (liquidity sweep, stop-run-reclaim, etc.) | L1 | Opus | ✅ done; importance verification on next retrain |
-| **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
+| **D** | Options vertical slice (Greeks features → model → brief) | L1+L2+L6 | Opus design, Codex training | design done; deferred until historical option OHLCV exists |
 | **E** | Live broker hardening (order state machine) | L4 | Codex | partially hardened; full order lifecycle still queued |
-| **F** | Swing vertical slice (proximity at 5d/10d/20d + swing brief) | L2+L6 | Opus design, Codex training | design done; training now unblocked/queued |
+| **F** | Equity vertical slice (Daily Brief now; swing 5d/10d/20d next) | L2+L6 | Codex training + product wiring | active commercial vertical; methodology in `docs/equity_strategy_methodology.md` |
 | **G** | Yesterday-Audit retrospective flag | L5+L6 | Opus | ✅ done |
 | **H** | Distribution + first 3 customers | L7 | User | unblocked, independent |
 
@@ -368,27 +369,30 @@ verification deferred to next post-B retrain.
 
 ---
 
-### Stream D — Options vertical (the top-priority commercial wedge)
+### Stream D — Options vertical (deferred until historical option bars exist)
 
 **Layers**: L1 + L2 + L4 + L5 + L6
 **Owner**: Opus (design + executor); Codex (data, training, brief wiring)
 **Depends on**:
 - Warehouse Greeks parquet ✅ have it
+- Historical option intraday OHLCV across old expiries ❌ missing
 - Stream B resolved ✅
 - Warehouse reader ✅ shipped
 - Outcome log ✅ shipped (Stream G)
 **During chokepoint?**: N/A — chokepoint resolved
-**Status**: full strategy methodology ✅ DONE
-(`docs/options_strategy_methodology.md`); implementation streams D.1-D.8
-opened with explicit acceptance gates
-**Why this is now top priority**: equity-MIS post-touch was empirically
-closed at -0.4R net under user's actual sizing discipline (D5). The
-proximity head was correct (AUC 0.92-0.95); equity cost arithmetic
-killed the trade. Options invert that arithmetic — same prediction
-edge on an instrument where cost-to-target ratio drops from 17x to
-~0.5x. Concrete arithmetic in `§9` of the methodology doc.
+**Status**: methodology ✅ DONE
+(`docs/options_strategy_methodology.md`); implementation deferred.
+Gate-1 cannot honestly run until the warehouse contains historical
+option intraday OHLCV bars, not only daily Greeks and current active
+contracts.
+**Why this remains strategically correct but not current**: equity-MIS
+post-touch was empirically closed at -0.4R net under user's actual
+sizing discipline (D5). The proximity head was correct, but intraday
+cash-equity friction killed the trade. Options can still invert that
+arithmetic. The missing piece is data coverage, so options stays as a
+future vertical while equity becomes the active commercial product.
 
-**Sub-streams** (each with acceptance, ETA in the methodology doc):
+**Sub-streams** (parked until option OHLCV exists):
 - **D.1** — Feature joining (per-strike featurizer using
   `align_daily_to_intraday`). 1 commit.
 - **D.2** — Label generation (`realized_premium_atr_units_60min` per
@@ -439,7 +443,8 @@ edge on an instrument where cost-to-target ratio drops from 17x to
 - **D.8** — Live broker hardening for options. Deferred until first
   customer demand; 3 commits post-revenue.
 
-**Acceptance gates** (also in the methodology doc §11):
+**Acceptance gates** (also in the methodology doc §11; cannot be run
+until option-bar coverage exists):
 1. **Gate 1** — at least one head has Spearman > 0.10 + top-decile
    realized R > 0 + calibration error ≤ 0.15 across VIX deciles. If
    fail, options vertical pauses; we re-evaluate D.1 features.
@@ -452,10 +457,8 @@ edge on an instrument where cost-to-target ratio drops from 17x to
    ±0.15 ATR of OOS calibration error. Net realized R of executor's
    ENTER paths positive on ≥ 50 live trades.
 
-**ETA**: D.1-D.7 = 11 commits. At current velocity (~3 substantial
-commits per session), that's ~4 working sessions to Gate 3 if
-the data path is clean. Gate 4 is 30 trading days of paper / pilot
-data after Gate 3.
+**ETA**: no active ETA. First action is data acquisition or historical
+option-bar warehouse construction. After that, D.1-D.7 can resume.
 
 ---
 
@@ -895,6 +898,12 @@ ROOT — Build a market-intelligence operating system
 
 ### Deviation D11 — Options promoted from "design ready" to top-priority commercial wedge
 
+**Status**: SUPERSEDED by D16. The cost-arithmetic reasoning remains
+valid, but the data path was later proven incomplete: the warehouse had
+daily Greeks and current active contracts, not historical intraday option
+OHLCV across old expiries. Options is therefore deferred until that data
+gap is closed.
+
 - **Branch from**: Stream D scoped as "design done; training queued
   post-Stream-B" in D10's planning context; treated as a parallel
   effort to Streams D/F training equally.
@@ -939,10 +948,10 @@ ROOT — Build a market-intelligence operating system
   wrong (v2 widens), executor rules might be over-fit to backtest
   (SKIP counter-factual at Gate 2 catches this). Each named so we
   don't drift into denial.
-- **Downstream**: every commit between now and Gate 3 belongs to
-  D.1-D.7. Streams F (swing) and E (live broker) move BEHIND options.
-  The website is fine as it stands; further website polish is on
-  hold until first paying options pilot is reading briefs.
+- **Downstream**: SUPERSEDED by D16. The old plan assigned every commit
+  through Gate 3 to D.1-D.7 and moved swing/live-broker work behind
+  options. That is no longer active because the option-bar warehouse is
+  incomplete. Equity delivery and equity swing now move first.
 - **Status**: ADOPTED. Methodology doc shipped this commit. D.1
   is the next implementation step.
 
@@ -1024,6 +1033,37 @@ ROOT — Build a market-intelligence operating system
 - **Status**: ADOPTED. CCV + DAG + LightGBM constraints shipped
   this commit. D.1 (featurizer) still the next implementation
   step; D.5 now has 5 commits to ship.
+
+### Deviation D16 — Equity becomes the active commercial vertical; options deferred by data coverage
+
+- **Branch from**: D11 promoted options because the trade economics are
+  structurally better than cash-equity MIS.
+- **Trigger**: 2026-06-12. Options Gate-1 smoke on the VPS loaded spot
+  bars, daily Greeks, and macro, but every historical expiry returned
+  "no option bars" and the trainer aborted with "no labelled data".
+  Warehouse inspection showed `options_active/` contains current active
+  contracts around 2026-06-30, while `model_options_with_greeks/`
+  contains historical daily Greeks. That is not enough to train realized
+  intraday premium labels.
+- **Finding**: options remains the right future instrument, but it is
+  not runnable today without either buying historical intraday NFO
+  option OHLCV or building that warehouse forward from Kite instrument
+  snapshots. Equity is the only end-to-end owned dataset right now.
+- **Plan-change**:
+  - Add `docs/equity_strategy_methodology.md` as the active vertical
+    methodology.
+  - Add `docs/equity_vertical_runbook.md` for predict, pack, and
+    outcome-log operations.
+  - Update §0, §1, and Stream D/F status so future agents do not rerun
+    options Gate-1 against missing bars.
+  - Customer priority becomes equity Daily Brief + outcome log +
+    customer delivery pack, then equity swing, then options after the
+    option-bar gap is funded or built.
+- **Downstream**: website copy, pricing, customer delivery, and brief
+  packaging should be equity-first. Options can be listed as future /
+  coming soon, not sold as current model-backed output.
+- **Status**: ADOPTED. Equity methodology + runbook shipped in this
+  documentation patch.
 
 ### Deviation D14 — LCS reformulated as causal cascade (geometric mean), force-entry threshold becomes learned
 
