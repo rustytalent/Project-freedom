@@ -59,6 +59,10 @@ def test_design_system_stylesheet_served(srv):
         # design tokens that downstream styling depends on
         for token in ("--amber", "--bg-0", ".panel", ".chip", ".cmdk"):
             assert token in css.text
+        # tab content panes — inactive views MUST be display:none, else
+        # all five console tabs render at once (caught by a live screenshot)
+        assert ".view{" in css.text or ".view {" in css.text
+        assert "display: none" in css.text and ".view.on" in css.text
         # both pages link it
         for path in ("/", "/console"):
             page = c.get(path).text

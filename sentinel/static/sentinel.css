@@ -358,6 +358,10 @@ kbd{
 .tabs .tab:hover{ color: var(--fg); }
 .tabs .tab.on{ color: var(--amber); border-bottom-color: var(--amber); font-weight: 500; }
 
+/* tab content panes — only the active one shows */
+.view{ display: none; }
+.view.on{ display: block; }
+
 /* scrollbar — subtle */
 ::-webkit-scrollbar{ width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb{ background: var(--bg-3); border-radius: 8px; }
