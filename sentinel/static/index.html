@@ -3,210 +3,227 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sentinel — live trading copilot</title>
-<style>
-  :root{
-    --bg:#0e0f11; --raised:#15171a; --subtle:#1b1e22; --border:#23262b;
-    --fg:#e8e6e1; --muted:#9da0a6; --dim:#5e6168;
-    --steel:#7c9bb8; --bronze:#b79268; --bronze-glow:#d4b68a;
-    --green:#7da982; --red:#c66b5c;
-  }
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.55 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
-  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
-  header{display:flex;align-items:center;gap:18px;padding:10px 20px;
-    border-bottom:1px solid var(--border);background:rgba(14,15,17,.9);
-    position:sticky;top:0;z-index:5;backdrop-filter:blur(8px)}
-  header .brand{display:flex;align-items:center;gap:9px;font-weight:600}
-  .reticle{width:13px;height:13px;border:1px solid var(--bronze);border-radius:50%;position:relative}
-  .reticle:before,.reticle:after{content:"";position:absolute;background:var(--bronze)}
-  .reticle:before{left:50%;top:-3px;bottom:-3px;width:1px;transform:translateX(-50%)}
-  .reticle:after{top:50%;left:-3px;right:-3px;height:1px;transform:translateY(-50%)}
-  .chip{font-size:11px;letter-spacing:.12em;text-transform:uppercase;
-    padding:2px 9px;border:1px solid var(--border);border-radius:3px;color:var(--muted)}
-  .chip.live{color:var(--green);border-color:rgba(125,169,130,.4)}
-  .chip.demo{color:var(--bronze-glow);border-color:rgba(183,146,104,.45)}
-  .chip.dry{color:var(--steel)}
-  .chip.killed{color:var(--red);border-color:rgba(198,107,92,.5)}
-  header .kpis{display:flex;gap:26px;margin-left:auto;align-items:center}
-  .kpi .l{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
-  .kpi .v{font-size:17px}
-  .pos{color:var(--green)} .neg{color:var(--red)}
-  button{background:var(--subtle);border:1px solid var(--border);color:var(--fg);
-    padding:5px 12px;border-radius:3px;cursor:pointer;font:inherit;font-size:12.5px}
-  button:hover{border-color:var(--bronze)} button.primary{background:var(--steel);color:#0e0f11;border:0}
-  button.danger{background:transparent;border-color:rgba(198,107,92,.5);color:var(--red)}
-  input,select{background:var(--bg);border:1px solid var(--border);color:var(--fg);
-    padding:5px 8px;border-radius:3px;font:inherit;font-size:12.5px;width:90px}
-  main{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;padding:14px 20px;max-width:1700px;margin:0 auto}
-  @media(max-width:1100px){main{grid-template-columns:1fr}}
-  section{background:var(--raised);border:1px solid var(--border);border-radius:4px;overflow:hidden}
-  section>h2{margin:0;padding:9px 14px;font-size:11px;letter-spacing:.16em;
-    text-transform:uppercase;color:var(--muted);font-weight:600;
-    border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-  section>h2 .right{margin-left:auto;display:flex;gap:8px;align-items:center;font-weight:400}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
-    text-align:right;padding:7px 10px;border-bottom:1px solid var(--border);font-weight:500}
-  th:first-child,td:first-child{text-align:left}
-  td{padding:7px 10px;border-bottom:1px solid rgba(35,38,43,.55);text-align:right}
-  tr:hover td{background:rgba(124,155,184,.04)}
-  .col2{display:flex;flex-direction:column;gap:14px}
-  .pad{padding:12px 14px}
-  .sug{padding:10px 14px;border-bottom:1px solid rgba(35,38,43,.55)}
-  .sug .act{font-size:10px;letter-spacing:.12em;padding:1px 7px;border-radius:2px;margin-right:8px}
-  .ARM_TRAIL{background:rgba(124,155,184,.15);color:var(--steel)}
-  .CLOSE{background:rgba(198,107,92,.15);color:var(--red)}
-  .TIGHTEN{background:rgba(183,146,104,.18);color:var(--bronze-glow)}
-  .WARN{background:rgba(94,97,104,.25);color:var(--muted)}
-  .muted-tag{color:var(--dim);font-size:11px;font-style:italic}
-  .hr{font-size:11px;color:var(--dim)}
-  svg text{fill:var(--dim);font-size:10px;font-family:ui-monospace,monospace}
-  .log{font-family:ui-monospace,monospace;font-size:11.5px;max-height:220px;overflow-y:auto}
-  .log div{padding:3px 14px;border-bottom:1px solid rgba(35,38,43,.4);color:var(--muted)}
-  .log .t{color:var(--dim);margin-right:8px}
-  .note{padding:8px 14px;font-size:11.5px;color:var(--dim);border-top:1px solid var(--border)}
-  .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .lockcell{background:var(--raised);padding:10px 12px}
-  .lockcell .l{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
-  .lockcell .v{font-size:18px;margin-top:2px}
-</style>
+<title>Sentinel · Cockpit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/sentinel.css">
 </head>
 <body>
-<header>
-  <div class="brand"><span class="reticle"></span> Sentinel</div>
-  <span id="mode" class="chip">connecting…</span>
-  <span id="killchip" style="display:none" class="chip killed">KILLED</span>
+
+<!-- ───────────── TOP BAR ───────────── -->
+<header class="topbar">
+  <div class="brand"><span class="mark"></span> Sentinel <span class="sub">Cockpit</span></div>
+  <nav class="topnav">
+    <a class="on" href="/">Cockpit</a>
+    <a href="/console">Console</a>
+  </nav>
+  <span id="mode" class="chip">connecting</span>
+  <span id="mktchip" class="chip closed"><span class="dot"></span> NSE</span>
+  <span id="killchip" class="chip killed" style="display:none">KILLED</span>
+
   <div class="kpis">
-    <div class="kpi"><div class="l">Cash</div><div class="v mono" id="cash">—</div></div>
-    <div class="kpi"><div class="l">Utilised</div><div class="v mono" id="util">—</div></div>
-    <div class="kpi"><div class="l">Day P&L</div><div class="v mono" id="pnl">—</div></div>
-    <div class="kpi"><div class="l">Peak</div><div class="v mono" id="peak">—</div></div>
-    <div class="kpi"><div class="l">Spot</div><div class="v mono" id="spot">—</div></div>
-    <button class="danger" onclick="killswitch()">KILL</button>
+    <div class="kpi"><div class="l">Cash</div><div class="v" id="cash"><span class="skel"></span></div></div>
+    <div class="kpi"><div class="l">Utilised</div><div class="v" id="util"><span class="skel"></span></div></div>
+    <div class="kpi"><div class="l">Day P&amp;L</div><div class="v lg" id="pnl"><span class="skel"></span></div></div>
+    <div class="kpi"><div class="l">Peak</div><div class="v" id="peak"><span class="skel"></span></div></div>
+    <div class="kpi"><div class="l">Spot</div><div class="v" id="spot"><span class="skel"></span></div></div>
   </div>
+  <div class="spacer"></div>
+  <div class="clock"><span class="ist">IST</span><span id="clock" class="mono">--:--:--</span></div>
+  <button class="btn danger" onclick="killswitch()" title="Cancel trails, refuse orders">KILL</button>
 </header>
-<main>
-  <div class="col2">
-    <section>
-      <h2>Positions
-        <span class="right"><span class="hr" id="updated"></span></span>
-      </h2>
-      <table id="positions"><thead><tr>
-        <th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>P&L</th>
-        <th>Peak</th><th>DD</th><th>IV</th><th>Δ</th><th>θ/day</th><th>Trail</th>
-      </tr></thead><tbody></tbody></table>
-      <div class="note">Greeks computed live from premiums (BS implied vol). θ is premium decay per calendar day.</div>
-    </section>
 
-    <section>
-      <h2>P&L vs spot — scenario curve
-        <span class="right ctl">
-          What-if move <input type="range" id="mv" min="-300" max="300" value="0" step="10" style="width:160px">
-          <span class="mono" id="mvlabel">0 pts</span>
-        </span>
-      </h2>
-      <div class="pad"><svg id="curve" width="100%" height="190" viewBox="0 0 800 190" preserveAspectRatio="none"></svg></div>
-      <table id="whatif"><thead><tr>
-        <th>Leg</th><th>Premium now</th><th>At move</th><th>Δ premium</th><th>Δ P&L</th>
-      </tr></thead><tbody></tbody></table>
-      <div class="note">Repriced at constant IV. Breakeven spots marked ◆ on the curve. IV moves with spot in reality — treat as first-order.</div>
-    </section>
+<!-- ───────────── MAIN GRID ───────────── -->
+<main class="shell">
+  <div class="grid">
+    <!-- LEFT COLUMN -->
+    <div class="col">
 
-    <section>
-      <h2>Recommendations — dip candidates
-        <span class="right ctl">
-          direction
-          <select id="dir" onchange="setDirection(this.value)">
-            <option value="auto">auto</option><option>UP</option>
-            <option>DOWN</option><option>NEUTRAL</option>
-          </select>
-          <span class="hr" id="dirnote"></span>
-        </span>
-      </h2>
-      <table id="recs"><thead><tr>
-        <th>Symbol</th><th>Type</th><th>Strike</th><th>LTP</th><th>Day high</th>
-        <th>Fall%</th><th>Dist%</th><th>Spread%</th><th>Score</th>
-      </tr></thead><tbody></tbody></table>
-      <div class="note">Spot UP → puts marked down hardest near the money. Candidates IF you expect reversion — decision support, not instructions.</div>
-    </section>
-  </div>
-
-  <div class="col2">
-    <section>
-      <h2>Profit lock — ratchet
-        <span class="right ctl">
-          keep <input id="lockratio" type="number" value="50" min="10" max="95" step="5">% of peak
-          <button class="primary" onclick="armProfitLock()">Arm</button>
-          <button onclick="cancelProfitLock()">Cancel</button>
-        </span>
-      </h2>
-      <div id="lockgrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">
-        <div class="lockcell"><div class="l">Current</div><div class="v mono" id="lk_current">—</div></div>
-        <div class="lockcell"><div class="l">Peak</div><div class="v mono" id="lk_peak">—</div></div>
-        <div class="lockcell"><div class="l">Locked ✓</div><div class="v mono pos" id="lk_locked">—</div></div>
-        <div class="lockcell"><div class="l">Floating ⚠</div><div class="v mono" id="lk_float">—</div></div>
-      </div>
-      <div class="note" id="lk_note">Locked profit ratchets up with every new peak and never falls. When P&L falls to the locked floor, everything flattens — the locked amount is realized. Fights greed: you can see exactly what you've already secured.</div>
-    </section>
-
-    <section>
-      <h2>Active trails</h2>
-      <table id="trails"><thead><tr>
-        <th>Symbol</th><th>Side</th><th>Qty</th><th>Peak</th><th>Last</th>
-        <th>Cushion</th><th></th>
-      </tr></thead><tbody></tbody></table>
-    </section>
-
-    <section>
-      <h2>Suggestions <span class="right hr" id="ledgerstat"></span></h2>
-      <div id="suggestions"></div>
-      <div class="note">Each rule carries its live hit-rate from the self-scoring ledger (T+10min resolution). Low-accuracy rules are shown MUTED, not hidden.</div>
-    </section>
-
-    <section>
-      <h2>Pairs</h2>
-      <div id="pairs" class="pad mono" style="font-size:12.5px"></div>
-    </section>
-
-    <section>
-      <h2>Trust spine — orchestrator
-        <span class="right hr"><a href="/console" style="color:var(--steel)">customer console →</a></span>
-      </h2>
-      <div id="spinegrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">
-        <div class="lockcell"><div class="l">Shadow</div><div class="v mono" id="sp_shadow">—</div></div>
-        <div class="lockcell"><div class="l">Logged</div><div class="v mono" id="sp_logged">—</div></div>
-        <div class="lockcell"><div class="l">Trusted</div><div class="v mono" id="sp_trusted">—</div></div>
-        <div class="lockcell"><div class="l">Execution</div><div class="v mono" id="sp_exec">—</div></div>
-      </div>
-      <div class="pad" style="font-size:12px">
-        <div class="hr" style="margin-bottom:5px">Source ceilings — only EXECUTION reaches the order path</div>
-        <div id="ceilings" class="mono" style="font-size:12px"></div>
-        <div class="hr" id="clampnote" style="margin-top:7px"></div>
-      </div>
-      <div class="pad" style="border-top:1px solid var(--border)">
-        <div class="ctl">
-          <span class="hr">graduate</span>
-          <input id="grad_src" placeholder="source" style="width:130px">
-          <select id="grad_tier"><option>SHADOW</option><option>LOGGED</option>
-            <option selected>TRUSTED</option></select>
-          <button onclick="graduate()">Set ceiling</button>
+      <!-- POSITIONS -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Positions</span>
+          <span class="meta" id="updated">—</span>
+          <div class="right">
+            <span class="hint">live Greeks via BS implied vol</span>
+          </div>
         </div>
-        <div id="promos" style="font-size:11.5px;margin-top:9px"></div>
-      </div>
-      <div class="note">EXECUTION is reserved for trailing_stop &amp; profit_lock. A research source can request it; the spine clamps it to SHADOW. Every graduation is logged as an auditable record.</div>
-    </section>
+        <div class="body flush">
+          <table id="positions"><thead><tr>
+            <th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>P&amp;L</th>
+            <th>Peak</th><th>DD</th><th>IV</th><th>Δ</th><th>θ/day</th><th>Trail</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </section>
 
-    <section>
-      <h2>Activity</h2>
-      <div class="log" id="log"></div>
-    </section>
+      <!-- SCENARIO CURVE -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Scenario · P&amp;L vs spot</span>
+          <div class="right row-flex">
+            <span class="hint">What-if move</span>
+            <input id="mv" type="range" min="-300" max="300" value="0" step="10">
+            <span class="mono dim-text" id="mvlabel" style="width:54px;text-align:right">0 pts</span>
+          </div>
+        </div>
+        <div class="body" style="padding:10px var(--s-3) var(--s-3)">
+          <div class="chart-wrap" style="padding:6px"><svg id="curve" width="100%" height="220" viewBox="0 0 840 220" preserveAspectRatio="none"></svg></div>
+          <table class="dense" id="whatif" style="margin-top:8px"><thead><tr>
+            <th>Leg</th><th>Premium now</th><th>At move</th><th>Δ premium</th><th>Δ P&amp;L</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div class="note">Repriced at constant IV. Diamonds mark breakeven spots; the gold curve is total book P&amp;L at expiry.</div>
+      </section>
+
+      <!-- RECOMMENDATIONS -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Recommendations · Dip Scanner</span>
+          <div class="right row-flex">
+            <span class="hint">bias</span>
+            <select id="dir" onchange="setDirection(this.value)" style="width:auto">
+              <option value="auto">auto</option><option>UP</option>
+              <option>DOWN</option><option>NEUTRAL</option>
+            </select>
+            <span class="hint" id="dirnote"></span>
+          </div>
+        </div>
+        <div class="body flush">
+          <table id="recs"><thead><tr>
+            <th>Symbol</th><th>Type</th><th>Strike</th><th>LTP</th><th>Day High</th>
+            <th>Fall</th><th>Dist</th><th>Spread</th><th>Score</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div class="note">Spot bias UP → puts marked down hardest near the money. Candidates IF you expect mean-reversion.</div>
+      </section>
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div class="col">
+
+      <!-- PROFIT LOCK -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Profit Lock · Ratchet</span>
+          <div class="right row-flex">
+            <span class="hint">keep</span>
+            <input id="lockratio" type="number" value="50" min="10" max="95" step="5" style="width:64px">
+            <span class="hint">% of peak</span>
+            <button class="btn sm primary" onclick="armProfitLock()">Arm</button>
+            <button class="btn sm ghost" onclick="cancelProfitLock()">Cancel</button>
+          </div>
+        </div>
+        <div class="cells">
+          <div class="cell"><div class="l">Current</div><div class="v" id="lk_current">—</div></div>
+          <div class="cell"><div class="l">Peak</div><div class="v" id="lk_peak">—</div></div>
+          <div class="cell"><div class="l">Locked ✓</div><div class="v pos" id="lk_locked">—</div></div>
+          <div class="cell"><div class="l">Floating ⚠</div><div class="v" id="lk_float">—</div></div>
+        </div>
+        <div class="note" id="lk_note">Not armed. The locked floor climbs with every new peak and never falls — fires when P&amp;L touches it back.</div>
+      </section>
+
+      <!-- TRUST SPINE -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Trust spine · Orchestrator</span>
+          <div class="right hint" id="clampnote"></div>
+        </div>
+        <div class="cells">
+          <div class="cell"><div class="l">SHADOW</div><div class="v" style="color:var(--violet)" id="sp_shadow">0</div></div>
+          <div class="cell"><div class="l">LOGGED</div><div class="v" id="sp_logged">0</div></div>
+          <div class="cell"><div class="l">TRUSTED</div><div class="v" style="color:var(--steel)" id="sp_trusted">0</div></div>
+          <div class="cell"><div class="l">EXECUTION</div><div class="v" style="color:var(--green)" id="sp_exec">0</div></div>
+        </div>
+        <div class="body" style="padding-bottom:6px">
+          <div class="hint" style="margin-bottom:6px">Source ceilings — only EXECUTION reaches the order path</div>
+          <div id="ceilings" style="display:grid;grid-template-columns:1fr 1fr;gap:3px var(--s-4);font-size:var(--t-md)"></div>
+        </div>
+        <div class="body" style="border-top:1px solid var(--line);padding-top:10px">
+          <div class="row-flex">
+            <span class="hint">Graduate</span>
+            <input id="grad_src" placeholder="source" style="width:130px;font-family:Inter">
+            <select id="grad_tier" style="width:auto">
+              <option>SHADOW</option><option>LOGGED</option><option selected>TRUSTED</option>
+            </select>
+            <button class="btn sm" onclick="graduate()">Set ceiling</button>
+          </div>
+          <div id="promos" style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:var(--t-sm)"></div>
+        </div>
+        <div class="note">EXECUTION is reserved for trailing_stop &amp; profit_lock. Research sources are clamped to their ceiling. Every promotion is auditable.</div>
+      </section>
+
+      <!-- ACTIVE TRAILS -->
+      <section class="panel">
+        <div class="head"><span class="title">Active Trails</span></div>
+        <div class="body flush">
+          <table id="trails"><thead><tr>
+            <th>Symbol</th><th>Side</th><th>Qty</th><th>Peak</th><th>Last</th>
+            <th>Cushion</th><th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+
+      <!-- SUGGESTIONS -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Suggestions</span>
+          <span class="right hint" id="ledgerstat"></span>
+        </div>
+        <div class="body flush" id="suggestions"></div>
+        <div class="note">Each rule carries its live hit-rate. Low-accuracy rules show <em>muted</em>, never hidden.</div>
+      </section>
+
+      <!-- PAIRS -->
+      <section class="panel">
+        <div class="head"><span class="title">Pairs</span></div>
+        <div class="body" id="pairs" style="font-family:'JetBrains Mono',monospace;font-size:var(--t-md);color:var(--fg-soft)"></div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Activity</span>
+          <span class="right hint">most recent at top</span>
+        </div>
+        <div class="body flush"><div class="feed" id="log"></div></div>
+      </section>
+
+    </div>
   </div>
 </main>
+
+<!-- ───────────── STATUS BAR ───────────── -->
+<div class="statusbar">
+  <span id="sb_mode" class="mono">—</span>
+  <span class="sep"></span>
+  <span>session <span id="sb_session" class="mono">—</span></span>
+  <span class="sep"></span>
+  <span>ledger <span id="sb_ledger" class="mono">0</span> pending</span>
+  <span class="sep"></span>
+  <span>spine <span id="sb_spine" class="mono">0</span> routed · <span id="sb_clamp" class="mono">0</span> clamped</span>
+  <div class="right">
+    <span>last <span id="sb_last" class="mono">—</span></span>
+    <span class="sep"></span>
+    <kbd>⌘</kbd><kbd>K</kbd> command · <kbd>?</kbd> help
+  </div>
+</div>
+
+<!-- ───────────── COMMAND PALETTE ───────────── -->
+<div id="cmdk_bg" class="cmdk-bg" onclick="if(event.target===this) closeCmdk()">
+  <div class="cmdk">
+    <input id="cmdk_q" placeholder="Search positions, run actions, jump to panel…" autocomplete="off">
+    <div class="results" id="cmdk_results"></div>
+  </div>
+</div>
+
 <script>
+/* ─────────── auth / api ─────────── */
 const token = localStorage.getItem("sentinel_token") || "";
-function hdrs(){ return token ? {"X-Sentinel-Token": token, "Content-Type":"application/json"}
-                              : {"Content-Type":"application/json"}; }
+function hdrs(){
+  return token ? {"X-Sentinel-Token": token, "Content-Type":"application/json"}
+               : {"Content-Type":"application/json"};
+}
 const inr = n => n==null ? "—" :
   (n<0?"-":"") + "₹" + Math.abs(Math.round(n)).toLocaleString("en-IN");
 const cls = n => n>0?"pos":(n<0?"neg":"");
@@ -221,63 +238,93 @@ async function api(path, opts={}){
   return r.json();
 }
 
+/* ─────────── clock + market hours ─────────── */
+function tickClock(){
+  const d = new Date();
+  const ist = new Date(d.getTime() + (5.5*3600 - d.getTimezoneOffset()*60)*1000);
+  document.getElementById("clock").textContent = ist.toISOString().slice(11,19);
+  // NSE F&O trading hours: 09:15 — 15:30 IST, Mon–Fri
+  const h = ist.getUTCHours(), m = ist.getUTCMinutes(), dow = ist.getUTCDay();
+  const open = (dow>=1 && dow<=5) && ((h===9 && m>=15) || (h>=10 && h<15) || (h===15 && m<=30));
+  const chip = document.getElementById("mktchip");
+  if(open){ chip.className = "chip open"; chip.innerHTML = '<span class="dot"></span> NSE OPEN'; }
+  else    { chip.className = "chip closed"; chip.innerHTML = '<span class="dot" style="background:#444;box-shadow:none"></span> NSE CLOSED'; }
+}
+setInterval(tickClock, 1000); tickClock();
+
+/* ─────────── poll + render ─────────── */
 let lastState = null;
 async function refresh(){
   try{
     const s = await api("/api/state");
     lastState = s; render(s);
+    document.getElementById("sb_last").textContent = new Date().toISOString().slice(11,19) + " UTC";
   }catch(e){ /* transient */ }
 }
 
 function render(s){
+  /* mode chip */
   const mode = document.getElementById("mode");
   if(s.demo){ mode.textContent="DEMO"; mode.className="chip demo"; }
   else if(s.dry_run){ mode.textContent="LIVE · DRY-RUN"; mode.className="chip dry"; }
   else { mode.textContent="LIVE · REAL ORDERS"; mode.className="chip live"; }
   document.getElementById("killchip").style.display = s.killed ? "" : "none";
+  document.getElementById("sb_mode").textContent = mode.textContent;
 
+  /* KPIs */
   const p = s.portfolio;
   document.getElementById("cash").textContent = inr(p.funds.cash);
   document.getElementById("util").textContent = inr(p.funds.utilised);
   const pnlEl = document.getElementById("pnl");
-  pnlEl.textContent = inr(p.total_pnl); pnlEl.className = "v mono " + cls(p.total_pnl);
+  pnlEl.textContent = inr(p.total_pnl); pnlEl.className = "v lg " + cls(p.total_pnl);
   document.getElementById("peak").textContent = inr(p.total_pnl_peak);
   document.getElementById("spot").textContent = p.spot ? p.spot.toLocaleString("en-IN") : "—";
-  document.getElementById("updated").textContent = p.updated_at_utc ? ("as of " + p.updated_at_utc.slice(11,19) + " UTC") : "";
+  document.getElementById("updated").textContent =
+    p.updated_at_utc ? ("as of " + p.updated_at_utc.slice(11,19) + " UTC") : "no fills yet";
 
-  // positions
+  /* status bar */
+  document.getElementById("sb_session").textContent = p.updated_at_utc?.slice(0,10) || "—";
+  document.getElementById("sb_ledger").textContent = (s.ledger?.pending ?? 0);
+  const routedTotal = Object.values(s.orchestrator?.routed || {}).reduce((a,b)=>a+b,0);
+  document.getElementById("sb_spine").textContent = routedTotal;
+  document.getElementById("sb_clamp").textContent = s.orchestrator?.clamped ?? 0;
+
+  /* positions */
   const armedSyms = new Set(s.trails.map(t=>t.tradingsymbol));
-  document.querySelector("#positions tbody").innerHTML = p.positions.map(v=>`
-    <tr><td class="mono">${v.tradingsymbol}</td>
+  const posBody = document.querySelector("#positions tbody");
+  posBody.innerHTML = p.positions.map(v=>{
+    const trailCell = armedSyms.has(v.tradingsymbol)
+      ? '<span class="chip live">trailing</span>'
+      : `<span class="row-flex" style="justify-content:flex-end">
+           ₹<input id="c_${v.tradingsymbol}" type="number" value="300" min="1" style="width:64px">
+           <button class="btn sm" onclick="armTrail('${v.tradingsymbol}', ${v.quantity})">Trail</button></span>`;
+    return `<tr><td class="mono">${v.tradingsymbol}</td>
       <td class="mono">${v.quantity}</td>
       <td class="mono">${v.average_price.toFixed(2)}</td>
       <td class="mono">${v.ltp.toFixed(2)}</td>
       <td class="mono ${cls(v.pnl)}">${inr(v.pnl)}</td>
-      <td class="mono">${inr(v.peak_pnl)}</td>
+      <td class="mono dim-text">${inr(v.peak_pnl)}</td>
       <td class="mono ${v.drawdown_from_peak>0?"neg":""}">${inr(v.drawdown_from_peak)}</td>
       <td class="mono">${v.iv!=null?(v.iv*100).toFixed(1)+"%":"—"}</td>
       <td class="mono">${v.delta!=null?v.delta.toFixed(2):"—"}</td>
       <td class="mono">${v.theta_per_day!=null?v.theta_per_day.toFixed(1):"—"}</td>
-      <td>${armedSyms.has(v.tradingsymbol)
-            ? '<span class="chip live">trailing</span>'
-            : `<span class="ctl">₹<input id="c_${v.tradingsymbol}" type="number" value="300" min="1" style="width:64px">
-               <button onclick="armTrail('${v.tradingsymbol}', ${v.quantity})">Trail</button></span>`}</td>
-    </tr>`).join("") || `<tr><td colspan="11" style="text-align:center;color:var(--dim)">no open positions</td></tr>`;
+      <td>${trailCell}</td></tr>`;
+  }).join("") || '<tr class="empty"><td colspan="11">no open positions</td></tr>';
 
-  // scenario curve
+  /* scenario curve */
   drawCurve(s.scenario);
 
-  // trails
+  /* trails */
   document.querySelector("#trails tbody").innerHTML = s.trails.map(t=>`
     <tr><td class="mono">${t.tradingsymbol}</td><td>${t.side}</td>
       <td class="mono">${t.quantity}</td>
       <td class="mono">${t.peak_premium.toFixed(2)}</td>
       <td class="mono">${t.last_premium.toFixed(2)}</td>
       <td class="mono">₹${t.cushion_rupees}</td>
-      <td><button onclick="cancelTrail('${t.trail_id}')">cancel</button></td></tr>`
-  ).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--dim)">none armed</td></tr>`;
+      <td><button class="btn sm ghost" onclick="cancelTrail('${t.trail_id}')">cancel</button></td></tr>`
+  ).join("") || '<tr class="empty"><td colspan="7">none armed</td></tr>';
 
-  // profit lock ratchet
+  /* profit lock */
   const pl = s.profit_lock;
   if(pl){
     document.getElementById("lk_current").textContent = inr(pl.current_pnl);
@@ -287,51 +334,55 @@ function render(s){
     document.getElementById("lk_note").textContent = pl.fired
       ? `FIRED — locked ${inr(pl.locked_pnl)} realized, all positions flattened.`
       : pl.activated
-        ? `Active. Worst-case day profit now ${inr(pl.worst_case_day_profit)} (the locked floor). Only the floating ${inr(pl.floating_pnl)} is still at risk.`
+        ? `Active. Worst-case day profit ${inr(pl.worst_case_day_profit)} (the locked floor). Only ${inr(pl.floating_pnl)} is still at risk.`
         : `Armed, not yet activated (peak must clear the activation floor before locking begins).`;
   } else {
     for(const id of ["lk_current","lk_peak","lk_locked","lk_float"])
       document.getElementById(id).textContent = "—";
     document.getElementById("lk_note").textContent =
-      "Not armed. Arm to ratchet a locked profit floor that climbs with every peak and fires when P&L falls back to it.";
+      "Not armed. The locked floor climbs with every new peak and never falls — fires when P&L touches it back.";
   }
 
-  // suggestions
+  /* suggestions */
   const lg = s.ledger;
   document.getElementById("ledgerstat").textContent =
     `${lg.pending} pending · ${Object.keys(lg.rules).length} rules scored`;
-  document.getElementById("suggestions").innerHTML = s.suggestions.map(g=>`
-    <div class="sug">
-      <span class="act ${g.action}">${g.action.replace("_"," ")}</span>
-      <span class="mono">${g.tradingsymbol}</span>
-      ${g.muted?'<span class="muted-tag"> · rule muted (low hit-rate)</span>':""}
-      <div style="color:var(--muted);font-size:12.5px;margin-top:3px">${g.reason}</div>
-      <div class="hr">${g.rule_id}${g.rule_hit_rate!=null?` · hit-rate ${(g.rule_hit_rate*100).toFixed(0)}%`:" · unscored"}</div>
-    </div>`).join("") || `<div class="pad" style="color:var(--dim)">no suggestions right now</div>`;
+  document.getElementById("suggestions").innerHTML = s.suggestions.map(g=>{
+    const hr = g.rule_hit_rate!=null ? `${(g.rule_hit_rate*100).toFixed(0)}%` : "—";
+    return `<div class="sug${g.muted?" muted":""}">
+      <div class="head">
+        <span class="act ${g.action}">${g.action.replace("_"," ")}</span>
+        <span class="mono">${g.tradingsymbol}</span>
+        ${g.muted?'<span class="hint">· rule muted (low hit-rate)</span>':""}
+      </div>
+      <div class="why">${g.reason}</div>
+      <div class="foot">${g.rule_id} · hit-rate ${hr}</div>
+    </div>`;
+  }).join("") || '<div class="pad dim-text">no suggestions right now</div>';
 
-  // pairs
+  /* pairs */
   document.getElementById("pairs").innerHTML = p.pairs.map(x=>
-    `${x.underlying} ${x.expiry||""} — combined ${inr(x.combined_pnl)}` +
-    (x.combined_delta!=null?` · net Δ ${x.combined_delta}`:"") +
-    (x.note?`<div class="hr">${x.note}</div>`:"")
-  ).join("<hr style='border-color:var(--border)'>") ||
-    `<span style="color:var(--dim)">no CE+PE pairs detected</span>`;
+    `<div>${x.underlying} ${x.expiry||""} — combined <span class="mono ${cls(x.combined_pnl)}">${inr(x.combined_pnl)}</span>` +
+    (x.combined_delta!=null?` · net Δ <span class="mono">${x.combined_delta}</span>`:"") +
+    (x.note?`<div class="hint">${x.note}</div>`:"") + `</div>`
+  ).join("<div class='h-rule'></div>") ||
+    `<span class="dim-text">no CE+PE pairs detected</span>`;
 
-  // recommendations
+  /* recommendations */
   const rc = s.recommendations;
   document.getElementById("dirnote").textContent =
-    rc.auto ? `auto: ${rc.direction}` : "";
+    rc.auto ? `auto · ${rc.direction}` : "";
   document.querySelector("#recs tbody").innerHTML = (rc.items||[]).map(r=>`
     <tr><td class="mono">${r.tradingsymbol}</td><td>${r.option_type}</td>
       <td class="mono">${r.strike}</td><td class="mono">${r.ltp.toFixed(2)}</td>
-      <td class="mono">${r.day_high.toFixed(2)}</td>
-      <td class="mono neg">${r.fall_from_high_pct}%</td>
+      <td class="mono dim-text">${r.day_high.toFixed(2)}</td>
+      <td class="mono neg">−${r.fall_from_high_pct}%</td>
       <td class="mono">${r.distance_from_spot_pct}%</td>
       <td class="mono">${r.spread_pct}%</td>
-      <td class="mono" style="color:var(--bronze-glow)">${r.score.toFixed(3)}</td></tr>`
-  ).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--dim)">no chain data yet</td></tr>`;
+      <td class="mono" style="color:var(--amber)">${r.score.toFixed(3)}</td></tr>`
+  ).join("") || '<tr class="empty"><td colspan="9">no chain data yet</td></tr>';
 
-  // trust spine
+  /* trust spine */
   const orc = s.orchestrator;
   if(orc){
     const rt = orc.routed || {};
@@ -343,49 +394,80 @@ function render(s){
     const hard = {trailing_stop:"EXECUTION", profit_lock:"EXECUTION"};
     const all = {...hard, ...ceil};
     document.getElementById("ceilings").innerHTML =
-      Object.entries(all).map(([k,v])=>{
-        const c = v==="EXECUTION"?"var(--green)":(v==="TRUSTED"?"var(--steel)":"var(--dim)");
-        return `<div>${k} <span style="float:right;color:${c}">${v}</span></div>`;
-      }).join("") || '<span style="color:var(--dim)">none</span>';
+      Object.entries(all).map(([k,v])=>
+        `<div><span class="mono">${k}</span> <span class="tier ${v}" style="float:right">${v}</span></div>`
+      ).join("") || '<span class="dim-text">none</span>';
     document.getElementById("clampnote").textContent =
-      orc.clamped ? `${orc.clamped} signal(s) clamped down (requested a tier above their ceiling)` : "no clamps this session";
+      orc.clamped ? `${orc.clamped} signal(s) clamped down` : "no clamps this session";
   }
-  document.getElementById("promos").innerHTML = (s.promotions||[]).slice(0,5).map(pr=>{
-    const arrow = pr.decision==="promoted"?"▲":(pr.decision==="demoted"?"▼":"=");
-    const c = pr.decision==="promoted"?"var(--green)":(pr.decision==="demoted"?"var(--red)":"var(--dim)");
+  document.getElementById("promos").innerHTML = (s.promotions||[]).slice(0,4).map(pr=>{
+    const arrow = pr.decision==="promoted"?"▲":(pr.decision==="demoted"?"▼":"·");
+    const color = pr.decision==="promoted"?"var(--green)":(pr.decision==="demoted"?"var(--red)":"var(--dim)");
     const ev = pr.n!=null?` · n=${pr.n}${pr.hit_rate!=null?` hr ${(pr.hit_rate*100).toFixed(0)}%`:""}`:"";
-    return `<div class="hr" style="color:${c}">${arrow} ${pr.source}: ${pr.from_tier}→${pr.to_tier}${ev}</div>`;
-  }).join("");
+    return `<div style="color:${color}">${arrow} ${pr.source}: ${pr.from_tier} → ${pr.to_tier}${ev}</div>`;
+  }).join("") || '<div class="dim-text">no promotions yet</div>';
 
-  // activity
-  document.getElementById("log").innerHTML = s.activity.map(a=>
-    `<div><span class="t">${a.at}</span>${a.msg}</div>`).join("");
+  /* activity */
+  document.getElementById("log").innerHTML = s.activity.map(a=>{
+    const imp = /KILL|FIRED|EXIT/.test(a.msg);
+    return `<div class="row${imp?" imp":""}"><span class="t">${a.at}</span><span>${a.msg}</span></div>`;
+  }).join("") || '<div class="row dim-text"><span>nothing yet</span></div>';
 }
 
+/* ─────────── scenario chart ─────────── */
 function drawCurve(sc){
   const svg = document.getElementById("curve");
-  if(!sc.points || !sc.points.length){ svg.innerHTML=""; return; }
-  const W=800,H=190,PAD=34;
+  if(!sc.points || !sc.points.length){
+    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle">no scenario data yet</text>';
+    return;
+  }
+  const W=840, H=220, L=44, R=14, T=10, B=24;
   const xs = sc.points.map(p=>p.spot), ys = sc.points.map(p=>p.pnl);
-  const xmin=Math.min(...xs), xmax=Math.max(...xs);
-  let ymin=Math.min(...ys,0), ymax=Math.max(...ys,0);
-  if(ymax===ymin){ymax=ymin+1}
-  const X = x => PAD + (x-xmin)/(xmax-xmin)*(W-2*PAD);
-  const Y = y => H-22 - (y-ymin)/(ymax-ymin)*(H-44);
-  let d = sc.points.map((p,i)=>(i?"L":"M")+X(p.spot).toFixed(1)+","+Y(p.pnl).toFixed(1)).join(" ");
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  let   ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 0);
+  if (ymax === ymin) ymax = ymin + 1;
+  const X = x => L + (x-xmin)/(xmax-xmin)*(W-L-R);
+  const Y = y => T + (1 - (y-ymin)/(ymax-ymin))*(H-T-B);
+
+  // grid lines (5 horizontal)
+  let grid = "";
+  for(let i=0;i<5;i++){
+    const y = T + i/4*(H-T-B);
+    const v = ymax - i/4*(ymax-ymin);
+    grid += `<line class="g" x1="${L}" y1="${y}" x2="${W-R}" y2="${y}"/>`;
+    grid += `<text x="${L-6}" y="${y+3}" text-anchor="end">${inr(v)}</text>`;
+  }
+  // x ticks (5)
+  let xticks = "";
+  for(let i=0;i<5;i++){
+    const v = xmin + i/4*(xmax-xmin);
+    xticks += `<text x="${X(v)}" y="${H-7}" text-anchor="middle">${Math.round(v).toLocaleString("en-IN")}</text>`;
+  }
+
+  // area under curve
+  const d = sc.points.map((p,i)=>(i?"L":"M")+X(p.spot).toFixed(1)+","+Y(p.pnl).toFixed(1)).join(" ");
   const zero = Y(0);
+  const area = `M${X(xmin)},${zero} ${sc.points.map(p=>"L"+X(p.spot).toFixed(1)+","+Y(p.pnl).toFixed(1)).join(" ")} L${X(xmax)},${zero} Z`;
   const bes = (sc.breakevens||[]).map(b=>
-    `<path d="M ${X(b)-4} ${zero} l4 -6 l4 6 l-4 6 z" fill="var(--bronze)"/>
-     <text x="${X(b)}" y="${zero+18}" text-anchor="middle">${Math.round(b).toLocaleString("en-IN")}</text>`).join("");
+    `<g><path d="M ${X(b)-5} ${zero} l5 -7 l5 7 l-5 7 z" fill="var(--amber)" opacity=".85"/>
+     <text x="${X(b)}" y="${zero+22}" text-anchor="middle">${Math.round(b).toLocaleString("en-IN")}</text></g>`).join("");
   svg.innerHTML = `
-    <line x1="${PAD}" y1="${zero}" x2="${W-PAD}" y2="${zero}" stroke="var(--border)" stroke-dasharray="3 4"/>
-    <path d="${d}" fill="none" stroke="var(--steel)" stroke-width="1.8"/>
+    <defs>
+      <linearGradient id="cf" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stop-color="var(--amber)" stop-opacity=".18"/>
+        <stop offset="100%" stop-color="var(--amber)" stop-opacity="0"/>
+      </linearGradient>
+      <style>.g{stroke:var(--line-soft);stroke-dasharray:2 3}</style>
+    </defs>
+    ${grid}
+    <line class="g" x1="${L}" y1="${zero}" x2="${W-R}" y2="${zero}" stroke="var(--line-hard)" stroke-dasharray="0"/>
+    <path d="${area}" fill="url(#cf)"/>
+    <path d="${d}" fill="none" stroke="var(--amber)" stroke-width="1.6"/>
     ${bes}
-    <text x="${PAD}" y="14">${inr(ymax)}</text>
-    <text x="${PAD}" y="${H-6}">${inr(ymin)}</text>
-    <text x="${W-PAD}" y="${H-6}" text-anchor="end">spot ${Math.round(xmax).toLocaleString("en-IN")}</text>`;
+    ${xticks}`;
 }
 
+/* ─────────── actions ─────────── */
 async function armTrail(sym, qty){
   const c = parseFloat(document.getElementById("c_"+sym).value);
   await api("/api/trails", {method:"POST", body: JSON.stringify({
@@ -419,6 +501,8 @@ async function graduate(){
     refresh();
   }catch(e){ alert("graduation failed (EXECUTION is reserved)"); }
 }
+
+/* ─────────── what-if slider ─────────── */
 let mvTimer=null;
 document.getElementById("mv").addEventListener("input", e=>{
   document.getElementById("mvlabel").textContent = e.target.value + " pts";
@@ -427,12 +511,87 @@ document.getElementById("mv").addEventListener("input", e=>{
     const r = await api("/api/whatif?move_points="+e.target.value);
     document.querySelector("#whatif tbody").innerHTML = r.legs.map(l=>`
       <tr><td class="mono">${l.tradingsymbol}</td>
-        <td class="mono">${l.current_premium.toFixed(2)}</td>
+        <td class="mono dim-text">${l.current_premium.toFixed(2)}</td>
         <td class="mono">${l.premium_at_move.toFixed(2)}</td>
         <td class="mono ${cls(l.premium_change)}">${l.premium_change.toFixed(2)}</td>
         <td class="mono ${cls(l.pnl_change)}">${inr(l.pnl_change)}</td></tr>`).join("");
-  }, 250);
+  }, 220);
 });
+
+/* ─────────── command palette (⌘K) ─────────── */
+const COMMANDS = [
+  {grp:"Go",     name:"Customer console", sub:"⏎",  do:()=> location.href="/console"},
+  {grp:"Go",     name:"Cockpit (this page)", sub:"⏎", do:()=>{}},
+  {grp:"Trade",  name:"Arm profit lock at 50% of peak", do: armProfitLock},
+  {grp:"Trade",  name:"Cancel profit lock", do: cancelProfitLock},
+  {grp:"Trade",  name:"Set bias: UP",   do: ()=> setDirection("UP")},
+  {grp:"Trade",  name:"Set bias: DOWN", do: ()=> setDirection("DOWN")},
+  {grp:"Trade",  name:"Set bias: NEUTRAL", do: ()=> setDirection("NEUTRAL")},
+  {grp:"Trade",  name:"Set bias: AUTO",  do: ()=> setDirection("auto")},
+  {grp:"Safety", name:"KILL SWITCH (cancel trails, refuse orders)", do: killswitch},
+  {grp:"Spine",  name:"Graduate source to TRUSTED…", do: ()=>{
+    document.getElementById("grad_tier").value="TRUSTED";
+    document.getElementById("grad_src").focus();
+  }},
+];
+let cmdkIdx = 0, cmdkRows = [];
+function openCmdk(){
+  document.getElementById("cmdk_bg").classList.add("on");
+  const q = document.getElementById("cmdk_q"); q.value=""; q.focus();
+  renderCmdk("");
+}
+function closeCmdk(){ document.getElementById("cmdk_bg").classList.remove("on"); }
+function renderCmdk(query){
+  const q = query.toLowerCase();
+  cmdkRows = COMMANDS.filter(c => !q || (c.grp+" "+c.name).toLowerCase().includes(q));
+  if(lastState){
+    for(const p of (lastState.portfolio?.positions||[])){
+      if(!q || p.tradingsymbol.toLowerCase().includes(q))
+        cmdkRows.push({grp:"Position", name:`Arm trail on ${p.tradingsymbol}`, sub:inr(p.pnl),
+          do: ()=> armTrail(p.tradingsymbol, p.quantity)});
+    }
+  }
+  cmdkIdx = 0;
+  document.getElementById("cmdk_results").innerHTML = cmdkRows.length
+    ? cmdkRows.map((c,i)=>`<div class="item${i===0?" sel":""}" data-i="${i}">
+        <span class="grp">${c.grp}</span><span>${c.name}</span>
+        ${c.sub?`<span class="sub">${c.sub}</span>`:""}</div>`).join("")
+    : '<div class="empty">no matches</div>';
+  document.querySelectorAll("#cmdk_results .item").forEach(el=>{
+    el.onclick = ()=>{ runCmdk(+el.dataset.i); };
+  });
+}
+function runCmdk(i){
+  const c = cmdkRows[i]; closeCmdk(); if(c?.do) c.do();
+}
+document.getElementById("cmdk_q").addEventListener("input", e=> renderCmdk(e.target.value));
+document.getElementById("cmdk_q").addEventListener("keydown", e=>{
+  if(e.key==="Escape") closeCmdk();
+  else if(e.key==="Enter"){ runCmdk(cmdkIdx); }
+  else if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+    e.preventDefault();
+    cmdkIdx = (cmdkIdx + (e.key==="ArrowDown"?1:-1) + cmdkRows.length) % cmdkRows.length;
+    document.querySelectorAll("#cmdk_results .item").forEach((el,i)=>
+      el.classList.toggle("sel", i===cmdkIdx));
+    const sel = document.querySelector("#cmdk_results .item.sel");
+    if(sel) sel.scrollIntoView({block:"nearest"});
+  }
+});
+
+/* ─────────── keyboard shortcuts ─────────── */
+document.addEventListener("keydown", e=>{
+  const meta = e.metaKey || e.ctrlKey;
+  if(meta && e.key.toLowerCase()==="k"){ e.preventDefault(); openCmdk(); return; }
+  if(["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName)) return;
+  if(e.key==="?"){ alert("⌘K command · g c console · g k kill · g d direction\nUP/DOWN navigates command results."); }
+  if(e.key==="g"){ window.__chord = true; setTimeout(()=> window.__chord = false, 700); return; }
+  if(window.__chord){
+    if(e.key==="c"){ location.href="/console"; }
+    if(e.key==="k"){ killswitch(); }
+    window.__chord = false;
+  }
+});
+
 refresh(); setInterval(refresh, 2000);
 </script>
 </body>

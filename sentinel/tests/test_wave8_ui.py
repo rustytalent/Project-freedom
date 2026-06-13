@@ -44,8 +44,47 @@ def test_customer_console_served(srv):
         assert "Crisis Stress" in r.text
         # references the endpoints it calls
         for ep in ("/api/audit", "/api/build", "/api/stress",
-                   "/api/var", "/api/vol_cone", "/api/me/plan"):
+                   "/api/var", "/api/vol_cone", "/api/me/plan",
+                   "/api/equity_context"):
             assert ep in r.text
+
+
+def test_design_system_stylesheet_served(srv):
+    """Bloomberg-grade UI needs the shared design tokens; /sentinel.css
+    serves them as text/css and both pages reference it."""
+    with TestClient(srv.app) as c:
+        css = c.get("/sentinel.css")
+        assert css.status_code == 200
+        assert css.headers["content-type"].startswith("text/css")
+        # design tokens that downstream styling depends on
+        for token in ("--amber", "--bg-0", ".panel", ".chip", ".cmdk"):
+            assert token in css.text
+        # both pages link it
+        for path in ("/", "/console"):
+            page = c.get(path).text
+            assert "/sentinel.css" in page
+
+
+def test_cockpit_has_command_palette_and_status_bar(srv):
+    """The polished cockpit ships a command palette (⌘K), a bottom
+    status bar, and a visible market-hours indicator."""
+    with TestClient(srv.app) as c:
+        html = c.get("/").text
+        assert "cmdk" in html                   # palette wired
+        assert "statusbar" in html              # bottom bar
+        assert "NSE" in html                    # market-hours chip
+        assert "Trust spine" in html            # spine panel survives
+
+
+def test_console_has_equity_tab_and_palette(srv):
+    with TestClient(srv.app) as c:
+        html = c.get("/console").text
+        assert "Equity Context" in html         # 5th tab
+        assert "cmdk" in html                   # palette wired here too
+        # the tabs list the established institutional surfaces
+        for t in ("Strategy Auditor", "Strategy Builder", "Crisis Stress",
+                  "Risk", "Equity Context"):
+            assert t in html
 
 
 # ---------------------------------------------------------------------------

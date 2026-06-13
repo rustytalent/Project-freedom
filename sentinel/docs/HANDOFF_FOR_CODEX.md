@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13 (Wave 8 — UI begins)**
+**Status as of 2026-06-13 (Wave 8b — institutional-tier UI)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 8 — frontend. Added the trust-spine panel to the operator cockpit (`index.html`) and built the customer SaaS console (`console.html`: Strategy Auditor, Builder, Crisis Stress, Risk) served at `/console`, plan-gated via the `X-Sentinel-Plan` header with 402→upsell UX. Caught + fixed a real `/api/build` schema bug (chain quotes were requiring a position `qty`).
-**Test status**: **191 passed** (sentinel suite)
+**Latest pass**: Wave 8b — both pages rebuilt on a shared design system aimed at Bloomberg/Refinitiv-tier polish: refined dark palette with amber accents, tabular-nums everywhere, IST clock + NSE market-hours chip, kbd-driven UX (⌘K command palette, `1`–`5` tab keys, `g c` to console), bottom status bar with live spine + ledger counts, real grid-lined charts with breakeven diamonds and stress bullet bars, lock/upsell cards with one-click tier bump, equity-context tab with full top-10 contribution table.
+**Test status**: **194 passed** (sentinel suite)
 **Module count**: **22** self-declared modules
-**Lines of code**: ~8,000 backend + ~2,900 tests + 2 UI pages
+**Lines of code**: ~8,000 backend + ~3,000 tests + design system CSS + 2 UI pages
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
@@ -228,7 +228,7 @@ gate outputs by plan:
 | `test_wave5.py` | 10 | Orchestrator in the hot path — trail exit routes through spine + places order, profit-lock fire routes via spine, ungraduated source requesting EXECUTION is clamped (no order), TRUSTED source surfaces but never executes, kill switch blocks execution at the spine, /api/graduate sets ceiling + refuses EXECUTION + rejects bad tier, /api/state exposes orchestrator stats, maximizer/dip_recommender graduated at startup |
 | `test_wave6.py` | 6 | Canonical ledger — suggestion mirrors into ShadowLedger as model_suggestion (scientist=rule_id, hypothesis=None), resolution stamps canonical judgment, canonical event flows through ledger_export as MODEL_PREDICTION, no-shadow path is backward compatible, transient state (`_canonical_events`/`_post_peak`) drained on resolve (leak regression), WARN mirrors but never scores |
 | `test_wave7.py` | 8 | trust_tier persistence (default SHADOW, explicit round-trip, suggestion=TRUSTED, flows through ledger_export), TrustPromotionRecord direction classification + evidence filtering, /api/graduate records + persists promotion to JSONL + surfaces in state, demotion recorded |
-| `test_wave8_ui.py` | 7 | both pages served (cockpit has Trust-spine panel + console link; console references its endpoints), console endpoints work end-to-end (audit→BULL_CALL_SPREAD with greeks, build→LONG_STRADDLE, stress matrix, VaR + vol cone), RETAIL→402 upsell shape |
+| `test_wave8_ui.py` | 10 | both pages served (cockpit has Trust-spine panel + console link; console references its endpoints incl. equity), console endpoints work end-to-end (audit→BULL_CALL_SPREAD with greeks, build→LONG_STRADDLE, stress matrix, VaR + vol cone), RETAIL→402 upsell shape, **`/sentinel.css` design system served with text/css + linked from both pages**, **cockpit ships command palette + status bar + market-hours chip + Trust-spine survives the rebuild**, **console ships equity tab + command palette + every institutional surface named on the tab strip** |
 
 Run:
 ```bash
@@ -316,33 +316,62 @@ Plan resolves from `X-Sentinel-Plan` header (defaults to FOUNDER for the
 user's own view). 402 Payment Required carries `{feature, required_tier,
 your_tier, reason}` so the client can show an actionable upsell.
 
-### 6.7 UI 🟡 IN PROGRESS (Wave 8)
+### 6.7 UI 🟢 INSTITUTIONAL-TIER (Wave 8 + 8b)
 
 Backend-first commitment honoured — UI work started only after §6.5/§6.6
-landed. Two pages, both served by `server.py`:
+landed. Both pages now share `static/sentinel.css` (a deliberate
+design system, served at `/sentinel.css`) modelled on Bloomberg
+Terminal / FactSet / Refinitiv Eikon conventions: deep-charcoal
+surface, amber/copper accents (never neon), Inter for chrome +
+JetBrains Mono for every number, tabular-nums everywhere, dense panel
+spacing, sticky table headers, tier-coloured chips, restrained
+greens/reds.
 
-- **`static/index.html` — operator cockpit** (pre-existing, extended).
-  Polls `/api/state` every 2s. Wave 8 added a **Trust spine** panel:
-  routed-by-tier counts, source ceilings (EXECUTION reserved for the two
-  exit actors), clamp count, recent `TrustPromotionRecord`s, and a
-  graduate control (`POST /api/graduate`). Links to the console.
-- **`static/console.html` — customer SaaS console** (new), served at
-  `GET /console`. Four tabs:
-  - *Strategy Auditor* → `/api/audit` — add legs, get named strategy +
-    payoff curve (SVG) + breakevens; Greek book + risk flags shown only
-    when the plan covers them, else an inline upsell.
-  - *Strategy Builder* → `/api/build` — pick an intent, legs are chosen
-    from a client-generated synthetic chain (live chain in production).
-  - *Crisis Stress* → `/api/stress` — full historical-scenario matrix.
-  - *Risk* → `/api/var` + `/api/vol_cone` — VaR/ES on a P&L series, vol
-    cone on a closes series.
-  Plan is chosen in the header (sets `X-Sentinel-Plan`); a 402 renders as
-  a 🔒 upsell with a one-click bump to the next tier.
+**Cross-cutting UX primitives (both pages):**
+- Top bar with brand mark, mode chip, **NSE market-hours chip** (open
+  09:15–15:30 IST Mon-Fri, live-tracked), **IST clock**, and tab nav.
+- **Bottom status bar** with mode, session date, ledger pending, spine
+  routed + clamped counts, last-poll timestamp, and `⌘K` hint.
+- **Command palette (⌘K)** with fuzzy search across actions, tabs,
+  plan switches, and (cockpit) every open position by symbol; arrow-key
+  navigation, ⏎ to run.
+- **Keyboard shortcuts**: `⌘K` palette, `1`–`5` switch tabs on console,
+  `g c` jumps to console / `g k` kill switch on cockpit, `?` help.
+- **Lock cards** for 402-gated features with a one-click upgrade to
+  the next plan tier.
+- Skeleton loaders instead of blank "—" while data is in flight.
 
-**Still open on UI**: real auth/login + plan-token (currently the plan is
-a header the user picks — fine for the cockpit/demo, needs a signed token
-for real customers); wiring the builder to the live chain; charts for the
-risk dashboard; mobile polish.
+**`static/index.html` — operator cockpit** (rebuilt). Polls `/api/state`
+every 2s. Panels: Positions (with inline trail arming), Scenario curve
+(real chart with grid lines, axis labels, gradient area-fill, breakeven
+diamonds, `what-if` slider), Recommendations, **Profit-lock ratchet**
+(4-cell metric strip), **Trust spine** (routed-by-tier cells, source
+ceilings as tier-coloured chips, recent `TrustPromotionRecord`s, a
+graduate control), Active Trails, Suggestions, Pairs, Activity feed.
+
+**`static/console.html` — customer SaaS console** (rebuilt) at
+`GET /console`. Five tabs:
+- *Strategy Auditor* → `/api/audit` — verdict block (named strategy in
+  amber serif-weight), 3-cell max P/L + breakevens, grid-lined payoff
+  chart with spot guide, Greek book table + risk-flag cards (PRO).
+- *Strategy Builder* → `/api/build` — intent picker; result shows
+  intent → detected name → ±1σ band, legs table + summary cells, all
+  audit flags.
+- *Crisis Stress* → `/api/stress` — full matrix with horizontal **bullet
+  bars** scaled to worst-case loss; rows tooltipped with the scenario
+  narrative.
+- *Risk · VaR & Vol Cone* → `/api/var` + `/api/vol_cone` — VaR cells +
+  skew/kurt readouts; vol-cone SVG with amber bars (p10-p90), median
+  dots, steel rings for current.
+- *Equity Context* → `/api/equity_context` — top-10 input grid, big
+  regime headline, summed contribution, breadth split, full
+  per-stock weight/return/contribution/residual table on PRO; scalar
+  divergence + upsell on RETAIL.
+
+**Still open on UI**: real auth/login + signed plan-token (today the
+plan is a header the user picks — fine for cockpit/demo, needs a JWT
+for real customers); wiring the builder to the live chain in
+production; mobile polish; per-user layout persistence.
 
 ### 6.8 Codex's spine items (from the unified architecture report)
 

@@ -442,6 +442,11 @@ def customer_console() -> FileResponse:
     return FileResponse(STATIC_DIR / "console.html")
 
 
+@app.get("/sentinel.css")
+def stylesheet() -> FileResponse:
+    return FileResponse(STATIC_DIR / "sentinel.css", media_type="text/css")
+
+
 @app.get("/api/state", dependencies=[Depends(auth)])
 def state() -> JSONResponse:
     return JSONResponse({
