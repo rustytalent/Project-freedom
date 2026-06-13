@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13 (Wave 7)**
+**Status as of 2026-06-13 (Wave 8 — UI begins)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 7 — `trust_tier` now persisted on every ledger event (flows through `ledger_export`), and every graduation is an auditable `TrustPromotionRecord` written to `trust_promotions.jsonl` + surfaced in `/api/state`. This closes the last Sentinel-local items from Codex's queue. **Backend is complete; UI is next.**
-**Test status**: **184 passed** (sentinel suite)
+**Latest pass**: Wave 8 — frontend. Added the trust-spine panel to the operator cockpit (`index.html`) and built the customer SaaS console (`console.html`: Strategy Auditor, Builder, Crisis Stress, Risk) served at `/console`, plan-gated via the `X-Sentinel-Plan` header with 402→upsell UX. Caught + fixed a real `/api/build` schema bug (chain quotes were requiring a position `qty`).
+**Test status**: **191 passed** (sentinel suite)
 **Module count**: **22** self-declared modules
-**Lines of code**: ~7,900 backend + ~2,700 tests
+**Lines of code**: ~8,000 backend + ~2,900 tests + 2 UI pages
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
@@ -228,6 +228,7 @@ gate outputs by plan:
 | `test_wave5.py` | 10 | Orchestrator in the hot path — trail exit routes through spine + places order, profit-lock fire routes via spine, ungraduated source requesting EXECUTION is clamped (no order), TRUSTED source surfaces but never executes, kill switch blocks execution at the spine, /api/graduate sets ceiling + refuses EXECUTION + rejects bad tier, /api/state exposes orchestrator stats, maximizer/dip_recommender graduated at startup |
 | `test_wave6.py` | 6 | Canonical ledger — suggestion mirrors into ShadowLedger as model_suggestion (scientist=rule_id, hypothesis=None), resolution stamps canonical judgment, canonical event flows through ledger_export as MODEL_PREDICTION, no-shadow path is backward compatible, transient state (`_canonical_events`/`_post_peak`) drained on resolve (leak regression), WARN mirrors but never scores |
 | `test_wave7.py` | 8 | trust_tier persistence (default SHADOW, explicit round-trip, suggestion=TRUSTED, flows through ledger_export), TrustPromotionRecord direction classification + evidence filtering, /api/graduate records + persists promotion to JSONL + surfaces in state, demotion recorded |
+| `test_wave8_ui.py` | 7 | both pages served (cockpit has Trust-spine panel + console link; console references its endpoints), console endpoints work end-to-end (audit→BULL_CALL_SPREAD with greeks, build→LONG_STRADDLE, stress matrix, VaR + vol cone), RETAIL→402 upsell shape |
 
 Run:
 ```bash
@@ -315,12 +316,33 @@ Plan resolves from `X-Sentinel-Plan` header (defaults to FOUNDER for the
 user's own view). 402 Payment Required carries `{feature, required_tier,
 your_tier, reason}` so the client can show an actionable upsell.
 
-### 6.7 UI (last)
+### 6.7 UI 🟡 IN PROGRESS (Wave 8)
 
-When §6.5 (curator integration) and §6.6 (server enforcement) are done:
-build the UI in `static/` against the FastAPI endpoints. The
-architecture commitment is "backend first" — do not start UI work while
-§6.5–6.6 are open.
+Backend-first commitment honoured — UI work started only after §6.5/§6.6
+landed. Two pages, both served by `server.py`:
+
+- **`static/index.html` — operator cockpit** (pre-existing, extended).
+  Polls `/api/state` every 2s. Wave 8 added a **Trust spine** panel:
+  routed-by-tier counts, source ceilings (EXECUTION reserved for the two
+  exit actors), clamp count, recent `TrustPromotionRecord`s, and a
+  graduate control (`POST /api/graduate`). Links to the console.
+- **`static/console.html` — customer SaaS console** (new), served at
+  `GET /console`. Four tabs:
+  - *Strategy Auditor* → `/api/audit` — add legs, get named strategy +
+    payoff curve (SVG) + breakevens; Greek book + risk flags shown only
+    when the plan covers them, else an inline upsell.
+  - *Strategy Builder* → `/api/build` — pick an intent, legs are chosen
+    from a client-generated synthetic chain (live chain in production).
+  - *Crisis Stress* → `/api/stress` — full historical-scenario matrix.
+  - *Risk* → `/api/var` + `/api/vol_cone` — VaR/ES on a P&L series, vol
+    cone on a closes series.
+  Plan is chosen in the header (sets `X-Sentinel-Plan`); a 402 renders as
+  a 🔒 upsell with a one-click bump to the next tier.
+
+**Still open on UI**: real auth/login + plan-token (currently the plan is
+a header the user picks — fine for the cockpit/demo, needs a signed token
+for real customers); wiring the builder to the live chain; charts for the
+risk dashboard; mobile polish.
 
 ### 6.8 Codex's spine items (from the unified architecture report)
 

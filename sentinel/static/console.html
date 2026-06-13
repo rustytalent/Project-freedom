@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel — customer console</title>
+<style>
+  :root{
+    --bg:#0e0f11; --raised:#15171a; --subtle:#1b1e22; --border:#23262b;
+    --fg:#e8e6e1; --muted:#9da0a6; --dim:#5e6168;
+    --steel:#7c9bb8; --bronze:#b79268; --bronze-glow:#d4b68a;
+    --green:#7da982; --red:#c66b5c;
+  }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  header{display:flex;align-items:center;gap:18px;padding:10px 20px;
+    border-bottom:1px solid var(--border);background:rgba(14,15,17,.9);
+    position:sticky;top:0;z-index:5;backdrop-filter:blur(8px)}
+  header .brand{display:flex;align-items:center;gap:9px;font-weight:600}
+  .reticle{width:13px;height:13px;border:1px solid var(--bronze);border-radius:50%;position:relative}
+  .reticle:before,.reticle:after{content:"";position:absolute;background:var(--bronze)}
+  .reticle:before{left:50%;top:-3px;bottom:-3px;width:1px;transform:translateX(-50%)}
+  .reticle:after{top:50%;left:-3px;right:-3px;height:1px;transform:translateY(-50%)}
+  header .right{margin-left:auto;display:flex;gap:14px;align-items:center}
+  .plan{font-size:11px;letter-spacing:.1em;text-transform:uppercase;padding:2px 9px;
+    border:1px solid var(--border);border-radius:3px;color:var(--bronze-glow)}
+  .tabs{display:flex;gap:4px;padding:10px 20px 0}
+  .tab{padding:7px 16px;border:1px solid var(--border);border-bottom:0;border-radius:4px 4px 0 0;
+    cursor:pointer;color:var(--muted);font-size:13px;background:var(--subtle)}
+  .tab.on{color:var(--fg);background:var(--raised);border-color:var(--bronze)}
+  main{padding:0 20px 30px;max-width:1300px;margin:0 auto}
+  section{background:var(--raised);border:1px solid var(--border);border-radius:0 4px 4px 4px;padding:16px}
+  .view{display:none} .view.on{display:block}
+  h3{margin:0 0 12px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  button{background:var(--subtle);border:1px solid var(--border);color:var(--fg);
+    padding:6px 14px;border-radius:3px;cursor:pointer;font:inherit;font-size:12.5px}
+  button:hover{border-color:var(--bronze)} button.primary{background:var(--steel);color:#0e0f11;border:0}
+  input,select{background:var(--bg);border:1px solid var(--border);color:var(--fg);
+    padding:5px 8px;border-radius:3px;font:inherit;font-size:12.5px;width:88px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+  th{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
+    text-align:right;padding:6px 9px;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  td{padding:6px 9px;border-bottom:1px solid rgba(35,38,43,.55);text-align:right}
+  .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  .verdict{font-size:18px;margin:6px 0}
+  .flag{color:var(--red);font-size:12.5px;padding:3px 0}
+  .note{font-size:12px;color:var(--dim);margin-top:10px}
+  .lock{padding:14px;border:1px dashed rgba(183,146,104,.5);border-radius:4px;color:var(--bronze-glow);font-size:13px}
+  svg text{fill:var(--dim);font-size:10px;font-family:ui-monospace,monospace}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12.5px}
+  .kv .k{color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="reticle"></span> Sentinel · Console</div>
+  <div class="right">
+    <span class="plan" id="planchip">plan —</span>
+    <select id="plan" onchange="setPlan(this.value)">
+      <option>RETAIL</option><option selected>PRO</option>
+      <option>QUANT</option><option>FOUNDER</option>
+    </select>
+    <a href="/" style="color:var(--steel);font-size:12.5px">← operator cockpit</a>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab on" data-v="audit" onclick="tab('audit')">Strategy Auditor</div>
+  <div class="tab" data-v="build" onclick="tab('build')">Strategy Builder</div>
+  <div class="tab" data-v="stress" onclick="tab('stress')">Crisis Stress</div>
+  <div class="tab" data-v="risk" onclick="tab('risk')">Risk (VaR / Vol Cone)</div>
+</div>
+
+<main>
+  <!-- AUDITOR -->
+  <section class="view on" id="v_audit">
+    <h3>Strategy Auditor — paste your legs, get a named verdict</h3>
+    <div class="ctl">
+      Spot <input id="a_spot" type="number" value="25000">
+      Regime
+      <select id="a_regime"><option value="">—</option><option>trending</option>
+        <option>chop</option></select>
+      <button onclick="addLeg()">+ leg</button>
+      <button class="primary" onclick="runAudit()">Audit</button>
+    </div>
+    <table id="a_legs"><thead><tr>
+      <th>Type</th><th>Strike</th><th>Qty (− short)</th><th>Premium</th><th>Δ</th><th>θ/day</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <div id="a_out" style="margin-top:16px"></div>
+  </section>
+
+  <!-- BUILDER -->
+  <section class="view" id="v_build">
+    <h3>Strategy Builder — pick an intent, get the legs</h3>
+    <div class="ctl">
+      Intent
+      <select id="b_intent" style="width:auto">
+        <option>PREMIUM_SELL_NEUTRAL</option><option>PREMIUM_SELL_INCOME</option>
+        <option>DIRECTIONAL_BULL</option><option>DIRECTIONAL_BEAR</option>
+        <option>VOL_BUY</option><option>NEUTRAL_INCOME</option>
+      </select>
+      Spot <input id="b_spot" type="number" value="25000">
+      IV% <input id="b_iv" type="number" value="15">
+      Qty <input id="b_qty" type="number" value="75">
+      <button class="primary" onclick="runBuild()">Build</button>
+    </div>
+    <div id="b_out"></div>
+    <div class="note">A synthetic chain is generated around spot for the console. In the live product the builder reads the real option chain.</div>
+  </section>
+
+  <!-- STRESS -->
+  <section class="view" id="v_stress">
+    <h3>Crisis Stress — your book under historical shocks</h3>
+    <div class="ctl">
+      Spot <input id="s_spot" type="number" value="25000">
+      <button onclick="addStressLeg()">+ leg</button>
+      <button class="primary" onclick="runStress()">Run full matrix</button>
+    </div>
+    <table id="s_legs"><thead><tr>
+      <th>Symbol</th><th>Qty</th><th>Premium</th><th>Δ</th><th>Γ</th><th>θ/day</th><th>vega/%</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <div id="s_out" style="margin-top:16px"></div>
+  </section>
+
+  <!-- RISK -->
+  <section class="view" id="v_risk">
+    <h3>Risk — Value-at-Risk, Expected Shortfall, Vol Cone</h3>
+    <div class="ctl">
+      <span class="note" style="margin:0">P&amp;L series (comma-separated ₹)</span>
+    </div>
+    <div class="ctl">
+      <input id="r_pnls" style="width:100%" value="1200,-800,400,-1500,900,-300,2100,-1700,600,-2400,300,1100,-900,1800,-2200">
+    </div>
+    <div class="ctl">
+      <button onclick="runVar('historical')">Historical VaR</button>
+      <button onclick="runVar('cornish_fisher')">Cornish-Fisher VaR</button>
+      <button onclick="runVar('es')">Expected Shortfall</button>
+    </div>
+    <div id="r_var" style="margin-bottom:18px"></div>
+    <div class="ctl">
+      <span class="note" style="margin:0">Closes series (comma-separated)</span>
+      <button onclick="runCone()">Vol cone</button>
+    </div>
+    <textarea id="r_closes" style="width:100%;height:54px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:3px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+    <div id="r_cone" style="margin-top:12px"></div>
+  </section>
+</main>
+
+<script>
+const token = localStorage.getItem("sentinel_token") || "";
+let plan = localStorage.getItem("sentinel_plan") || "PRO";
+const inr = n => n==null ? "—" : (n<0?"-":"")+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN");
+const cls = n => n>0?"pos":(n<0?"neg":"");
+
+function hdrs(){
+  const h = {"Content-Type":"application/json", "X-Sentinel-Plan":plan};
+  if(token) h["X-Sentinel-Token"]=token;
+  return h;
+}
+async function api(path, opts={}){
+  const r = await fetch(path, {...opts, headers:{...hdrs(), ...(opts.headers||{})}});
+  if(r.status===402){
+    const d = (await r.json()).detail || {};
+    throw {upsell:true, msg:`${d.feature||"this feature"} needs ${d.required_tier} — you are ${d.your_tier}`};
+  }
+  if(r.status===400){ throw {msg:(await r.json()).detail || "bad request"}; }
+  if(!r.ok) throw {msg:"request failed ("+r.status+")"};
+  return r.json();
+}
+function lock(msg){ return `<div class="lock">🔒 ${msg}. <a href="#" onclick="bump();return false" style="color:var(--bronze-glow)">Upgrade →</a></div>`; }
+function bump(){ const order=["RETAIL","PRO","QUANT"]; const i=order.indexOf(plan);
+  if(i>=0&&i<order.length-1){ setPlan(order[i+1]); document.getElementById("plan").value=order[i+1]; } }
+
+function tab(v){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on", t.dataset.v===v));
+  document.querySelectorAll(".view").forEach(s=>s.classList.toggle("on", s.id==="v_"+v));
+}
+async function setPlan(v){
+  plan=v; localStorage.setItem("sentinel_plan", v);
+  try{ const me = await api("/api/me/plan");
+    document.getElementById("planchip").textContent = `${me.plan} · ${me.feature_count} features`;
+  }catch(e){ document.getElementById("planchip").textContent = v; }
+}
+
+/* ---------- Auditor ---------- */
+let legId=0;
+function addLeg(ot="CE", k=25000, q=75, p=180){
+  const id="L"+(legId++);
+  const tr=document.createElement("tr"); tr.id=id;
+  tr.innerHTML=`
+    <td><select class="lt"><option ${ot==="CE"?"selected":""}>CE</option><option ${ot==="PE"?"selected":""}>PE</option></select></td>
+    <td><input class="lk" type="number" value="${k}"></td>
+    <td><input class="lq" type="number" value="${q}"></td>
+    <td><input class="lp" type="number" value="${p}"></td>
+    <td><input class="ld" type="number" value="0.5" step="0.05" style="width:64px"></td>
+    <td><input class="lth" type="number" value="-5" style="width:64px"></td>
+    <td><button onclick="document.getElementById('${id}').remove()">✕</button></td>`;
+  document.querySelector("#a_legs tbody").appendChild(tr);
+}
+function readLegs(){
+  return [...document.querySelectorAll("#a_legs tbody tr")].map(tr=>({
+    option_type: tr.querySelector(".lt").value,
+    strike: +tr.querySelector(".lk").value,
+    qty: +tr.querySelector(".lq").value,
+    premium: +tr.querySelector(".lp").value,
+    delta: +tr.querySelector(".ld").value,
+    theta_per_day: +tr.querySelector(".lth").value,
+  }));
+}
+async function runAudit(){
+  const out=document.getElementById("a_out");
+  try{
+    const res = await api("/api/audit", {method:"POST", body: JSON.stringify({
+      legs: readLegs(), spot:+document.getElementById("a_spot").value,
+      regime: document.getElementById("a_regime").value || null})});
+    let html = `<div class="verdict">Detected: <b>${res.detected_strategy.replace(/_/g," ")}</b></div>
+      <div class="kv">
+        <span class="k">Max profit</span><span class="mono pos">${inr(res.max_profit_rupees)}</span>
+        <span class="k">Max loss</span><span class="mono neg">${inr(res.max_loss_rupees)}</span>
+        <span class="k">Breakevens</span><span class="mono">${(res.breakeven_points||[]).map(b=>Math.round(b)).join(", ")||"—"}</span>
+      </div>`;
+    html += curveSvg(res.payoff_curve);
+    if(res.net_greeks){ html += `<div class="note">Net Greeks — Δ ${res.net_greeks.net_delta}, θ/day ${res.net_greeks.net_theta_per_day}, vega/% ${res.net_greeks.net_vega_per_pct}</div>`; }
+    else { html += `<div style="margin-top:10px">${lock("the Greek book is a PRO feature")}</div>`; }
+    if(res.flags){ html += (res.flags||[]).map(f=>`<div class="flag">⚠ ${f}</div>`).join(""); }
+    else { html += `<div style="margin-top:8px">${lock("risk flags are a PRO feature")}</div>`; }
+    (res.notes||[]).forEach(n=> html += `<div class="note">${n}</div>`);
+    out.innerHTML = html;
+  }catch(e){ out.innerHTML = e.upsell ? lock(e.msg) : `<div class="flag">${e.msg}</div>`; }
+}
+function curveSvg(curve){
+  if(!curve||!curve.length) return "";
+  const W=760,H=180,PAD=34;
+  const xs=curve.map(p=>p.spot), ys=curve.map(p=>p.pnl);
+  const xmin=Math.min(...xs),xmax=Math.max(...xs);
+  let ymin=Math.min(...ys,0),ymax=Math.max(...ys,0); if(ymax===ymin)ymax=ymin+1;
+  const X=x=>PAD+(x-xmin)/(xmax-xmin)*(W-2*PAD);
+  const Y=y=>H-20-(y-ymin)/(ymax-ymin)*(H-40);
+  const d=curve.map((p,i)=>(i?"L":"M")+X(p.spot).toFixed(1)+","+Y(p.pnl).toFixed(1)).join(" ");
+  const zero=Y(0);
+  return `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="margin-top:12px">
+    <line x1="${PAD}" y1="${zero}" x2="${W-PAD}" y2="${zero}" stroke="var(--border)" stroke-dasharray="3 4"/>
+    <path d="${d}" fill="none" stroke="var(--steel)" stroke-width="1.8"/>
+    <text x="${PAD}" y="13">${inr(ymax)}</text><text x="${PAD}" y="${H-4}">${inr(ymin)}</text>
+    <text x="${W-PAD}" y="${H-4}" text-anchor="end">spot ${Math.round(xmax).toLocaleString("en-IN")}</text></svg>`;
+}
+
+/* ---------- Builder ---------- */
+function synthChain(spot){
+  const chain=[];
+  for(let off=-30; off<=30; off++){
+    const strike=spot+off*50;
+    chain.push({option_type:"CE", strike, premium:Math.max(5,200-off*6), delta:Math.max(0.02,Math.min(0.98,0.5-off*0.03))});
+    chain.push({option_type:"PE", strike, premium:Math.max(5,200+off*6), delta:Math.min(-0.02,Math.max(-0.98,-0.5-off*0.03))});
+  }
+  return chain;
+}
+async function runBuild(){
+  const out=document.getElementById("b_out");
+  const spot=+document.getElementById("b_spot").value;
+  try{
+    const res = await api("/api/build", {method:"POST", body: JSON.stringify({
+      intent: document.getElementById("b_intent").value, spot,
+      chain: synthChain(spot), iv:+document.getElementById("b_iv").value/100,
+      qty:+document.getElementById("b_qty").value})});
+    const a=res.audit;
+    let html = `<div class="verdict">${res.intent.replace(/_/g," ")} → <b>${a.detected_strategy.replace(/_/g," ")}</b></div>
+      <table><thead><tr><th>Type</th><th>Strike</th><th>Qty</th><th>Premium</th></tr></thead><tbody>${
+        res.legs.map(l=>`<tr><td>${l.option_type}</td><td class="mono">${l.strike}</td>
+          <td class="mono">${l.qty}</td><td class="mono">${l.premium}</td></tr>`).join("")}</tbody></table>
+      <div class="kv" style="margin-top:10px">
+        <span class="k">Max profit</span><span class="mono pos">${inr(a.max_profit_rupees)}</span>
+        <span class="k">Max loss</span><span class="mono neg">${inr(a.max_loss_rupees)}</span></div>`;
+    (a.flags||[]).forEach(f=> html += `<div class="flag">⚠ ${f}</div>`);
+    out.innerHTML = html;
+  }catch(e){ out.innerHTML = e.upsell ? lock(e.msg) : `<div class="flag">${e.msg}</div>`; }
+}
+
+/* ---------- Stress ---------- */
+let sId=0;
+function addStressLeg(sym="NIFTY25000CE", q=75, p=180, d=0.5, g=0.001, th=-5, v=15){
+  const id="S"+(sId++);
+  const tr=document.createElement("tr"); tr.id=id;
+  tr.innerHTML=`
+    <td><input class="ss" value="${sym}" style="width:150px"></td>
+    <td><input class="sq" type="number" value="${q}"></td>
+    <td><input class="sp" type="number" value="${p}"></td>
+    <td><input class="sd" type="number" value="${d}" step="0.05" style="width:60px"></td>
+    <td><input class="sg" type="number" value="${g}" step="0.001" style="width:60px"></td>
+    <td><input class="sth" type="number" value="${th}" style="width:60px"></td>
+    <td><input class="sv" type="number" value="${v}" style="width:60px"></td>
+    <td><button onclick="document.getElementById('${id}').remove()">✕</button></td>`;
+  document.querySelector("#s_legs tbody").appendChild(tr);
+}
+async function runStress(){
+  const out=document.getElementById("s_out");
+  const legs=[...document.querySelectorAll("#s_legs tbody tr")].map(tr=>({
+    tradingsymbol: tr.querySelector(".ss").value, qty:+tr.querySelector(".sq").value,
+    premium:+tr.querySelector(".sp").value, delta:+tr.querySelector(".sd").value,
+    gamma:+tr.querySelector(".sg").value, theta_per_day:+tr.querySelector(".sth").value,
+    vega_per_pct:+tr.querySelector(".sv").value}));
+  try{
+    const res = await api("/api/stress", {method:"POST", body: JSON.stringify({
+      legs, spot:+document.getElementById("s_spot").value})});
+    out.innerHTML = `<table><thead><tr><th>Scenario</th><th>Date</th><th>Spot shock</th>
+      <th>IV shock</th><th>P&L</th><th>P&L %</th><th>Margin at risk</th></tr></thead><tbody>${
+      res.matrix.map(m=>`<tr><td>${m.scenario}</td><td class="mono">${m.date}</td>
+        <td class="mono neg">${m.spot_shock_pct}%</td><td class="mono">+${m.iv_shock_abs}</td>
+        <td class="mono ${cls(m.portfolio_pnl)}">${inr(m.portfolio_pnl)}</td>
+        <td class="mono ${cls(m.portfolio_pnl_pct)}">${m.portfolio_pnl_pct}%</td>
+        <td class="mono">${inr(m.margin_at_risk_rupees)}</td></tr>`).join("")}</tbody></table>
+      <div class="note">${res.matrix[0]?.narrative||""}</div>`;
+  }catch(e){ out.innerHTML = e.upsell ? lock(e.msg) : `<div class="flag">${e.msg}</div>`; }
+}
+
+/* ---------- Risk ---------- */
+async function runVar(method){
+  const out=document.getElementById("r_var");
+  const pnls=document.getElementById("r_pnls").value.split(",").map(Number).filter(x=>!isNaN(x));
+  try{
+    const res = await api("/api/var", {method:"POST", body: JSON.stringify({pnls, alpha:method==="es"?0.975:0.99, method})});
+    out.innerHTML = `<div class="kv">${Object.entries(res).map(([k,v])=>
+      `<span class="k">${k}</span><span class="mono">${v}</span>`).join("")}</div>`;
+  }catch(e){ out.innerHTML = e.upsell ? lock(e.msg) : `<div class="flag">${e.msg}</div>`; }
+}
+async function runCone(){
+  const out=document.getElementById("r_cone");
+  let closes=document.getElementById("r_closes").value.split(",").map(Number).filter(x=>!isNaN(x));
+  if(closes.length<25){ // generate a plausible series if the box is empty
+    closes=[]; let p=25000; for(let i=0;i<200;i++){ p*=(1+(Math.random()-0.5)*0.02); closes.push(Math.round(p)); }
+    document.getElementById("r_closes").value = closes.join(",");
+  }
+  try{
+    const res = await api("/api/vol_cone", {method:"POST", body: JSON.stringify({closes})});
+    const ws=res.windows||[];
+    out.innerHTML = `<table><thead><tr><th>Window</th><th>p10</th><th>p50</th><th>p90</th><th>current</th></tr></thead><tbody>${
+      ws.map(w=>{const c=res.cone[w]||{}; return `<tr><td class="mono">${w}d</td>
+        <td class="mono">${pc(c.p10)}</td><td class="mono">${pc(c.p50)}</td><td class="mono">${pc(c.p90)}</td>
+        <td class="mono" style="color:var(--bronze-glow)">${pc(res.current[w])}</td></tr>`;}).join("")}</tbody></table>
+      <div class="note">Burghardt &amp; Lane vol cone — where current realised vol sits in its own history.</div>`;
+  }catch(e){ out.innerHTML = e.upsell ? lock(e.msg) : `<div class="flag">${e.msg}</div>`; }
+}
+const pc = v => v==null?"—":(v*100).toFixed(1)+"%";
+
+// seed
+addLeg("CE",25000,75,180); addLeg("CE",25200,-75,90);
+addStressLeg();
+setPlan(plan); document.getElementById("plan").value = plan;
+</script>
+</body>
+</html>

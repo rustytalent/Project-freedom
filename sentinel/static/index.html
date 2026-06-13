@@ -170,6 +170,34 @@
     </section>
 
     <section>
+      <h2>Trust spine — orchestrator
+        <span class="right hr"><a href="/console" style="color:var(--steel)">customer console →</a></span>
+      </h2>
+      <div id="spinegrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">
+        <div class="lockcell"><div class="l">Shadow</div><div class="v mono" id="sp_shadow">—</div></div>
+        <div class="lockcell"><div class="l">Logged</div><div class="v mono" id="sp_logged">—</div></div>
+        <div class="lockcell"><div class="l">Trusted</div><div class="v mono" id="sp_trusted">—</div></div>
+        <div class="lockcell"><div class="l">Execution</div><div class="v mono" id="sp_exec">—</div></div>
+      </div>
+      <div class="pad" style="font-size:12px">
+        <div class="hr" style="margin-bottom:5px">Source ceilings — only EXECUTION reaches the order path</div>
+        <div id="ceilings" class="mono" style="font-size:12px"></div>
+        <div class="hr" id="clampnote" style="margin-top:7px"></div>
+      </div>
+      <div class="pad" style="border-top:1px solid var(--border)">
+        <div class="ctl">
+          <span class="hr">graduate</span>
+          <input id="grad_src" placeholder="source" style="width:130px">
+          <select id="grad_tier"><option>SHADOW</option><option>LOGGED</option>
+            <option selected>TRUSTED</option></select>
+          <button onclick="graduate()">Set ceiling</button>
+        </div>
+        <div id="promos" style="font-size:11.5px;margin-top:9px"></div>
+      </div>
+      <div class="note">EXECUTION is reserved for trailing_stop &amp; profit_lock. A research source can request it; the spine clamps it to SHADOW. Every graduation is logged as an auditable record.</div>
+    </section>
+
+    <section>
       <h2>Activity</h2>
       <div class="log" id="log"></div>
     </section>
@@ -303,6 +331,32 @@ function render(s){
       <td class="mono" style="color:var(--bronze-glow)">${r.score.toFixed(3)}</td></tr>`
   ).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--dim)">no chain data yet</td></tr>`;
 
+  // trust spine
+  const orc = s.orchestrator;
+  if(orc){
+    const rt = orc.routed || {};
+    document.getElementById("sp_shadow").textContent = rt.SHADOW ?? 0;
+    document.getElementById("sp_logged").textContent = rt.LOGGED ?? 0;
+    document.getElementById("sp_trusted").textContent = rt.TRUSTED ?? 0;
+    document.getElementById("sp_exec").textContent = rt.EXECUTION ?? 0;
+    const ceil = orc.ceilings || {};
+    const hard = {trailing_stop:"EXECUTION", profit_lock:"EXECUTION"};
+    const all = {...hard, ...ceil};
+    document.getElementById("ceilings").innerHTML =
+      Object.entries(all).map(([k,v])=>{
+        const c = v==="EXECUTION"?"var(--green)":(v==="TRUSTED"?"var(--steel)":"var(--dim)");
+        return `<div>${k} <span style="float:right;color:${c}">${v}</span></div>`;
+      }).join("") || '<span style="color:var(--dim)">none</span>';
+    document.getElementById("clampnote").textContent =
+      orc.clamped ? `${orc.clamped} signal(s) clamped down (requested a tier above their ceiling)` : "no clamps this session";
+  }
+  document.getElementById("promos").innerHTML = (s.promotions||[]).slice(0,5).map(pr=>{
+    const arrow = pr.decision==="promoted"?"▲":(pr.decision==="demoted"?"▼":"=");
+    const c = pr.decision==="promoted"?"var(--green)":(pr.decision==="demoted"?"var(--red)":"var(--dim)");
+    const ev = pr.n!=null?` · n=${pr.n}${pr.hit_rate!=null?` hr ${(pr.hit_rate*100).toFixed(0)}%`:""}`:"";
+    return `<div class="hr" style="color:${c}">${arrow} ${pr.source}: ${pr.from_tier}→${pr.to_tier}${ev}</div>`;
+  }).join("");
+
   // activity
   document.getElementById("log").innerHTML = s.activity.map(a=>
     `<div><span class="t">${a.at}</span>${a.msg}</div>`).join("");
@@ -353,6 +407,17 @@ async function setDirection(v){
 async function killswitch(){
   if(confirm("KILL: cancel all trails and refuse all orders until restart?"))
     { await api("/api/killswitch",{method:"POST"}); refresh(); }
+}
+async function graduate(){
+  const src = document.getElementById("grad_src").value.trim();
+  if(!src){ alert("enter a source name"); return; }
+  const tier = document.getElementById("grad_tier").value;
+  try{
+    await api("/api/graduate", {method:"POST",
+      body: JSON.stringify({source:src, tier:tier})});
+    document.getElementById("grad_src").value="";
+    refresh();
+  }catch(e){ alert("graduation failed (EXECUTION is reserved)"); }
 }
 let mvTimer=null;
 document.getElementById("mv").addEventListener("input", e=>{

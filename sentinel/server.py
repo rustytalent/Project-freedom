@@ -435,6 +435,13 @@ def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/console")
+def customer_console() -> FileResponse:
+    """Customer-facing SaaS console — auditor, builder, stress, risk.
+    Plan-gated (RETAIL/PRO/QUANT) via the X-Sentinel-Plan header."""
+    return FileResponse(STATIC_DIR / "console.html")
+
+
 @app.get("/api/state", dependencies=[Depends(auth)])
 def state() -> JSONResponse:
     return JSONResponse({
@@ -686,10 +693,20 @@ def api_audit(body: AuditBody,
     return JSONResponse(payload)
 
 
+class ChainQuoteBody(BaseModel):
+    option_type: str
+    strike: float
+    premium: float
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta_per_day: float = 0.0
+    vega_per_pct: float = 0.0
+
+
 class BuildBody(BaseModel):
     intent: str
     spot: float
-    chain: List[AuditLegBody]    # reuses the leg shape — option_type/strike/premium/etc.
+    chain: List[ChainQuoteBody]   # chain quotes carry no position qty
     iv: float = 0.15
     t_years: float = 7 / 365
     qty: int = 75
