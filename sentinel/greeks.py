@@ -125,3 +125,16 @@ def reprice(spot_new: float, strike: float, t_years: float, iv: float,
     """Scenario repricing: same IV, new spot. The honest first-order
     answer to 'if the index moves to S', what is this leg worth?'"""
     return bs_price(spot_new, strike, t_years, iv, option_type, rate)
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.greeks",
+    purpose="Black-Scholes price + implied vol (bisection) + delta/gamma/theta/vega",
+    inputs=["spot, strike, t_years, premium, option_type"],
+    outputs=["IV, GreeksView, reprice()"],
+    consumes_from=["sentinel.kite_client (premiums)"],
+    produces_for=["sentinel.portfolio", "sentinel.scenario_engine",
+                  "sentinel.scientists", "sentinel.shadow_ledger"],
+    tier="LOGGED",
+))

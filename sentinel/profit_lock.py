@@ -118,3 +118,15 @@ class ProfitLock:
 
     def disarm(self) -> None:
         self.s.armed = False
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.profit_lock",
+    purpose="ratcheting day-profit floor: locked rises with peak, fires on touch",
+    inputs=["cumulative day P&L (from sentinel.portfolio)"],
+    outputs=["fire signal -> flatten all", "snapshot: current/peak/locked/floating"],
+    consumes_from=["sentinel.portfolio"],
+    produces_for=["sentinel.server (execution)", "sentinel.reports"],
+    tier="EXECUTION",
+))

@@ -356,3 +356,15 @@ class SuggestionLedger:
                 for r in sorted(set(self._rates) | set(self._counts))
             },
         }
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.advisor",
+    purpose="maximizer rules + dip recommender + self-scoring suggestion ledger",
+    inputs=["PortfolioState + option chain quotes"],
+    outputs=["Suggestion[], Recommendation[]", "file:<journal>/suggestions.jsonl"],
+    consumes_from=["sentinel.portfolio", "sentinel.kite_client"],
+    produces_for=["sentinel.server (UI)", "sentinel.reports"],
+    tier="TRUSTED",
+))

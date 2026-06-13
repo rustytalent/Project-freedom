@@ -224,3 +224,16 @@ class PortfolioState:
             "positions": [vars(v) for v in self.positions.values()],
             "pairs": [vars(p) for p in self.pairs],
         }
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.portfolio",
+    purpose="enriched positions (Greeks), CE/PE pair detection, scenario curve, what-if",
+    inputs=["raw positions + quotes (kite_client) + greeks + moneyness metas"],
+    outputs=["PortfolioState.snapshot(), scenario_curve(), what_if()", "total day P&L"],
+    consumes_from=["sentinel.kite_client", "sentinel.greeks", "sentinel.moneyness"],
+    produces_for=["sentinel.scientists", "sentinel.profit_lock", "sentinel.advisor",
+                  "sentinel.server (UI)"],
+    tier="TRUSTED",
+))

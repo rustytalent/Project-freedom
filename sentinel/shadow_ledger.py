@@ -288,3 +288,15 @@ def compact_to_parquet(root: Path, session: str) -> Optional[Path]:
     out = Path(root) / f"ledger_{session}.parquet"
     pd.DataFrame(flat).to_parquet(out, index=False)
     return out
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.shadow_ledger",
+    purpose="the substrate: identity+context+hypothesis+journey+judgment per decision",
+    inputs=["LedgerEvent from scientists / actual trades / counterfactuals"],
+    outputs=["file:<journal>/ledger_<session>.jsonl", "ledger_<session>.parquet"],
+    consumes_from=["sentinel.scientists", "sentinel.greeks", "sentinel.moneyness"],
+    produces_for=["sentinel.curator", "sentinel.calibration", "sentinel.reports"],
+    tier="SHADOW",
+))

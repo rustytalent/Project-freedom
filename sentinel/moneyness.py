@@ -145,3 +145,15 @@ def build_universe(underlying: str, spot: float,
 
 def universe_symbols(universe: Dict[str, ContractRef]) -> List[str]:
     return [ref.tradingsymbol for ref in universe.values()]
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.moneyness",
+    purpose="ATM-relative option identity that survives expiry rollover (the Thursday fix)",
+    inputs=["underlying, spot, chain (symbol, type, strike)"],
+    outputs=["MoneynessKey, ContractRef, build_universe (ATM+/-5 = 22 contracts)"],
+    consumes_from=["sentinel.kite_client (instruments/chain)"],
+    produces_for=["sentinel.scientists", "sentinel.shadow_ledger", "sentinel.portfolio"],
+    tier="LOGGED",
+))

@@ -359,3 +359,16 @@ class DemoAccount:
                "status": "simulated"}
         self.orders_log.append(row)
         return row
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.kite_client",
+    purpose="rate-limited Kite REST + DemoAccount: funds, positions, quotes, chain, exits",
+    inputs=["Kite Connect API (live) OR synthetic (demo)"],
+    outputs=["funds, positions, Quote[], InstrumentMeta[], market exits"],
+    consumes_from=["external:Kite Connect v3"],
+    produces_for=["sentinel.portfolio", "sentinel.trails", "sentinel.scientists",
+                  "sentinel.advisor", "sentinel.greeks"],
+    tier="EXECUTION",
+))

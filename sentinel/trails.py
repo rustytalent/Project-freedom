@@ -225,3 +225,15 @@ class TrailEngine:
             t.state = "ERROR"
             t.exit_error = str(exc)
         self._write(t)
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.trails",
+    purpose="per-position trailing stop + portfolio flatten; tick-driven, journaled",
+    inputs=["premium ticks (kite_client) + arm/cancel (operator)"],
+    outputs=["market EXIT orders via injected exit_fn", "file:<journal>/trails.jsonl"],
+    consumes_from=["sentinel.kite_client", "sentinel.portfolio"],
+    produces_for=["sentinel.server (execution)", "sentinel.shadow_ledger (fills)"],
+    tier="EXECUTION",
+))

@@ -130,3 +130,16 @@ class Orchestrator:
     def stats(self) -> Dict[str, Any]:
         return {"routed": dict(self.routed), "clamped": self.clamped,
                 "ceilings": {k: v.name for k, v in self._ceilings.items()}}
+
+
+from .io_decl import IOSpec, declare
+declare(IOSpec(
+    module="sentinel.orchestration",
+    purpose="trust-tier spine: routes Signals; ONLY EXECUTION tier reaches orders",
+    inputs=["Signal(source, tier, kind, payload, reason) from any organ"],
+    outputs=["routed effects: ledger_sink / surface_sink / execution_sink"],
+    consumes_from=["sentinel.scientists", "sentinel.curator", "sentinel.calibration",
+                   "sentinel.trails", "sentinel.profit_lock", "sentinel.leakage_guard"],
+    produces_for=["sentinel.server (execution + surface)", "sentinel.shadow_ledger"],
+    tier="EXECUTION",
+))
