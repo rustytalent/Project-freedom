@@ -67,6 +67,9 @@
   .log .t{color:var(--dim);margin-right:8px}
   .note{padding:8px 14px;font-size:11.5px;color:var(--dim);border-top:1px solid var(--border)}
   .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .lockcell{background:var(--raised);padding:10px 12px}
+  .lockcell .l{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+  .lockcell .v{font-size:18px;margin-top:2px}
 </style>
 </head>
 <body>
@@ -131,15 +134,20 @@
 
   <div class="col2">
     <section>
-      <h2>Portfolio lock
+      <h2>Profit lock — ratchet
         <span class="right ctl">
-          cushion ₹<input id="plcushion" type="number" value="2000" min="100" step="100">
-          <button class="primary" onclick="armPortfolio()">Arm</button>
-          <button onclick="cancelPortfolio()">Cancel</button>
+          keep <input id="lockratio" type="number" value="50" min="10" max="95" step="5">% of peak
+          <button class="primary" onclick="armProfitLock()">Arm</button>
+          <button onclick="cancelProfitLock()">Cancel</button>
         </span>
       </h2>
-      <div class="pad mono" id="plstatus">not armed</div>
-      <div class="note">Protects TOTAL day P&L: when give-back from session peak ≥ cushion, every open position flattens at market.</div>
+      <div id="lockgrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">
+        <div class="lockcell"><div class="l">Current</div><div class="v mono" id="lk_current">—</div></div>
+        <div class="lockcell"><div class="l">Peak</div><div class="v mono" id="lk_peak">—</div></div>
+        <div class="lockcell"><div class="l">Locked ✓</div><div class="v mono pos" id="lk_locked">—</div></div>
+        <div class="lockcell"><div class="l">Floating ⚠</div><div class="v mono" id="lk_float">—</div></div>
+      </div>
+      <div class="note" id="lk_note">Locked profit ratchets up with every new peak and never falls. When P&L falls to the locked floor, everything flattens — the locked amount is realized. Fights greed: you can see exactly what you've already secured.</div>
     </section>
 
     <section>
@@ -241,12 +249,24 @@ function render(s){
       <td><button onclick="cancelTrail('${t.trail_id}')">cancel</button></td></tr>`
   ).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--dim)">none armed</td></tr>`;
 
-  // portfolio lock
-  const pl = s.portfolio_trail;
-  document.getElementById("plstatus").textContent =
-    pl.fired ? "FIRED — all positions flattened"
-    : pl.cushion ? `armed · cushion ${inr(pl.cushion)} · session peak ${inr(pl.peak_pnl)}`
-    : "not armed";
+  // profit lock ratchet
+  const pl = s.profit_lock;
+  if(pl){
+    document.getElementById("lk_current").textContent = inr(pl.current_pnl);
+    document.getElementById("lk_peak").textContent = inr(pl.peak_pnl);
+    document.getElementById("lk_locked").textContent = inr(pl.locked_pnl);
+    document.getElementById("lk_float").textContent = inr(pl.floating_pnl);
+    document.getElementById("lk_note").textContent = pl.fired
+      ? `FIRED — locked ${inr(pl.locked_pnl)} realized, all positions flattened.`
+      : pl.activated
+        ? `Active. Worst-case day profit now ${inr(pl.worst_case_day_profit)} (the locked floor). Only the floating ${inr(pl.floating_pnl)} is still at risk.`
+        : `Armed, not yet activated (peak must clear the activation floor before locking begins).`;
+  } else {
+    for(const id of ["lk_current","lk_peak","lk_locked","lk_float"])
+      document.getElementById(id).textContent = "—";
+    document.getElementById("lk_note").textContent =
+      "Not armed. Arm to ratchet a locked profit floor that climbs with every peak and fires when P&L falls back to it.";
+  }
 
   // suggestions
   const lg = s.ledger;
@@ -320,12 +340,12 @@ async function armTrail(sym, qty){
   refresh();
 }
 async function cancelTrail(id){ await api("/api/trails/"+id, {method:"DELETE"}); refresh(); }
-async function armPortfolio(){
-  const c = parseFloat(document.getElementById("plcushion").value);
-  await api("/api/portfolio_trail", {method:"POST",
-    body: JSON.stringify({cushion_rupees:c})}); refresh();
+async function armProfitLock(){
+  const pct = parseFloat(document.getElementById("lockratio").value) / 100;
+  await api("/api/profit_lock", {method:"POST",
+    body: JSON.stringify({mode:"ratio", lock_ratio:pct})}); refresh();
 }
-async function cancelPortfolio(){ await api("/api/portfolio_trail", {method:"DELETE"}); refresh(); }
+async function cancelProfitLock(){ await api("/api/profit_lock", {method:"DELETE"}); refresh(); }
 async function setDirection(v){
   await api("/api/direction", {method:"POST",
     body: JSON.stringify({direction: v==="auto"?null:v})}); refresh();

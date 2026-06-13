@@ -35,6 +35,7 @@ from .advisor import Maximizer, SuggestionLedger, recommend_dips
 from .config import SentinelConfig
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
 from .portfolio import PortfolioState
+from .profit_lock import ProfitLock
 from .trails import TrailEngine
 
 LOG = logging.getLogger("sentinel")
@@ -71,6 +72,8 @@ class Sentinel:
             resolve_minutes=cfg.ledger_resolve_minutes,
         )
         self.maximizer = Maximizer(self.ledger)
+        # Ratcheting day-profit lock (the founder's locked/floating model).
+        self.profit_lock: Optional[ProfitLock] = None
         self.suggestions: List[Dict[str, Any]] = []
         self.recommendations: Dict[str, Any] = {"direction": "NEUTRAL",
                                                 "items": []}
@@ -179,6 +182,21 @@ class Sentinel:
         if fired:
             self.log(f"PORTFOLIO LOCK fired at total P&L "
                      f"₹{self.portfolio.total_pnl:,.0f}")
+        # Ratcheting profit lock: feed cumulative day P&L; on fire,
+        # flatten every open position (the locked profit becomes realized).
+        if self.profit_lock is not None and self.profit_lock.update(
+                self.portfolio.total_pnl):
+            snap = self.profit_lock.snapshot()
+            self.log(f"PROFIT LOCK fired: locking ₹{snap['locked_pnl']:,.0f} "
+                     f"(peak ₹{snap['peak_pnl']:,.0f})")
+            for v in list(self.portfolio.positions.values()):
+                if self.killed:
+                    break
+                side = "SELL" if v.quantity > 0 else "BUY"
+                try:
+                    self._exit_fn(v.tradingsymbol, side, abs(v.quantity))
+                except Exception:
+                    continue
 
     def _tick_recommendations(self) -> None:
         spot = self.portfolio.spot or self.account.spot_ltp()
@@ -294,6 +312,8 @@ def state() -> JSONResponse:
                          else CORE.trails.portfolio_peak_pnl),
             "fired": CORE.trails.portfolio_fired,
         },
+        "profit_lock": (CORE.profit_lock.snapshot()
+                        if CORE.profit_lock is not None else None),
         "suggestions": CORE.suggestions,
         "ledger": CORE.ledger.stats(),
         "recommendations": CORE.recommendations,
@@ -349,6 +369,39 @@ def cancel_portfolio_trail() -> JSONResponse:
     CORE.trails.cancel_portfolio()
     CORE.log("portfolio lock cancelled")
     return JSONResponse({"cancelled": True})
+
+
+class ProfitLockBody(BaseModel):
+    mode: str = "ratio"               # ratio | buffer
+    lock_ratio: float = 0.5
+    give_back_buffer: float = 0.0
+    activation_floor: float = 1000.0
+
+
+@app.post("/api/profit_lock", dependencies=[Depends(auth)])
+def arm_profit_lock(body: ProfitLockBody) -> JSONResponse:
+    """Arm the ratcheting day-profit lock. The locked floor rises with
+    every new peak and never falls; when live P&L falls to the floor,
+    all positions flatten and the locked profit is realized."""
+    try:
+        CORE.profit_lock = ProfitLock(
+            mode=body.mode, lock_ratio=body.lock_ratio,
+            give_back_buffer=body.give_back_buffer,
+            activation_floor=body.activation_floor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    CORE.log(f"profit lock armed ({body.mode}): "
+             f"{'keep '+str(int(body.lock_ratio*100))+'% of peak' if body.mode=='ratio' else 'max give-back ₹'+str(int(body.give_back_buffer))}")
+    return JSONResponse(CORE.profit_lock.snapshot())
+
+
+@app.delete("/api/profit_lock", dependencies=[Depends(auth)])
+def cancel_profit_lock() -> JSONResponse:
+    if CORE.profit_lock is not None:
+        CORE.profit_lock.disarm()
+        CORE.profit_lock = None
+    CORE.log("profit lock disarmed")
+    return JSONResponse({"disarmed": True})
 
 
 @app.post("/api/direction", dependencies=[Depends(auth)])
