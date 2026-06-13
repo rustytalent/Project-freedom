@@ -319,9 +319,11 @@ class SuggestionLedger:
             premium=s.premium_at_suggestion,
         )
         ctx = Context()
+        # suggestions are operator-facing decision-support -> TRUSTED tier
         ev = new_event(KIND_MODEL_SUGGESTION,
                        self.session or _utc_now()[:10],
-                       ident, ctx, None, scientist=s.rule_id)
+                       ident, ctx, None, scientist=s.rule_id,
+                       trust_tier="TRUSTED")
         # carry the suggestion id so resolution can stamp the same event
         ev.event_id = f"SG_{s.suggestion_id}"
         try:

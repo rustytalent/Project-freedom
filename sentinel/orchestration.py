@@ -131,6 +131,52 @@ class Orchestrator:
         return {"routed": dict(self.routed), "clamped": self.clamped,
                 "ceilings": {k: v.name for k, v in self._ceilings.items()}}
 
+    def ceiling_of(self, source: str) -> Tier:
+        """The source's current max tier (hard-wired actors are EXECUTION
+        by identity; everything else defaults to SHADOW)."""
+        if source in ("trailing_stop", "profit_lock"):
+            return Tier.EXECUTION
+        return self._ceilings.get(source, Tier.SHADOW)
+
+
+# ---------------------------------------------------------------------------
+# Trust promotion record — the curator's graduation decision, logged.
+# (Codex §5.1 TrustPromotionRecord.) Every promotion/demotion is an
+# auditable event: who, from what, to what, on what evidence, when.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TrustPromotionRecord:
+    source: str
+    from_tier: str
+    to_tier: str
+    decision: str                       # "promoted" | "demoted" | "held"
+    ts_utc: str = ""
+    evidence_window: str = ""           # e.g. "2026-06-01..2026-06-13"
+    n: Optional[int] = None
+    hit_rate: Optional[float] = None
+    expectancy: Optional[float] = None
+    drawdown: Optional[float] = None
+    calibration_error: Optional[float] = None
+    leakage_status: Optional[str] = None
+    note: str = ""
+
+    @staticmethod
+    def build(source: str, from_tier: Tier, to_tier: Tier,
+              ts_utc: str = "", **evidence: Any) -> "TrustPromotionRecord":
+        decision = ("promoted" if to_tier > from_tier else
+                    "demoted" if to_tier < from_tier else "held")
+        allowed = {"evidence_window", "n", "hit_rate", "expectancy",
+                   "drawdown", "calibration_error", "leakage_status", "note"}
+        ev = {k: v for k, v in evidence.items() if k in allowed}
+        return TrustPromotionRecord(
+            source=source, from_tier=from_tier.name, to_tier=to_tier.name,
+            decision=decision, ts_utc=ts_utc, **ev)
+
+    def to_row(self) -> Dict[str, Any]:
+        from dataclasses import asdict as _asdict
+        return _asdict(self)
+
 
 from .io_decl import IOSpec, declare
 declare(IOSpec(

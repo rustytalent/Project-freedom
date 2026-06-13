@@ -55,6 +55,7 @@ class DecisionEvent:
     event_id: str
     event_type: str                  # mapped via KIND_MAP
     source: str = "sentinel"
+    trust_tier: str = "SHADOW"        # SHADOW/LOGGED/TRUSTED/EXECUTION
     session_date: str = ""
     ts_utc: str = ""
     scientist: str = ""
@@ -92,6 +93,7 @@ def to_decision_event(row: Dict[str, Any]) -> DecisionEvent:
     return DecisionEvent(
         event_id=row.get("event_id", ""),
         event_type=KIND_MAP.get(row.get("kind", ""), "UNKNOWN"),
+        trust_tier=row.get("trust_tier", "SHADOW"),
         session_date=row.get("session", ""),
         ts_utc=row.get("ts_utc", ""),
         scientist=row.get("scientist", ""),

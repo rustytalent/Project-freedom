@@ -144,12 +144,18 @@ class LedgerEvent:
     journey: Journey = field(default_factory=Journey)
     judgment: Judgment = field(default_factory=Judgment)
     scientist: str = ""             # which candidate generator emitted it
+    # The trust tier the event was emitted at (SHADOW/LOGGED/TRUSTED/
+    # EXECUTION). Persisting it lets the research side filter live
+    # decisions by trust without re-deriving it, and matches Codex's
+    # DecisionEvent.trust_tier field.
+    trust_tier: str = "SHADOW"
 
     def to_row(self) -> Dict[str, Any]:
         return {
             "event_id": self.event_id, "kind": self.kind,
             "ts_utc": self.ts_utc, "session": self.session,
             "scientist": self.scientist,
+            "trust_tier": self.trust_tier,
             "identity": asdict(self.identity),
             "context": asdict(self.context),
             "hypothesis": asdict(self.hypothesis) if self.hypothesis else None,
@@ -160,7 +166,7 @@ class LedgerEvent:
 
 def new_event(kind: str, session: str, identity: Identity,
               context: Context, hypothesis: Optional[Hypothesis],
-              scientist: str = "") -> LedgerEvent:
+              scientist: str = "", trust_tier: str = "SHADOW") -> LedgerEvent:
     if kind not in ALL_KINDS:
         raise ValueError(f"unknown event kind: {kind}")
     # The laboratory does not log trades it cannot explain: any event
@@ -173,7 +179,7 @@ def new_event(kind: str, session: str, identity: Identity,
         event_id=f"EV_{uuid.uuid4().hex[:16]}",
         kind=kind, ts_utc=_utc(), session=session,
         identity=identity, context=context, hypothesis=hypothesis,
-        scientist=scientist,
+        scientist=scientist, trust_tier=trust_tier,
     )
 
 

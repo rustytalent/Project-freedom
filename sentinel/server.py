@@ -20,6 +20,7 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -39,7 +40,7 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
-from .orchestration import Orchestrator, Signal, Tier
+from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
 from .shadow_ledger import ShadowLedger
@@ -106,6 +107,8 @@ class Sentinel:
         # scoring role but mirrors each suggestion into this ShadowLedger as
         # a model_suggestion event, so there is ONE system of record.
         self.session = datetime.now(IST).strftime("%Y-%m-%d")
+        self.promotions: List[Dict[str, Any]] = []
+        self._promotions_path = cfg.journal_dir / "trust_promotions.jsonl"
         self.shadow_ledger = ShadowLedger(cfg.journal_dir)
         self.ledger = SuggestionLedger(
             journal_path=cfg.journal_dir / "suggestions.jsonl",
@@ -166,6 +169,18 @@ class Sentinel:
         signals the spine permitted."""
         p = sig.payload
         return self._exit_fn(p["symbol"], p["side"], int(p["qty"]))
+
+    def record_promotion(self, rec: TrustPromotionRecord) -> None:
+        """Persist a trust-promotion decision (append-only) and keep a
+        recent window for the dashboard."""
+        row = rec.to_row()
+        self.promotions.insert(0, row)
+        del self.promotions[50:]
+        try:
+            with open(self._promotions_path, "a") as f:
+                f.write(json.dumps(row) + "\n")
+        except Exception:
+            pass
 
     def _trail_exit(self, symbol: str, side: str, qty: int) -> Dict[str, Any]:
         """TrailEngine's injected exit_fn — instead of placing an order
@@ -442,6 +457,7 @@ def state() -> JSONResponse:
         "recommendations": CORE.recommendations,
         "orchestrator": CORE.orchestrator.stats(),
         "routed_signals": CORE.routed_signals[:20],
+        "promotions": CORE.promotions[:20],
         "activity": CORE.activity[:50],
     })
 
@@ -556,6 +572,15 @@ def killswitch() -> JSONResponse:
 class GraduateBody(BaseModel):
     source: str
     tier: str          # SHADOW | LOGGED | TRUSTED (EXECUTION is reserved)
+    # optional curator evidence behind the decision (auditable)
+    evidence_window: Optional[str] = None
+    n: Optional[int] = None
+    hit_rate: Optional[float] = None
+    expectancy: Optional[float] = None
+    drawdown: Optional[float] = None
+    calibration_error: Optional[float] = None
+    leakage_status: Optional[str] = None
+    note: Optional[str] = None
 
 
 @app.post("/api/graduate", dependencies=[Depends(auth)])
@@ -563,7 +588,8 @@ def graduate(body: GraduateBody) -> JSONResponse:
     """The curator's lever, made operable: promote/demote a signal
     source's maximum tier. EXECUTION is refused for any source — only the
     two hard-wired exit actors (trailing_stop, profit_lock) may ever
-    reach the order path, and they don't need a ceiling entry."""
+    reach the order path, and they don't need a ceiling entry. Every
+    promotion is recorded as an auditable TrustPromotionRecord."""
     try:
         tier = Tier[body.tier.upper()]
     except KeyError:
@@ -573,9 +599,22 @@ def graduate(body: GraduateBody) -> JSONResponse:
         raise HTTPException(
             400, "EXECUTION is reserved for trailing_stop / profit_lock; "
                  "no other source may be graduated to the order path")
+    from_tier = CORE.orchestrator.ceiling_of(body.source)
     CORE.orchestrator.set_ceiling(body.source, tier)
-    CORE.log(f"graduated {body.source} -> max tier {tier.name}")
+    evidence = {k: v for k, v in {
+        "evidence_window": body.evidence_window, "n": body.n,
+        "hit_rate": body.hit_rate, "expectancy": body.expectancy,
+        "drawdown": body.drawdown, "calibration_error": body.calibration_error,
+        "leakage_status": body.leakage_status, "note": body.note,
+    }.items() if v is not None}
+    rec = TrustPromotionRecord.build(
+        body.source, from_tier, tier,
+        ts_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **evidence)
+    CORE.record_promotion(rec)
+    CORE.log(f"{rec.decision} {body.source}: {from_tier.name} -> {tier.name}")
     return JSONResponse({"source": body.source, "ceiling": tier.name,
+                         "promotion": rec.to_row(),
                          "stats": CORE.orchestrator.stats()})
 
 
