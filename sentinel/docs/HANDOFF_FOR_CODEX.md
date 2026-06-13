@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13 (Wave 3)**
+**Status as of 2026-06-13 (Wave 4)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: stress simulator + customer auditor + multi-leg builder + NIFTY top-10 contextual layer + SaaS gating + risk-dashboard wiring.
-**Test status**: **134 passed** (sentinel suite)
-**Module count**: **20** self-declared modules
-**Lines of code**: ~6,500 backend + ~1,800 tests
+**Latest pass**: Wave 4 — server-side SaaS enforcement (every paid endpoint), curator fair-value misprice finding, research-context bridge (Codex Problem S3), live-to-research adapter (Codex Problem S4).
+**Test status**: **160 passed** (sentinel suite)
+**Module count**: **22** self-declared modules
+**Lines of code**: ~7,400 backend + ~2,200 tests
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
@@ -127,7 +127,7 @@ produces:
 
 ---
 
-## 3. Module inventory (20 modules, all IO-declared)
+## 3. Module inventory (22 modules, all IO-declared)
 
 | Module | Tier | Purpose |
 |--------|------|---------|
@@ -151,6 +151,8 @@ produces:
 | **`strategy_builder.py`** | TRUSTED | **Wave 3** — 6 customer intents → legs, auto-audited |
 | **`equity_layer.py`** | TRUSTED | **Wave 3** — NIFTY top-10 regime classifier (HIDDEN_BULL etc.) |
 | **`saas.py`** | TRUSTED | **Wave 3** — RETAIL/PRO/QUANT/FOUNDER tier gates over the feature catalog |
+| **`liqpool_bridge.py`** | TRUSTED | **Wave 4** — loads liquidity_backtester ResearchContextPack into `MarketSnapshot.context` |
+| **`ledger_export.py`** | TRUSTED | **Wave 4** — Sentinel JSONL → DecisionEvent rows for the research-side flywheel |
 
 Plus: `reports.py` (writes artifacts), `server.py` (FastAPI), `config.py`,
 `io_decl.py` (the registry mechanism itself).
@@ -222,6 +224,7 @@ gate outputs by plan:
 | `test_trails_server.py` | varied | FastAPI server auth + state endpoint |
 | `test_institutional.py` | 28 | SVI round-trip, RV estimator scales, vol-cone monotonicity, CF-VaR scale on N(0,1000), ES≥VaR, Crux composite weights, roll-curve regime labels, Beasley-Springer at standard quantiles |
 | `test_wave3.py` | 36 | Stress matrix (BS + Greek proxy), Hull-taxonomy detection (long call, vertical spreads, straddles, condors, butterflies, custom), uncapped-loss flagging, regime-mismatch flagging, builder for 6 intents auto-detected by auditor, NIFTY top-10 regime classifier (HIDDEN_BULL etc.), SaaS gate matrix (RETAIL blocked from PRO, QUANT entitled to all, FOUNDER bypass, unknown plan denied) |
+| `test_wave4.py` | 26 | Curator fair-value misprice (rich/healthy/no-resolver/per-event stamp), liqpool_bridge (empty / payload / latest fallback / corrupt tolerant / merge into context), ledger_export (kind mapping, DecisionEvent shape, JSONL roundtrip, empty session, None-field omission), FastAPI SaaS enforcement (/me/plan, /saas/catalog, /audit RETAIL vs PRO, /stress 402 + full matrix, /var historical vs CF, /vol_cone PRO-only, /equity_context scalar vs full, /build 400 on unknown intent) |
 
 Run:
 ```bash
@@ -271,23 +274,43 @@ falls back to closest strike when target is missing (recorded in
 `missing_strikes`), then runs them through the auditor automatically so
 the customer sees the verdict alongside the build.
 
-### 6.5 Wire institutional outputs into reports ✅ DONE (Wave 3)
+### 6.5 Wire institutional outputs into reports + curator ✅ DONE (Wave 3 + 4)
 
-`reports.generate_system_report` now has section 8 "Institutional
-surfaces available" listing every named methodology, stress scenarios,
-auditor flags, builder intents, equity-layer regimes, and the SaaS
-catalog count. **Still open**: feeding fair-value-vs-market signal into
-`CuratorReport` so the curator can flag mispriced entries directly.
+Wave 3: `reports.generate_system_report` section 8 lists every named
+methodology, stress scenarios, auditor flags, builder intents, equity-
+layer regimes, and the SaaS catalog count.
 
-### 6.6 SaaS tier gating ✅ DONE (Wave 3)
+Wave 4: `Curator(fair_value_resolver=..., misprice_threshold=0.05)`
+emits a `fair_value_misprice_bias` finding when entries deviate
+systematically from a supplied fair-value oracle (typically
+`institutional.fair_value_from_svi`). The resolver is callable-based so
+the curator stays decoupled from the institutional module — the wiring
+lives at the caller (server / nightly job). Per-event judgment block
+also carries `misprice_vs_fair_value_pct` for granular debugging.
 
-`sentinel/saas.py` ships with the FEATURE_CATALOG (every paid surface
-mapped to its required tier), `gate(plan, feature)` returning
-`GateResult(allowed, required_tier, your_tier, reason)`,
-`features_for(plan)` returning the full entitlement set, and a FOUNDER
-bypass for the user's own view. **Still open**: actually call
-`gate(...)` inside every paid endpoint in `server.py` and return 402 on
-deny.
+### 6.6 SaaS tier gating ✅ DONE (Wave 3 + 4)
+
+Wave 3: `sentinel/saas.py` ships with FEATURE_CATALOG, `gate()`,
+`features_for()`, FOUNDER bypass, and a safer-PRO default for unknown
+features.
+
+Wave 4: `sentinel/server.py` enforces it. New endpoints all behind
+`Depends(auth) + Depends(resolve_plan)`:
+
+- `GET  /api/me/plan` — entitlement summary.
+- `GET  /api/saas/catalog` — feature catalog with `allowed: bool` per row.
+- `POST /api/audit` — strategy auditor; greek_book + risk_flags stripped
+  for RETAIL, included for PRO+.
+- `POST /api/build` — strategy builder; RETAIL gets one build per session
+  via `builder.one_per_session`, PRO+ gets unlimited.
+- `POST /api/stress` — single scenario (PRO) or full matrix (PRO).
+- `POST /api/equity_context` — scalar at RETAIL, full pack at PRO.
+- `POST /api/var` — historical (RETAIL), CF (PRO), ES (PRO).
+- `POST /api/vol_cone` — PRO.
+
+Plan resolves from `X-Sentinel-Plan` header (defaults to FOUNDER for the
+user's own view). 402 Payment Required carries `{feature, required_tier,
+your_tier, reason}` so the client can show an actionable upsell.
 
 ### 6.7 UI (last)
 
@@ -299,27 +322,42 @@ architecture commitment is "backend first" — do not start UI work while
 ### 6.8 Codex's spine items (from the unified architecture report)
 
 Codex's `opus_unified_sentinel_liquidity_architecture_report.md` lists a
-parallel queue (Patches 1–10) focused on cross-codebase wiring:
+cross-codebase queue. **Wave 4 closed the two ledger-side items**:
 
-- **Shared event spine**: a `DecisionEvent` / `ExecutionIntent` /
-  `OutcomeEvent` vocabulary that both Sentinel ledger and liquidity
-  backtester `ShadowLogger` honour.
-- **Research context bridge** (`sentinel/liqpool_bridge.py`): load the
-  latest `ResearchContextPack` from `liquidity_backtester` artifacts
-  into `MarketSnapshot.context` so scientists think with the real
-  research brain.
-- **Live-to-research adapter** (`sentinel_ledger_to_liqpool_shadow.py`):
-  nightly export of Sentinel JSONL → parquet → liquidity backtester's
-  shadow log partitions, so live decisions feed the flywheel.
-- **Orchestrator in the hot path**: `sentinel.server` should wrap every
-  trail / profit-lock / suggestion / scientist output as a `Signal` and
-  route through `Orchestrator` — not call them directly.
-- **Canonical ledger**: `SuggestionLedger` becomes a view over
-  `ShadowLedger`, not a separate writer.
+- **Research context bridge** ✅ **DONE**
+  `sentinel/liqpool_bridge.py` reads the latest research artifacts from
+  `liquidity_backtester/runs/<session>/{research_context,daily_brief}.json`
+  (or `runs/latest/`), normalises into a `ResearchContextPack`
+  (direction/reaction probabilities, proximity h12/h36/h60, sector
+  regime, avoid flags, key zones), and `merge_into_snapshot_context()`
+  populates the scientist-visible context. Tolerates corrupt payloads
+  and missing files — Sentinel runs without today's brief.
 
-These are higher-order architectural moves and live ON THE OTHER SIDE
-of the §6.5–§6.6 finishing line. Pick them up after the SaaS
-enforcement is wired.
+- **Live-to-research adapter** ✅ **DONE**
+  `sentinel/ledger_export.py` exports the Sentinel JSONL shadow ledger
+  to a `DecisionEvent`-shaped JSONL/parquet under
+  `<out>/sentinel_live/session=<...>/decision_events.{jsonl,parquet}`.
+  Sentinel kinds map to the shared vocabulary: ACTUAL→EXECUTED,
+  VIRTUAL→VIRTUAL_DECISION, REJECTED→REJECTED_CANDIDATE etc. CLI:
+  `python -m sentinel.ledger_export --session 2026-06-13`. Idempotent
+  by event_id so re-running is safe.
+
+**Still open from Codex's queue**:
+
+- **Shared event spine schema** — formalise `DecisionEvent` /
+  `ExecutionIntent` / `OutcomeEvent` as a versioned package both
+  codebases depend on (currently each side has its own dataclasses
+  that agree by convention).
+- **Orchestrator in the hot path** — `sentinel.server` still calls
+  trails / profit-lock / suggestions / recommendations directly. Wrap
+  each as a `Signal` and route through `orchestration.Orchestrator`.
+  The trust-tier wall is conceptually right but not runtime-enforced.
+- **Canonical ledger** — `SuggestionLedger` becomes a derived view
+  over `ShadowLedger` (writes go to one place, the older shape becomes
+  a read-side projection).
+- **liquidity_backtester side**: `ShadowLogger` + `FlywheelHub` wired
+  into the standard Daily Brief run; `multi_asset_run.py` broken up;
+  artifact-health gate enforced.
 
 ---
 

@@ -20,10 +20,17 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .io_decl import IOSpec, declare
 from .shadow_ledger import JOURNEY_CHECKPOINTS
+
+# Optional resolver signature: given an identity row dict, return the
+# institutional fair value (e.g. via sentinel.institutional.fair_value_from_svi)
+# or None if it can't be priced. Kept as a callable so the curator stays
+# decoupled from the institutional module — the wiring lives at the
+# caller (server / nightly job).
+FairValueResolver = Callable[[Dict[str, Any]], Optional[float]]
 
 
 @dataclass
@@ -93,7 +100,18 @@ def _is_win(row: Dict[str, Any]) -> Optional[bool]:
 
 
 class Curator:
-    """Judges a session's ledger rows and extracts findings."""
+    """Judges a session's ledger rows and extracts findings.
+
+    Pass ``fair_value_resolver`` to surface the institutional 'entries
+    are paying too rich' finding — the curator calls it per identity
+    row and flags when entries sit consistently > ``misprice_threshold``
+    (default 5%) above fair value."""
+
+    def __init__(self,
+                 fair_value_resolver: Optional[FairValueResolver] = None,
+                 misprice_threshold: float = 0.05) -> None:
+        self.fair_value_resolver = fair_value_resolver
+        self.misprice_threshold = misprice_threshold
 
     def judge_rows(self, session: str,
                    rows: List[Dict[str, Any]]) -> CuratorReport:
@@ -106,6 +124,8 @@ class Curator:
         rep.per_moneyness = self._per_moneyness(complete)
         rep.confidence_calibration = self._confidence_calibration(complete)
         rep.findings += self._context_findings(complete)
+        if self.fair_value_resolver is not None:
+            rep.findings += self._fair_value_misprice(rows)
         return rep
 
     # -- per-event judgment ------------------------------------------------
@@ -205,6 +225,38 @@ class Curator:
             out.append({"confidence_bucket": b, "n": len(w),
                         "actual_win_rate": round(sum(w)/len(w), 3)})
         return out
+
+    def _fair_value_misprice(self, rows: List[Dict[str, Any]]) -> List[Finding]:
+        """Per-event: entry premium vs the institutional fair value (SVI
+        BS). Aggregate finding: 'X% of entries are paying > Y% above fair
+        value' — surfaces the 'we're chasing rich premium' bias the
+        curator otherwise can't see."""
+        deltas: List[float] = []
+        for r in rows:
+            entry = _entry(r)
+            if entry <= 0:
+                continue
+            fv = self.fair_value_resolver(r) if self.fair_value_resolver else None
+            if fv is None or fv <= 0:
+                continue
+            misprice_pct = (entry - fv) / fv
+            deltas.append(misprice_pct)
+            r.setdefault("judgment", {})["misprice_vs_fair_value_pct"] = round(
+                misprice_pct, 4)
+        if not deltas:
+            return []
+        med = statistics.median(deltas)
+        rich = [d for d in deltas if d > self.misprice_threshold]
+        cheap = [d for d in deltas if d < -self.misprice_threshold]
+        verdict = ("paying rich vs fair value, tighten entry filter"
+                   if len(rich) > len(cheap) else
+                   "entries near or below fair value — healthy")
+        return [Finding(
+            "fair_value_misprice_bias",
+            f"median entry sits {med*100:+.1f}% from fair value — "
+            f"{verdict} (n={len(deltas)}, {len(rich)} rich, {len(cheap)} cheap)",
+            round(med, 4), len(deltas), Finding.grade(len(deltas)),
+        )]
 
     def _context_findings(self, rows) -> List[Finding]:
         """The founder's contextual truths: does ATM beat OTM in chop,

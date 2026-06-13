@@ -32,10 +32,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from .advisor import Maximizer, SuggestionLedger, recommend_dips
+from .auditor import StrategyLeg, audit_strategy
 from .config import SentinelConfig
+from .equity_layer import top10_contextual_layer
+from .institutional import (
+    expected_shortfall, historical_var, parametric_var, vol_cone,
+)
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
+from .saas import (
+    FEATURE_CATALOG, FOUNDER, RETAIL, features_for, gate, plan_summary,
+)
+from .strategy_builder import ChainQuote, INTENTS, build as build_strategy
+from .stress import SCENARIOS, stress_test, stress_test_all
+from .institutional import LegExposure
 from .trails import TrailEngine
 
 LOG = logging.getLogger("sentinel")
@@ -273,6 +284,29 @@ def auth(x_sentinel_token: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(401, "bad or missing X-Sentinel-Token")
 
 
+def resolve_plan(x_sentinel_plan: Optional[str] = Header(default=None)) -> str:
+    """Plan resolver — header-driven for SaaS gating. If unset, the
+    dashboard auth implies FOUNDER (the user's own view). A signed
+    plan-token JWT can replace this in v2; the contract is just the
+    string returned here."""
+    if x_sentinel_plan:
+        return x_sentinel_plan.upper()
+    return FOUNDER
+
+
+def require(feature: str, plan: str) -> None:
+    """Raise 402 unless ``plan`` covers ``feature``."""
+    g = gate(plan, feature)
+    if not g.allowed:
+        raise HTTPException(402, {
+            "error": "payment_required",
+            "feature": feature,
+            "required_tier": g.required_tier,
+            "your_tier": g.your_tier,
+            "reason": g.reason,
+        })
+
+
 class ArmBody(BaseModel):
     tradingsymbol: str
     side: str = "long"
@@ -423,3 +457,226 @@ def killswitch() -> JSONResponse:
     CORE.log(f"KILL SWITCH: {n} trail(s) cancelled, orders disabled "
              f"until restart")
     return JSONResponse({"killed": True, "trails_cancelled": n})
+
+
+# ---------------------------------------------------------------------------
+# Customer SaaS surfaces — each gated through sentinel.saas.gate()
+# ---------------------------------------------------------------------------
+
+@app.get("/api/me/plan", dependencies=[Depends(auth)])
+def me_plan(plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """The customer's own entitlement summary."""
+    return JSONResponse(plan_summary(plan))
+
+
+@app.get("/api/saas/catalog", dependencies=[Depends(auth)])
+def saas_catalog(plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """Every paid surface, its required tier, and which the caller can access."""
+    feats = features_for(plan)
+    return JSONResponse({
+        "plan": plan,
+        "catalog": [
+            {"feature": f, "required_tier": tier,
+             "allowed": f in feats}
+            for f, tier in sorted(FEATURE_CATALOG.items())
+        ],
+    })
+
+
+class AuditLegBody(BaseModel):
+    option_type: str
+    strike: float
+    qty: int
+    premium: float
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta_per_day: float = 0.0
+    vega_per_pct: float = 0.0
+
+
+class AuditBody(BaseModel):
+    legs: List[AuditLegBody]
+    spot: float
+    regime: Optional[str] = None
+
+
+@app.post("/api/audit", dependencies=[Depends(auth)])
+def api_audit(body: AuditBody,
+              plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """Multi-leg payoff audit + Hull-taxonomy detection."""
+    require("auditor.payoff_curve", plan)
+    legs = [StrategyLeg(
+        option_type=l.option_type, strike=l.strike, qty=l.qty,
+        premium=l.premium, delta=l.delta, gamma=l.gamma,
+        theta_per_day=l.theta_per_day, vega_per_pct=l.vega_per_pct,
+    ) for l in body.legs]
+    res = audit_strategy(legs, spot_now=body.spot, regime=body.regime)
+    # The Greek book + risk flags are PRO-only — strip them for RETAIL.
+    payload = {
+        "detected_strategy": res.detected_strategy,
+        "max_profit_rupees": res.max_profit_rupees,
+        "max_loss_rupees": res.max_loss_rupees,
+        "breakeven_points": res.breakeven_points,
+        "payoff_curve": res.payoff_curve,
+        "notes": res.notes,
+    }
+    if gate(plan, "auditor.greek_book").allowed:
+        payload["net_greeks"] = res.net_greeks
+    if gate(plan, "auditor.risk_flags").allowed:
+        payload["flags"] = res.flags
+    return JSONResponse(payload)
+
+
+class BuildBody(BaseModel):
+    intent: str
+    spot: float
+    chain: List[AuditLegBody]    # reuses the leg shape — option_type/strike/premium/etc.
+    iv: float = 0.15
+    t_years: float = 7 / 365
+    qty: int = 75
+    strike_step: float = 50.0
+    regime: Optional[str] = None
+
+
+@app.post("/api/build", dependencies=[Depends(auth)])
+def api_build(body: BuildBody,
+              plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """Multi-leg strategy builder for a customer intent."""
+    # RETAIL gets one build per session via builder.one_per_session;
+    # PRO+ gets unlimited via builder.unlimited.
+    if not gate(plan, "builder.unlimited").allowed:
+        require("builder.one_per_session", plan)
+    if body.intent not in INTENTS:
+        raise HTTPException(400, f"intent must be one of {INTENTS}")
+    chain = [ChainQuote(
+        option_type=c.option_type, strike=c.strike, premium=c.premium,
+        delta=c.delta, gamma=c.gamma,
+        theta_per_day=c.theta_per_day, vega_per_pct=c.vega_per_pct,
+    ) for c in body.chain]
+    return JSONResponse(build_strategy(
+        body.intent, body.spot, chain, iv=body.iv,
+        t_years=body.t_years, qty=body.qty,
+        strike_step=body.strike_step, regime=body.regime,
+    ))
+
+
+class StressLegBody(BaseModel):
+    tradingsymbol: str
+    qty: int
+    premium: float
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta_per_day: float = 0.0
+    vega_per_pct: float = 0.0
+
+
+class StressBody(BaseModel):
+    legs: List[StressLegBody]
+    spot: float
+    scenario: Optional[str] = None     # None -> full matrix
+    base_iv: float = 0.15
+    t_years_remaining: float = 7 / 365
+
+
+@app.post("/api/stress", dependencies=[Depends(auth)])
+def api_stress(body: StressBody,
+               plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """Crisis stress test — single scenario or full matrix."""
+    legs = [LegExposure(
+        tradingsymbol=l.tradingsymbol, qty=l.qty, premium=l.premium,
+        delta=l.delta, gamma=l.gamma,
+        theta_per_day=l.theta_per_day, vega_per_pct=l.vega_per_pct,
+    ) for l in body.legs]
+    if body.scenario is None:
+        require("stress.full_matrix", plan)
+        return JSONResponse({
+            "matrix": stress_test_all(legs, body.spot,
+                                       t_years_remaining=body.t_years_remaining,
+                                       base_iv=body.base_iv),
+        })
+    require("stress.single_scenario", plan)
+    if body.scenario not in SCENARIOS:
+        raise HTTPException(400, f"unknown scenario: {body.scenario}; "
+                                 f"available: {sorted(SCENARIOS)}")
+    r = stress_test(legs, body.spot, body.scenario,
+                    t_years_remaining=body.t_years_remaining,
+                    base_iv=body.base_iv)
+    return JSONResponse({
+        "scenario": r.scenario, "date": r.date, "narrative": r.narrative,
+        "spot_before": r.spot_before, "spot_after": r.spot_after,
+        "spot_shock_pct": r.spot_shock_pct, "iv_shock_abs": r.iv_shock_abs,
+        "portfolio_pnl": r.portfolio_pnl,
+        "portfolio_pnl_pct": r.portfolio_pnl_pct,
+        "margin_at_risk_rupees": r.margin_at_risk_rupees,
+        "legs": [vars(l) for l in r.legs],
+    })
+
+
+class EquityBody(BaseModel):
+    stock_returns_pct: Dict[str, float]
+    index_return_pct: float
+
+
+@app.post("/api/equity_context", dependencies=[Depends(auth)])
+def api_equity_context(body: EquityBody,
+                        plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """NIFTY top-10 regime classifier — full pack at PRO, scalar at RETAIL."""
+    ctx = top10_contextual_layer(body.stock_returns_pct, body.index_return_pct)
+    if gate(plan, "equity.full_context").allowed:
+        return JSONResponse({
+            "regime": ctx.regime,
+            "index_return_pct": ctx.index_return_pct,
+            "top10_summed_contribution_pct": ctx.top10_summed_contribution_pct,
+            "breadth_up": ctx.breadth_up,
+            "breadth_down": ctx.breadth_down,
+            "leaders": [vars(c) for c in ctx.leaders],
+            "laggards": [vars(c) for c in ctx.laggards],
+            "contributions": [vars(c) for c in ctx.contributions],
+            "effective_date": ctx.effective_date,
+        })
+    require("equity.divergence_scalar", plan)
+    return JSONResponse({
+        "regime": ctx.regime,
+        "weightage_divergence": round(
+            ctx.top10_summed_contribution_pct - ctx.index_return_pct, 3),
+    })
+
+
+class VarBody(BaseModel):
+    pnls: List[float]
+    alpha: float = 0.99
+    method: str = "historical"        # "historical" | "cornish_fisher" | "es"
+
+
+@app.post("/api/var", dependencies=[Depends(auth)])
+def api_var(body: VarBody,
+            plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """VaR / Expected Shortfall on a supplied P&L series."""
+    if body.method == "historical":
+        require("var.historical", plan)
+        return JSONResponse(historical_var(body.pnls, alpha=body.alpha))
+    if body.method == "cornish_fisher":
+        require("var.cornish_fisher", plan)
+        return JSONResponse(parametric_var(body.pnls, alpha=body.alpha))
+    if body.method == "es":
+        require("expected_shortfall", plan)
+        return JSONResponse(expected_shortfall(body.pnls, alpha=body.alpha))
+    raise HTTPException(400, "method must be historical|cornish_fisher|es")
+
+
+class VolConeBody(BaseModel):
+    closes: List[float]
+    windows: Optional[List[int]] = None
+    percentiles: Optional[List[int]] = None
+
+
+@app.post("/api/vol_cone", dependencies=[Depends(auth)])
+def api_vol_cone(body: VolConeBody,
+                  plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """Burghardt & Lane vol cone for a series of closes."""
+    require("vol_cone", plan)
+    return JSONResponse(vol_cone(
+        body.closes,
+        windows=tuple(body.windows) if body.windows else (10, 20, 30, 60, 90),
+        percentiles=tuple(body.percentiles) if body.percentiles else (10, 25, 50, 75, 90),
+    ))
