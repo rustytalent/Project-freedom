@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel — live trading copilot</title>
+<style>
+  :root{
+    --bg:#0e0f11; --raised:#15171a; --subtle:#1b1e22; --border:#23262b;
+    --fg:#e8e6e1; --muted:#9da0a6; --dim:#5e6168;
+    --steel:#7c9bb8; --bronze:#b79268; --bronze-glow:#d4b68a;
+    --green:#7da982; --red:#c66b5c;
+  }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  header{display:flex;align-items:center;gap:18px;padding:10px 20px;
+    border-bottom:1px solid var(--border);background:rgba(14,15,17,.9);
+    position:sticky;top:0;z-index:5;backdrop-filter:blur(8px)}
+  header .brand{display:flex;align-items:center;gap:9px;font-weight:600}
+  .reticle{width:13px;height:13px;border:1px solid var(--bronze);border-radius:50%;position:relative}
+  .reticle:before,.reticle:after{content:"";position:absolute;background:var(--bronze)}
+  .reticle:before{left:50%;top:-3px;bottom:-3px;width:1px;transform:translateX(-50%)}
+  .reticle:after{top:50%;left:-3px;right:-3px;height:1px;transform:translateY(-50%)}
+  .chip{font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    padding:2px 9px;border:1px solid var(--border);border-radius:3px;color:var(--muted)}
+  .chip.live{color:var(--green);border-color:rgba(125,169,130,.4)}
+  .chip.demo{color:var(--bronze-glow);border-color:rgba(183,146,104,.45)}
+  .chip.dry{color:var(--steel)}
+  .chip.killed{color:var(--red);border-color:rgba(198,107,92,.5)}
+  header .kpis{display:flex;gap:26px;margin-left:auto;align-items:center}
+  .kpi .l{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  .kpi .v{font-size:17px}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  button{background:var(--subtle);border:1px solid var(--border);color:var(--fg);
+    padding:5px 12px;border-radius:3px;cursor:pointer;font:inherit;font-size:12.5px}
+  button:hover{border-color:var(--bronze)} button.primary{background:var(--steel);color:#0e0f11;border:0}
+  button.danger{background:transparent;border-color:rgba(198,107,92,.5);color:var(--red)}
+  input,select{background:var(--bg);border:1px solid var(--border);color:var(--fg);
+    padding:5px 8px;border-radius:3px;font:inherit;font-size:12.5px;width:90px}
+  main{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;padding:14px 20px;max-width:1700px;margin:0 auto}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  section{background:var(--raised);border:1px solid var(--border);border-radius:4px;overflow:hidden}
+  section>h2{margin:0;padding:9px 14px;font-size:11px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--muted);font-weight:600;
+    border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  section>h2 .right{margin-left:auto;display:flex;gap:8px;align-items:center;font-weight:400}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+    text-align:right;padding:7px 10px;border-bottom:1px solid var(--border);font-weight:500}
+  th:first-child,td:first-child{text-align:left}
+  td{padding:7px 10px;border-bottom:1px solid rgba(35,38,43,.55);text-align:right}
+  tr:hover td{background:rgba(124,155,184,.04)}
+  .col2{display:flex;flex-direction:column;gap:14px}
+  .pad{padding:12px 14px}
+  .sug{padding:10px 14px;border-bottom:1px solid rgba(35,38,43,.55)}
+  .sug .act{font-size:10px;letter-spacing:.12em;padding:1px 7px;border-radius:2px;margin-right:8px}
+  .ARM_TRAIL{background:rgba(124,155,184,.15);color:var(--steel)}
+  .CLOSE{background:rgba(198,107,92,.15);color:var(--red)}
+  .TIGHTEN{background:rgba(183,146,104,.18);color:var(--bronze-glow)}
+  .WARN{background:rgba(94,97,104,.25);color:var(--muted)}
+  .muted-tag{color:var(--dim);font-size:11px;font-style:italic}
+  .hr{font-size:11px;color:var(--dim)}
+  svg text{fill:var(--dim);font-size:10px;font-family:ui-monospace,monospace}
+  .log{font-family:ui-monospace,monospace;font-size:11.5px;max-height:220px;overflow-y:auto}
+  .log div{padding:3px 14px;border-bottom:1px solid rgba(35,38,43,.4);color:var(--muted)}
+  .log .t{color:var(--dim);margin-right:8px}
+  .note{padding:8px 14px;font-size:11.5px;color:var(--dim);border-top:1px solid var(--border)}
+  .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="reticle"></span> Sentinel</div>
+  <span id="mode" class="chip">connecting…</span>
+  <span id="killchip" style="display:none" class="chip killed">KILLED</span>
+  <div class="kpis">
+    <div class="kpi"><div class="l">Cash</div><div class="v mono" id="cash">—</div></div>
+    <div class="kpi"><div class="l">Utilised</div><div class="v mono" id="util">—</div></div>
+    <div class="kpi"><div class="l">Day P&L</div><div class="v mono" id="pnl">—</div></div>
+    <div class="kpi"><div class="l">Peak</div><div class="v mono" id="peak">—</div></div>
+    <div class="kpi"><div class="l">Spot</div><div class="v mono" id="spot">—</div></div>
+    <button class="danger" onclick="killswitch()">KILL</button>
+  </div>
+</header>
+<main>
+  <div class="col2">
+    <section>
+      <h2>Positions
+        <span class="right"><span class="hr" id="updated"></span></span>
+      </h2>
+      <table id="positions"><thead><tr>
+        <th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>P&L</th>
+        <th>Peak</th><th>DD</th><th>IV</th><th>Δ</th><th>θ/day</th><th>Trail</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="note">Greeks computed live from premiums (BS implied vol). θ is premium decay per calendar day.</div>
+    </section>
+
+    <section>
+      <h2>P&L vs spot — scenario curve
+        <span class="right ctl">
+          What-if move <input type="range" id="mv" min="-300" max="300" value="0" step="10" style="width:160px">
+          <span class="mono" id="mvlabel">0 pts</span>
+        </span>
+      </h2>
+      <div class="pad"><svg id="curve" width="100%" height="190" viewBox="0 0 800 190" preserveAspectRatio="none"></svg></div>
+      <table id="whatif"><thead><tr>
+        <th>Leg</th><th>Premium now</th><th>At move</th><th>Δ premium</th><th>Δ P&L</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="note">Repriced at constant IV. Breakeven spots marked ◆ on the curve. IV moves with spot in reality — treat as first-order.</div>
+    </section>
+
+    <section>
+      <h2>Recommendations — dip candidates
+        <span class="right ctl">
+          direction
+          <select id="dir" onchange="setDirection(this.value)">
+            <option value="auto">auto</option><option>UP</option>
+            <option>DOWN</option><option>NEUTRAL</option>
+          </select>
+          <span class="hr" id="dirnote"></span>
+        </span>
+      </h2>
+      <table id="recs"><thead><tr>
+        <th>Symbol</th><th>Type</th><th>Strike</th><th>LTP</th><th>Day high</th>
+        <th>Fall%</th><th>Dist%</th><th>Spread%</th><th>Score</th>
+      </tr></thead><tbody></tbody></table>
+      <div class="note">Spot UP → puts marked down hardest near the money. Candidates IF you expect reversion — decision support, not instructions.</div>
+    </section>
+  </div>
+
+  <div class="col2">
+    <section>
+      <h2>Portfolio lock
+        <span class="right ctl">
+          cushion ₹<input id="plcushion" type="number" value="2000" min="100" step="100">
+          <button class="primary" onclick="armPortfolio()">Arm</button>
+          <button onclick="cancelPortfolio()">Cancel</button>
+        </span>
+      </h2>
+      <div class="pad mono" id="plstatus">not armed</div>
+      <div class="note">Protects TOTAL day P&L: when give-back from session peak ≥ cushion, every open position flattens at market.</div>
+    </section>
+
+    <section>
+      <h2>Active trails</h2>
+      <table id="trails"><thead><tr>
+        <th>Symbol</th><th>Side</th><th>Qty</th><th>Peak</th><th>Last</th>
+        <th>Cushion</th><th></th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section>
+      <h2>Suggestions <span class="right hr" id="ledgerstat"></span></h2>
+      <div id="suggestions"></div>
+      <div class="note">Each rule carries its live hit-rate from the self-scoring ledger (T+10min resolution). Low-accuracy rules are shown MUTED, not hidden.</div>
+    </section>
+
+    <section>
+      <h2>Pairs</h2>
+      <div id="pairs" class="pad mono" style="font-size:12.5px"></div>
+    </section>
+
+    <section>
+      <h2>Activity</h2>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</main>
+<script>
+const token = localStorage.getItem("sentinel_token") || "";
+function hdrs(){ return token ? {"X-Sentinel-Token": token, "Content-Type":"application/json"}
+                              : {"Content-Type":"application/json"}; }
+const inr = n => n==null ? "—" :
+  (n<0?"-":"") + "₹" + Math.abs(Math.round(n)).toLocaleString("en-IN");
+const cls = n => n>0?"pos":(n<0?"neg":"");
+
+async function api(path, opts={}){
+  const r = await fetch(path, {...opts, headers:{...hdrs(), ...(opts.headers||{})}});
+  if(r.status===401){
+    const t = prompt("Sentinel token:");
+    if(t){ localStorage.setItem("sentinel_token", t); location.reload(); }
+    throw new Error("auth");
+  }
+  return r.json();
+}
+
+let lastState = null;
+async function refresh(){
+  try{
+    const s = await api("/api/state");
+    lastState = s; render(s);
+  }catch(e){ /* transient */ }
+}
+
+function render(s){
+  const mode = document.getElementById("mode");
+  if(s.demo){ mode.textContent="DEMO"; mode.className="chip demo"; }
+  else if(s.dry_run){ mode.textContent="LIVE · DRY-RUN"; mode.className="chip dry"; }
+  else { mode.textContent="LIVE · REAL ORDERS"; mode.className="chip live"; }
+  document.getElementById("killchip").style.display = s.killed ? "" : "none";
+
+  const p = s.portfolio;
+  document.getElementById("cash").textContent = inr(p.funds.cash);
+  document.getElementById("util").textContent = inr(p.funds.utilised);
+  const pnlEl = document.getElementById("pnl");
+  pnlEl.textContent = inr(p.total_pnl); pnlEl.className = "v mono " + cls(p.total_pnl);
+  document.getElementById("peak").textContent = inr(p.total_pnl_peak);
+  document.getElementById("spot").textContent = p.spot ? p.spot.toLocaleString("en-IN") : "—";
+  document.getElementById("updated").textContent = p.updated_at_utc ? ("as of " + p.updated_at_utc.slice(11,19) + " UTC") : "";
+
+  // positions
+  const armedSyms = new Set(s.trails.map(t=>t.tradingsymbol));
+  document.querySelector("#positions tbody").innerHTML = p.positions.map(v=>`
+    <tr><td class="mono">${v.tradingsymbol}</td>
+      <td class="mono">${v.quantity}</td>
+      <td class="mono">${v.average_price.toFixed(2)}</td>
+      <td class="mono">${v.ltp.toFixed(2)}</td>
+      <td class="mono ${cls(v.pnl)}">${inr(v.pnl)}</td>
+      <td class="mono">${inr(v.peak_pnl)}</td>
+      <td class="mono ${v.drawdown_from_peak>0?"neg":""}">${inr(v.drawdown_from_peak)}</td>
+      <td class="mono">${v.iv!=null?(v.iv*100).toFixed(1)+"%":"—"}</td>
+      <td class="mono">${v.delta!=null?v.delta.toFixed(2):"—"}</td>
+      <td class="mono">${v.theta_per_day!=null?v.theta_per_day.toFixed(1):"—"}</td>
+      <td>${armedSyms.has(v.tradingsymbol)
+            ? '<span class="chip live">trailing</span>'
+            : `<span class="ctl">₹<input id="c_${v.tradingsymbol}" type="number" value="300" min="1" style="width:64px">
+               <button onclick="armTrail('${v.tradingsymbol}', ${v.quantity})">Trail</button></span>`}</td>
+    </tr>`).join("") || `<tr><td colspan="11" style="text-align:center;color:var(--dim)">no open positions</td></tr>`;
+
+  // scenario curve
+  drawCurve(s.scenario);
+
+  // trails
+  document.querySelector("#trails tbody").innerHTML = s.trails.map(t=>`
+    <tr><td class="mono">${t.tradingsymbol}</td><td>${t.side}</td>
+      <td class="mono">${t.quantity}</td>
+      <td class="mono">${t.peak_premium.toFixed(2)}</td>
+      <td class="mono">${t.last_premium.toFixed(2)}</td>
+      <td class="mono">₹${t.cushion_rupees}</td>
+      <td><button onclick="cancelTrail('${t.trail_id}')">cancel</button></td></tr>`
+  ).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--dim)">none armed</td></tr>`;
+
+  // portfolio lock
+  const pl = s.portfolio_trail;
+  document.getElementById("plstatus").textContent =
+    pl.fired ? "FIRED — all positions flattened"
+    : pl.cushion ? `armed · cushion ${inr(pl.cushion)} · session peak ${inr(pl.peak_pnl)}`
+    : "not armed";
+
+  // suggestions
+  const lg = s.ledger;
+  document.getElementById("ledgerstat").textContent =
+    `${lg.pending} pending · ${Object.keys(lg.rules).length} rules scored`;
+  document.getElementById("suggestions").innerHTML = s.suggestions.map(g=>`
+    <div class="sug">
+      <span class="act ${g.action}">${g.action.replace("_"," ")}</span>
+      <span class="mono">${g.tradingsymbol}</span>
+      ${g.muted?'<span class="muted-tag"> · rule muted (low hit-rate)</span>':""}
+      <div style="color:var(--muted);font-size:12.5px;margin-top:3px">${g.reason}</div>
+      <div class="hr">${g.rule_id}${g.rule_hit_rate!=null?` · hit-rate ${(g.rule_hit_rate*100).toFixed(0)}%`:" · unscored"}</div>
+    </div>`).join("") || `<div class="pad" style="color:var(--dim)">no suggestions right now</div>`;
+
+  // pairs
+  document.getElementById("pairs").innerHTML = p.pairs.map(x=>
+    `${x.underlying} ${x.expiry||""} — combined ${inr(x.combined_pnl)}` +
+    (x.combined_delta!=null?` · net Δ ${x.combined_delta}`:"") +
+    (x.note?`<div class="hr">${x.note}</div>`:"")
+  ).join("<hr style='border-color:var(--border)'>") ||
+    `<span style="color:var(--dim)">no CE+PE pairs detected</span>`;
+
+  // recommendations
+  const rc = s.recommendations;
+  document.getElementById("dirnote").textContent =
+    rc.auto ? `auto: ${rc.direction}` : "";
+  document.querySelector("#recs tbody").innerHTML = (rc.items||[]).map(r=>`
+    <tr><td class="mono">${r.tradingsymbol}</td><td>${r.option_type}</td>
+      <td class="mono">${r.strike}</td><td class="mono">${r.ltp.toFixed(2)}</td>
+      <td class="mono">${r.day_high.toFixed(2)}</td>
+      <td class="mono neg">${r.fall_from_high_pct}%</td>
+      <td class="mono">${r.distance_from_spot_pct}%</td>
+      <td class="mono">${r.spread_pct}%</td>
+      <td class="mono" style="color:var(--bronze-glow)">${r.score.toFixed(3)}</td></tr>`
+  ).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--dim)">no chain data yet</td></tr>`;
+
+  // activity
+  document.getElementById("log").innerHTML = s.activity.map(a=>
+    `<div><span class="t">${a.at}</span>${a.msg}</div>`).join("");
+}
+
+function drawCurve(sc){
+  const svg = document.getElementById("curve");
+  if(!sc.points || !sc.points.length){ svg.innerHTML=""; return; }
+  const W=800,H=190,PAD=34;
+  const xs = sc.points.map(p=>p.spot), ys = sc.points.map(p=>p.pnl);
+  const xmin=Math.min(...xs), xmax=Math.max(...xs);
+  let ymin=Math.min(...ys,0), ymax=Math.max(...ys,0);
+  if(ymax===ymin){ymax=ymin+1}
+  const X = x => PAD + (x-xmin)/(xmax-xmin)*(W-2*PAD);
+  const Y = y => H-22 - (y-ymin)/(ymax-ymin)*(H-44);
+  let d = sc.points.map((p,i)=>(i?"L":"M")+X(p.spot).toFixed(1)+","+Y(p.pnl).toFixed(1)).join(" ");
+  const zero = Y(0);
+  const bes = (sc.breakevens||[]).map(b=>
+    `<path d="M ${X(b)-4} ${zero} l4 -6 l4 6 l-4 6 z" fill="var(--bronze)"/>
+     <text x="${X(b)}" y="${zero+18}" text-anchor="middle">${Math.round(b).toLocaleString("en-IN")}</text>`).join("");
+  svg.innerHTML = `
+    <line x1="${PAD}" y1="${zero}" x2="${W-PAD}" y2="${zero}" stroke="var(--border)" stroke-dasharray="3 4"/>
+    <path d="${d}" fill="none" stroke="var(--steel)" stroke-width="1.8"/>
+    ${bes}
+    <text x="${PAD}" y="14">${inr(ymax)}</text>
+    <text x="${PAD}" y="${H-6}">${inr(ymin)}</text>
+    <text x="${W-PAD}" y="${H-6}" text-anchor="end">spot ${Math.round(xmax).toLocaleString("en-IN")}</text>`;
+}
+
+async function armTrail(sym, qty){
+  const c = parseFloat(document.getElementById("c_"+sym).value);
+  await api("/api/trails", {method:"POST", body: JSON.stringify({
+    tradingsymbol: sym, side: qty>=0?"long":"short",
+    quantity: Math.abs(qty), cushion_rupees: c})});
+  refresh();
+}
+async function cancelTrail(id){ await api("/api/trails/"+id, {method:"DELETE"}); refresh(); }
+async function armPortfolio(){
+  const c = parseFloat(document.getElementById("plcushion").value);
+  await api("/api/portfolio_trail", {method:"POST",
+    body: JSON.stringify({cushion_rupees:c})}); refresh();
+}
+async function cancelPortfolio(){ await api("/api/portfolio_trail", {method:"DELETE"}); refresh(); }
+async function setDirection(v){
+  await api("/api/direction", {method:"POST",
+    body: JSON.stringify({direction: v==="auto"?null:v})}); refresh();
+}
+async function killswitch(){
+  if(confirm("KILL: cancel all trails and refuse all orders until restart?"))
+    { await api("/api/killswitch",{method:"POST"}); refresh(); }
+}
+let mvTimer=null;
+document.getElementById("mv").addEventListener("input", e=>{
+  document.getElementById("mvlabel").textContent = e.target.value + " pts";
+  clearTimeout(mvTimer);
+  mvTimer = setTimeout(async ()=>{
+    const r = await api("/api/whatif?move_points="+e.target.value);
+    document.querySelector("#whatif tbody").innerHTML = r.legs.map(l=>`
+      <tr><td class="mono">${l.tradingsymbol}</td>
+        <td class="mono">${l.current_premium.toFixed(2)}</td>
+        <td class="mono">${l.premium_at_move.toFixed(2)}</td>
+        <td class="mono ${cls(l.premium_change)}">${l.premium_change.toFixed(2)}</td>
+        <td class="mono ${cls(l.pnl_change)}">${inr(l.pnl_change)}</td></tr>`).join("");
+  }, 250);
+});
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
