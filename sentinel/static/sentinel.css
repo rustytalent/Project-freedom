@@ -232,10 +232,48 @@ table.dense tbody td, table.dense thead th{ padding: 4px 8px; }
    Sparkline + chart primitives
    ───────────────────────────────────────────────────────────────── */
 .spark{ height: 22px; width: 80px; vertical-align: middle; }
-.chart-wrap{ background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--r); }
+.chart-wrap{ background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--r); position: relative; }
+.chart-wrap svg{ display: block; cursor: crosshair; }
 .chart-wrap svg text{ fill: var(--dim); font-size: 10px; font-family: "JetBrains Mono", monospace; }
 .chart-wrap .axis line{ stroke: var(--line); }
 .chart-wrap .grid line{ stroke: var(--line-soft); stroke-dasharray: 2 3; }
+
+/* hover tooltip pinned to the chart */
+.chart-wrap .tip{
+  position: absolute; pointer-events: none;
+  background: rgba(13,15,19,.95); border: 1px solid var(--amber);
+  border-radius: var(--r); padding: 6px 9px; min-width: 160px;
+  font-family: "JetBrains Mono", monospace; font-size: var(--t-sm);
+  color: var(--fg-soft); box-shadow: 0 8px 20px rgba(0,0,0,.5);
+  display: none; z-index: 5;
+}
+.chart-wrap .tip.on{ display: block; }
+.chart-wrap .tip .row{ display: flex; justify-content: space-between; gap: 14px; }
+.chart-wrap .tip .row .k{ color: var(--dim); }
+.chart-wrap .tip .row .v{ font-weight: 500; }
+.chart-wrap .tip .legend{ color: var(--amber); font-size: var(--t-xs); letter-spacing: .12em; text-transform: uppercase; margin-bottom: 4px; }
+
+/* spot stepper — replaces the range slider */
+.stepper{
+  display: inline-flex; align-items: stretch; border: 1px solid var(--line-hard);
+  border-radius: var(--r); overflow: hidden; background: var(--bg-2);
+}
+.stepper button{
+  background: transparent; border: 0; color: var(--muted);
+  padding: 4px 9px; font-family: "JetBrains Mono", monospace; font-size: var(--t-sm);
+  cursor: pointer; border-right: 1px solid var(--line-hard);
+}
+.stepper button:last-child{ border-right: 0; }
+.stepper button:hover{ background: var(--amber-soft); color: var(--amber); }
+.stepper button.zero{ color: var(--fg-soft); font-weight: 500; }
+.stepper button.up{ color: var(--green); }
+.stepper button.dn{ color: var(--red); }
+.stepper input{
+  width: 76px; text-align: center; background: var(--bg-0);
+  border: 0; border-left: 1px solid var(--line-hard); border-right: 1px solid var(--line-hard);
+  border-radius: 0; padding: 4px 6px; font-size: var(--t-md);
+  color: var(--amber);
+}
 
 /* ─────────────────────────────────────────────────────────────────
    Lock / metric cells
