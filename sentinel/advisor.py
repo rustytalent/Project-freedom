@@ -29,6 +29,10 @@ from typing import Any, Dict, List, Optional
 
 from .kite_client import InstrumentMeta, Quote
 from .portfolio import PortfolioState
+from .shadow_ledger import (
+    Context, Identity, KIND_MODEL_SUGGESTION, LedgerEvent, ShadowLedger,
+    new_event,
+)
 
 EWMA_ALPHA = 0.2
 MUTE_BELOW = 0.45
@@ -53,6 +57,11 @@ class Suggestion:
     created_at_utc: str = field(default_factory=_utc_now)
     rule_hit_rate: Optional[float] = None
     muted: bool = False
+    # Contract identity — lets the suggestion be canonicalised into the
+    # ShadowLedger as a model_suggestion event (the single substrate).
+    option_type: str = ""       # CE | PE | "" for non-contract advisories
+    strike: float = 0.0
+    underlying: str = ""
 
 
 class Maximizer:
@@ -78,11 +87,13 @@ class Maximizer:
         return out
 
     def _mk(self, rule: str, sym: str, action: str, reason: str,
-            premium: float) -> Suggestion:
+            premium: float, option_type: str = "", strike: float = 0.0,
+            underlying: str = "") -> Suggestion:
         return Suggestion(
             suggestion_id=f"SG_{rule}_{sym}_{int(time.time()*1000)}",
             rule_id=rule, tradingsymbol=sym, action=action,
             reason=reason, premium_at_suggestion=premium,
+            option_type=option_type, strike=strike, underlying=underlying,
         )
 
     def _r1_unprotected_winner(self, pf: PortfolioState,
@@ -93,7 +104,9 @@ class Maximizer:
                 out.append(self._mk(
                     "R1_unprotected_winner", v.tradingsymbol, "ARM_TRAIL",
                     f"position +₹{v.pnl:,.0f} with no trail armed — one "
-                    f"pullback erases it", v.ltp))
+                    f"pullback erases it", v.ltp,
+                    option_type=v.option_type, strike=v.strike,
+                    underlying=v.underlying))
         return out
 
     def _r2_paired_leg_bleed(self, pf: PortfolioState) -> List[Suggestion]:
@@ -108,7 +121,9 @@ class Maximizer:
                     "R2_paired_leg_bleed", lo.tradingsymbol, "CLOSE",
                     f"losing {lo.option_type} leg (-₹{abs(lo.pnl):,.0f}) is "
                     f"bleeding against the winning leg in {pair.underlying} "
-                    f"{pair.expiry}", lo.ltp))
+                    f"{pair.expiry}", lo.ltp,
+                    option_type=lo.option_type, strike=lo.strike,
+                    underlying=lo.underlying))
         return out
 
     def _r3_peak_giveback(self, pf: PortfolioState) -> List[Suggestion]:
@@ -120,7 +135,8 @@ class Maximizer:
                     "R3_peak_giveback", v.tradingsymbol, "TIGHTEN",
                     f"gave back ₹{v.drawdown_from_peak:,.0f} of a "
                     f"₹{v.peak_pnl:,.0f} peak (>40%) — tighten or exit",
-                    v.ltp))
+                    v.ltp, option_type=v.option_type, strike=v.strike,
+                    underlying=v.underlying))
         return out
 
     def _r4_theta_burn(self, pf: PortfolioState) -> List[Suggestion]:
@@ -134,7 +150,9 @@ class Maximizer:
                     "R4_theta_burn", v.tradingsymbol, "CLOSE",
                     f"<2 days to expiry, theta ₹{abs(v.theta_per_day):,.1f}/day "
                     f"is {abs(v.theta_per_day)/v.ltp:.0%} of premium and the "
-                    f"position is going nowhere", v.ltp))
+                    f"position is going nowhere", v.ltp,
+                    option_type=v.option_type, strike=v.strike,
+                    underlying=v.underlying))
         return out
 
     def _r5_concentration(self, pf: PortfolioState) -> List[Suggestion]:
@@ -243,7 +261,9 @@ def recommend_dips(direction: str, spot: float,
 # ---------------------------------------------------------------------------
 
 class SuggestionLedger:
-    """Every suggestion gets resolved against the live premium at
+    """Self-scoring resolver + summary table over the canonical substrate.
+
+    Each suggestion is resolved against the live premium at
     T+resolve_minutes:
 
       CLOSE / TIGHTEN — right if the premium FELL after the call
@@ -256,10 +276,20 @@ class SuggestionLedger:
     Per-rule EWMA hit-rates persist across restarts (JSON sidecar)
     and feed straight back into the maximizer's mute flags — the
     visible v1 of 'it checks itself and improves immediately'.
+
+    Canonical-ledger contract (Codex Problem S2): when constructed with
+    a ``shadow_ledger`` + ``session``, every recorded suggestion is ALSO
+    written into the ShadowLedger as a ``model_suggestion`` event — the
+    single substrate every live decision lands in. This makes the
+    SuggestionLedger a *derived* resolver/summary over the canonical
+    store rather than a competing second moat. The JSONL it keeps is now
+    a backward-compatible projection, not the system of record.
     """
 
     def __init__(self, journal_path: Path,
-                 resolve_minutes: float = 10.0) -> None:
+                 resolve_minutes: float = 10.0,
+                 shadow_ledger: Optional["ShadowLedger"] = None,
+                 session: str = "") -> None:
         self.journal_path = Path(journal_path)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.resolve_minutes = float(resolve_minutes)
@@ -268,7 +298,37 @@ class SuggestionLedger:
         self._rates: Dict[str, float] = {}
         self._counts: Dict[str, int] = {}
         self._post_peak: Dict[str, float] = {}
+        # canonical substrate (optional; when present, suggestions are
+        # mirrored into it as model_suggestion events keyed by suggestion_id)
+        self.shadow_ledger = shadow_ledger
+        self.session = session
+        self._canonical_events: Dict[str, "LedgerEvent"] = {}
         self._load_rates()
+
+    def _canonicalise(self, s: Suggestion) -> None:
+        """Write one suggestion into the ShadowLedger substrate as a
+        model_suggestion event (hypothesis=None — an advisory predicts no
+        target/stop, so we record the WHAT honestly without fabricating a
+        price hypothesis). scientist=rule_id makes it queryable per rule."""
+        if self.shadow_ledger is None:
+            return
+        ident = Identity(
+            instrument=s.tradingsymbol, option_type=s.option_type or "",
+            strike=s.strike, expiry=None,
+            moneyness_key="", underlying_price=0.0,
+            premium=s.premium_at_suggestion,
+        )
+        ctx = Context()
+        ev = new_event(KIND_MODEL_SUGGESTION,
+                       self.session or _utc_now()[:10],
+                       ident, ctx, None, scientist=s.rule_id)
+        # carry the suggestion id so resolution can stamp the same event
+        ev.event_id = f"SG_{s.suggestion_id}"
+        try:
+            self.shadow_ledger.write(ev)
+            self._canonical_events[s.suggestion_id] = ev
+        except Exception:
+            pass        # canonical mirror is best-effort; never block advice
 
     def _load_rates(self) -> None:
         try:
@@ -294,6 +354,8 @@ class SuggestionLedger:
             with open(self.journal_path, "a") as f:
                 f.write(json.dumps({k: v for k, v in row.items()
                                     if k != "recorded_monotonic"}) + "\n")
+            # mirror into the canonical substrate
+            self._canonicalise(s)
 
     def resolve_due(self, live_premiums: Dict[str, float]) -> int:
         """Score every pending suggestion older than resolve_minutes.
@@ -312,20 +374,62 @@ class SuggestionLedger:
             if now - row["recorded_monotonic"] < horizon:
                 still.append(row)
                 continue
+            sid = row["suggestion_id"]
             verdict = self._score(row, ltp)
             if verdict is None:
-                resolved += 1   # unscorable; drop without rating
+                # unscorable (WARN / no premium): complete the canonical
+                # event without a rating, then drop transient state.
+                self._complete_canonical_unscored(sid, ltp)
+                self._post_peak.pop(sid, None)
+                resolved += 1
                 continue
             rule = row["rule_id"]
             prev = self._rates.get(rule, 0.5)
             self._rates[rule] = (1 - EWMA_ALPHA) * prev + EWMA_ALPHA * (
                 1.0 if verdict else 0.0)
             self._counts[rule] = self._counts.get(rule, 0) + 1
+            self._stamp_canonical_judgment(sid, verdict, ltp)
+            self._post_peak.pop(sid, None)
             resolved += 1
         self._pending = still
         if resolved:
             self._save_rates()
         return resolved
+
+    def _stamp_canonical_judgment(self, suggestion_id: str,
+                                  verdict: bool, ltp: Optional[float]) -> None:
+        """Resolve the mirrored ShadowLedger event: fill its judgment +
+        complete its journey so the curator / flywheel see the outcome.
+        Last-write-wins per event_id in the ShadowLedger reader."""
+        ev = self._canonical_events.pop(suggestion_id, None)
+        if ev is None or self.shadow_ledger is None:
+            return
+        ev.judgment.was_entry_good = bool(verdict)
+        ev.judgment.notes = f"resolved at premium {ltp}"
+        if ltp is not None:
+            ev.journey.outcomes[f"t+{int(self.resolve_minutes)}"] = round(ltp, 2)
+        ev.journey.complete = True
+        try:
+            self.shadow_ledger.update(ev)
+        except Exception:
+            pass
+
+    def _complete_canonical_unscored(self, suggestion_id: str,
+                                     ltp: Optional[float]) -> None:
+        """An unscorable advisory (WARN / no premium) still resolved — mark
+        its canonical event complete with a note, no win/loss judgment, and
+        drop it from the in-flight map so it can't leak."""
+        ev = self._canonical_events.pop(suggestion_id, None)
+        if ev is None or self.shadow_ledger is None:
+            return
+        ev.judgment.notes = "informational — not scored"
+        ev.journey.complete = True
+        if ltp is not None:
+            ev.journey.outcomes[f"t+{int(self.resolve_minutes)}"] = round(ltp, 2)
+        try:
+            self.shadow_ledger.update(ev)
+        except Exception:
+            pass
 
     def _score(self, row: Dict[str, Any],
                ltp: Optional[float]) -> Optional[bool]:
@@ -361,10 +465,15 @@ class SuggestionLedger:
 from .io_decl import IOSpec, declare
 declare(IOSpec(
     module="sentinel.advisor",
-    purpose="maximizer rules + dip recommender + self-scoring suggestion ledger",
+    purpose="maximizer rules + dip recommender + self-scoring suggestion "
+            "ledger; suggestions are mirrored into the ShadowLedger as "
+            "model_suggestion events (canonical substrate — Codex S2)",
     inputs=["PortfolioState + option chain quotes"],
-    outputs=["Suggestion[], Recommendation[]", "file:<journal>/suggestions.jsonl"],
+    outputs=["Suggestion[], Recommendation[]",
+             "file:<journal>/suggestions.jsonl (compat projection)",
+             "model_suggestion events in sentinel.shadow_ledger (canonical)"],
     consumes_from=["sentinel.portfolio", "sentinel.kite_client"],
-    produces_for=["sentinel.server (UI)", "sentinel.reports"],
+    produces_for=["sentinel.server (UI)", "sentinel.reports",
+                  "sentinel.shadow_ledger", "sentinel.ledger_export"],
     tier="TRUSTED",
 ))

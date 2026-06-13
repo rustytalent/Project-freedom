@@ -42,6 +42,7 @@ from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
 from .orchestration import Orchestrator, Signal, Tier
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
+from .shadow_ledger import ShadowLedger
 from .saas import (
     FEATURE_CATALOG, FOUNDER, RETAIL, features_for, gate, plan_summary,
 )
@@ -100,9 +101,17 @@ class Sentinel:
             exit_fn=self._trail_exit,
         )
         self.portfolio = PortfolioState()
+        # The canonical substrate: every live decision (suggestions today,
+        # scientist hypotheses next) lands here. SuggestionLedger keeps its
+        # scoring role but mirrors each suggestion into this ShadowLedger as
+        # a model_suggestion event, so there is ONE system of record.
+        self.session = datetime.now(IST).strftime("%Y-%m-%d")
+        self.shadow_ledger = ShadowLedger(cfg.journal_dir)
         self.ledger = SuggestionLedger(
             journal_path=cfg.journal_dir / "suggestions.jsonl",
             resolve_minutes=cfg.ledger_resolve_minutes,
+            shadow_ledger=self.shadow_ledger,
+            session=self.session,
         )
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
