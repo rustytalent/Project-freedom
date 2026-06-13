@@ -39,6 +39,7 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .orchestration import Orchestrator, Signal, Tier
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
 from .saas import (
@@ -73,9 +74,30 @@ class Sentinel:
                                        max_orders_per_day=cfg.max_orders_per_day)
             self.demo = False
         cfg.journal_dir.mkdir(parents=True, exist_ok=True)
+        # The trust-tier spine: EVERY order placement is routed through the
+        # orchestrator, and only EXECUTION-tier signals reach the execution
+        # sink. The two hard-wired exit actors (trailing_stop, profit_lock)
+        # are EXECUTION by identity; everything else is clamped to SHADOW
+        # until the curator graduates it. This makes the wall runtime-real,
+        # not just conceptual.
+        self.routed_signals: List[Dict[str, Any]] = []
+        self.surfaced_signals: List[Dict[str, Any]] = []
+        self.orchestrator = Orchestrator(
+            ledger_sink=self._sig_ledger,
+            surface_sink=self._sig_surface,
+            execution_sink=self._sig_execute,
+            show_logged=False,
+            allow_execution=True,
+        )
+        # Operator-facing rule engines are decision-support, not execution:
+        # graduate them to TRUSTED so they surface, but they can never reach
+        # the order path (only EXECUTION can, and only the two exit actors
+        # are allowed to claim it).
+        self.orchestrator.set_ceiling("maximizer", Tier.TRUSTED)
+        self.orchestrator.set_ceiling("dip_recommender", Tier.TRUSTED)
         self.trails = TrailEngine(
             journal_path=cfg.journal_dir / "trails.jsonl",
-            exit_fn=self._exit_fn,
+            exit_fn=self._trail_exit,
         )
         self.portfolio = PortfolioState()
         self.ledger = SuggestionLedger(
@@ -109,6 +131,45 @@ class Sentinel:
         self.log(f"EXIT {side} {qty} {symbol} -> {resp.get('status')} "
                  f"({resp.get('order_id')})")
         return resp
+
+    # -- orchestrator sinks ----------------------------------------------
+    # The spine calls these; route order is ledger -> surface -> execution.
+
+    def _sig_ledger(self, sig: Signal) -> None:
+        """Every routed signal is recorded — the substrate sees all."""
+        self.routed_signals.insert(0, {
+            "at": datetime.now(IST).strftime("%H:%M:%S"),
+            "source": sig.source, "tier": sig.tier.name,
+            "kind": sig.kind, "reason": sig.reason,
+        })
+        del self.routed_signals[100:]
+
+    def _sig_surface(self, sig: Signal) -> None:
+        """Operator-facing signals (TRUSTED+, or LOGGED when show_logged)."""
+        self.surfaced_signals.insert(0, {
+            "at": datetime.now(IST).strftime("%H:%M:%S"),
+            "source": sig.source, "kind": sig.kind, "reason": sig.reason,
+        })
+        del self.surfaced_signals[50:]
+
+    def _sig_execute(self, sig: Signal) -> Optional[Dict[str, Any]]:
+        """The ONE gated path to an order. Reached only by EXECUTION-tier
+        signals the spine permitted."""
+        p = sig.payload
+        return self._exit_fn(p["symbol"], p["side"], int(p["qty"]))
+
+    def _trail_exit(self, symbol: str, side: str, qty: int) -> Dict[str, Any]:
+        """TrailEngine's injected exit_fn — instead of placing an order
+        directly, it asks the spine to route an EXECUTION-tier exit. The
+        trailing stop and portfolio trail are both 'trailing_stop' (a
+        hard-wired EXECUTION actor). Returns the order response (or {} if
+        the spine blocked it, e.g. kill switch) so TrailEngine's order_id
+        read never crashes."""
+        resp = self.orchestrator.route(Signal(
+            source="trailing_stop", tier=Tier.EXECUTION, kind="exit",
+            payload={"symbol": symbol, "side": side, "qty": qty},
+            reason="trailing stop / portfolio lock hit"))
+        return resp or {}
 
     # -- background loop -------------------------------------------------
 
@@ -186,6 +247,14 @@ class Sentinel:
         armed = [t.tradingsymbol for t in self.trails.active()]
         sugg = self.maximizer.run(self.portfolio, armed)
         self.suggestions = [vars(s) for s in sugg]
+        for s in self.suggestions:
+            # maximizer is graduated to TRUSTED -> these surface but can
+            # never reach the order path (only EXECUTION can).
+            self.orchestrator.route(Signal(
+                source="maximizer", tier=Tier.TRUSTED, kind="recommendation",
+                payload=s,
+                reason=str(s.get("rationale") or s.get("action")
+                           or "maximizer suggestion")))
         fired = self.trails.on_portfolio_pnl(
             self.portfolio.total_pnl,
             [{"tradingsymbol": v.tradingsymbol, "quantity": v.quantity}
@@ -200,12 +269,18 @@ class Sentinel:
             snap = self.profit_lock.snapshot()
             self.log(f"PROFIT LOCK fired: locking ₹{snap['locked_pnl']:,.0f} "
                      f"(peak ₹{snap['peak_pnl']:,.0f})")
+            reason = (f"profit lock fired, locking ₹{snap['locked_pnl']:,.0f} "
+                      f"(peak ₹{snap['peak_pnl']:,.0f})")
             for v in list(self.portfolio.positions.values()):
                 if self.killed:
                     break
                 side = "SELL" if v.quantity > 0 else "BUY"
                 try:
-                    self._exit_fn(v.tradingsymbol, side, abs(v.quantity))
+                    self.orchestrator.route(Signal(
+                        source="profit_lock", tier=Tier.EXECUTION, kind="exit",
+                        payload={"symbol": v.tradingsymbol, "side": side,
+                                 "qty": abs(v.quantity)},
+                        reason=reason))
                 except Exception:
                     continue
 
@@ -244,6 +319,11 @@ class Sentinel:
             "auto": self.direction_override is None,
             "items": [vars(r) for r in recs],
         }
+        if recs:
+            self.orchestrator.route(Signal(
+                source="dip_recommender", tier=Tier.TRUSTED, kind="recommendation",
+                payload={"direction": direction, "n": len(recs)},
+                reason=f"{len(recs)} dip recommendation(s), bias {direction}"))
 
     _spot_history: List[float] = []
 
@@ -351,6 +431,8 @@ def state() -> JSONResponse:
         "suggestions": CORE.suggestions,
         "ledger": CORE.ledger.stats(),
         "recommendations": CORE.recommendations,
+        "orchestrator": CORE.orchestrator.stats(),
+        "routed_signals": CORE.routed_signals[:20],
         "activity": CORE.activity[:50],
     })
 
@@ -450,6 +532,9 @@ def set_direction(body: DirectionBody) -> JSONResponse:
 @app.post("/api/killswitch", dependencies=[Depends(auth)])
 def killswitch() -> JSONResponse:
     CORE.killed = True
+    # Close the spine's execution gate too: even a hard-wired exit actor
+    # cannot place an order while the kill switch is active.
+    CORE.orchestrator.allow_execution = False
     n = len(CORE.trails.active())
     for t in CORE.trails.active():
         CORE.trails.cancel(t.trail_id)
@@ -457,6 +542,32 @@ def killswitch() -> JSONResponse:
     CORE.log(f"KILL SWITCH: {n} trail(s) cancelled, orders disabled "
              f"until restart")
     return JSONResponse({"killed": True, "trails_cancelled": n})
+
+
+class GraduateBody(BaseModel):
+    source: str
+    tier: str          # SHADOW | LOGGED | TRUSTED (EXECUTION is reserved)
+
+
+@app.post("/api/graduate", dependencies=[Depends(auth)])
+def graduate(body: GraduateBody) -> JSONResponse:
+    """The curator's lever, made operable: promote/demote a signal
+    source's maximum tier. EXECUTION is refused for any source — only the
+    two hard-wired exit actors (trailing_stop, profit_lock) may ever
+    reach the order path, and they don't need a ceiling entry."""
+    try:
+        tier = Tier[body.tier.upper()]
+    except KeyError:
+        raise HTTPException(400, f"tier must be one of "
+                                 f"{[t.name for t in Tier]}")
+    if tier >= Tier.EXECUTION:
+        raise HTTPException(
+            400, "EXECUTION is reserved for trailing_stop / profit_lock; "
+                 "no other source may be graduated to the order path")
+    CORE.orchestrator.set_ceiling(body.source, tier)
+    CORE.log(f"graduated {body.source} -> max tier {tier.name}")
+    return JSONResponse({"source": body.source, "ceiling": tier.name,
+                         "stats": CORE.orchestrator.stats()})
 
 
 # ---------------------------------------------------------------------------

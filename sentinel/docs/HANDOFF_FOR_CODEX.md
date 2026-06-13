@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13 (Wave 4)**
+**Status as of 2026-06-13 (Wave 5)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 4 — server-side SaaS enforcement (every paid endpoint), curator fair-value misprice finding, research-context bridge (Codex Problem S3), live-to-research adapter (Codex Problem S4).
-**Test status**: **160 passed** (sentinel suite)
+**Latest pass**: Wave 5 — the Orchestrator is now in the server hot path. Every order placement routes through the trust-tier spine; only the two hard-wired EXECUTION actors (trailing_stop, profit_lock) reach the order path. The wall is runtime-enforced, not just conceptual.
+**Test status**: **170 passed** (sentinel suite)
 **Module count**: **22** self-declared modules
-**Lines of code**: ~7,400 backend + ~2,200 tests
+**Lines of code**: ~7,600 backend + ~2,400 tests
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
@@ -225,6 +225,7 @@ gate outputs by plan:
 | `test_institutional.py` | 28 | SVI round-trip, RV estimator scales, vol-cone monotonicity, CF-VaR scale on N(0,1000), ES≥VaR, Crux composite weights, roll-curve regime labels, Beasley-Springer at standard quantiles |
 | `test_wave3.py` | 36 | Stress matrix (BS + Greek proxy), Hull-taxonomy detection (long call, vertical spreads, straddles, condors, butterflies, custom), uncapped-loss flagging, regime-mismatch flagging, builder for 6 intents auto-detected by auditor, NIFTY top-10 regime classifier (HIDDEN_BULL etc.), SaaS gate matrix (RETAIL blocked from PRO, QUANT entitled to all, FOUNDER bypass, unknown plan denied) |
 | `test_wave4.py` | 26 | Curator fair-value misprice (rich/healthy/no-resolver/per-event stamp), liqpool_bridge (empty / payload / latest fallback / corrupt tolerant / merge into context), ledger_export (kind mapping, DecisionEvent shape, JSONL roundtrip, empty session, None-field omission), FastAPI SaaS enforcement (/me/plan, /saas/catalog, /audit RETAIL vs PRO, /stress 402 + full matrix, /var historical vs CF, /vol_cone PRO-only, /equity_context scalar vs full, /build 400 on unknown intent) |
+| `test_wave5.py` | 10 | Orchestrator in the hot path — trail exit routes through spine + places order, profit-lock fire routes via spine, ungraduated source requesting EXECUTION is clamped (no order), TRUSTED source surfaces but never executes, kill switch blocks execution at the spine, /api/graduate sets ceiling + refuses EXECUTION + rejects bad tier, /api/state exposes orchestrator stats, maximizer/dip_recommender graduated at startup |
 
 Run:
 ```bash
@@ -342,19 +343,34 @@ cross-codebase queue. **Wave 4 closed the two ledger-side items**:
   `python -m sentinel.ledger_export --session 2026-06-13`. Idempotent
   by event_id so re-running is safe.
 
+- **Orchestrator in the hot path** ✅ **DONE (Wave 5)**
+  `sentinel.server` now routes every order placement through
+  `orchestration.Orchestrator`. The trail engine's injected `exit_fn`
+  is `Sentinel._trail_exit`, which wraps the exit as a
+  `Signal(source="trailing_stop", tier=EXECUTION, kind="exit")` and
+  routes it; the profit-lock fire path routes `source="profit_lock"`.
+  Three sinks: `_sig_ledger` (records every routed signal — exposed at
+  `/api/state.routed_signals`), `_sig_surface` (operator-facing
+  TRUSTED+), `_sig_execute` (the ONE gated path to
+  `place_market_exit`). `maximizer` + `dip_recommender` are graduated
+  to TRUSTED at startup so they surface but can never execute. New
+  `POST /api/graduate` is the curator's lever (refuses EXECUTION for
+  any source — reserved for the two exit actors). Kill switch flips
+  `orchestrator.allow_execution = False` so even a hard-wired actor is
+  blocked at the spine. `/api/state` exposes `orchestrator.stats()`.
+
 **Still open from Codex's queue**:
 
 - **Shared event spine schema** — formalise `DecisionEvent` /
   `ExecutionIntent` / `OutcomeEvent` as a versioned package both
   codebases depend on (currently each side has its own dataclasses
-  that agree by convention).
-- **Orchestrator in the hot path** — `sentinel.server` still calls
-  trails / profit-lock / suggestions / recommendations directly. Wrap
-  each as a `Signal` and route through `orchestration.Orchestrator`.
-  The trust-tier wall is conceptually right but not runtime-enforced.
+  that agree by convention; `ledger_export.DecisionEvent` is the
+  Sentinel-side shape).
 - **Canonical ledger** — `SuggestionLedger` becomes a derived view
   over `ShadowLedger` (writes go to one place, the older shape becomes
-  a read-side projection).
+  a read-side projection). The spine now ledgers every routed signal
+  via `_sig_ledger`; folding `SuggestionLedger` into the `ShadowLedger`
+  substrate is the natural next step.
 - **liquidity_backtester side**: `ShadowLogger` + `FlywheelHub` wired
   into the standard Daily Brief run; `multi_asset_run.py` broken up;
   artifact-health gate enforced.
