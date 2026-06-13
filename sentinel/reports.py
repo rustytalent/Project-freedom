@@ -30,9 +30,10 @@ from typing import Any, Dict, List, Optional
 
 # Importing these runs their declare() calls -> populates io_decl.REGISTRY.
 from . import (  # noqa: F401
-    advisor, calibration, curator, greeks, kite_client, leakage_guard,
-    moneyness, orchestration, portfolio, profit_lock, scenario_engine,
-    scientists, shadow_ledger, trails,
+    advisor, auditor, calibration, curator, equity_layer, greeks,
+    institutional, kite_client, leakage_guard, moneyness, orchestration,
+    portfolio, profit_lock, saas, scenario_engine, scientists,
+    shadow_ledger, strategy_builder, stress, trails,
 )
 from .calibration import CalibrationEngine
 from .curator import Curator
@@ -188,8 +189,28 @@ def generate_system_report(journal_dir: Path, session: str,
         L.append(f"- {w}")
     L.append("")
 
-    # 8. module health
-    L.append("## 8. Module health (self-declared IO)")
+    # 8. institutional surfaces available (the SaaS catalog)
+    L.append("## 8. Institutional surfaces available")
+    L.append("Named, citation-bearing methodologies in this build:")
+    L.append("- `institutional`: SVI smile (Gatheral 2004), fair value, "
+             "25-delta skew, vol cone (Burghardt & Lane 1990), Cornish-Fisher "
+             "VaR (BIS 1996), Historical VaR, Expected Shortfall (Basel III), "
+             "Yang-Zhang RV, Crux Liquidity / Slippage scores, roll curves")
+    L.append("- `stress`: 7 canned crisis scenarios "
+             f"({', '.join(sorted(stress.SCENARIOS))})")
+    L.append("- `auditor`: multi-leg payoff curve + Hull-taxonomy detection "
+             "+ uncapped-loss + regime-mismatch flags")
+    L.append("- `strategy_builder`: 6 customer intents "
+             f"({', '.join(strategy_builder.INTENTS)})")
+    L.append("- `equity_layer`: NIFTY top-10 HIDDEN_BULL/HIDDEN_BEAR/"
+             "BROAD_BULL/BROAD_BEAR/TRUE_FLAT regime classifier "
+             f"(weights effective {equity_layer.NIFTY_TOP10_EFFECTIVE_DATE})")
+    L.append("- `saas`: tier gating across "
+             f"{len(saas.FEATURE_CATALOG)} features (RETAIL/PRO/QUANT/FOUNDER)")
+    L.append("")
+
+    # 9. module health
+    L.append("## 9. Module health (self-declared IO)")
     for name in sorted(REGISTRY):
         s = REGISTRY[name]
         L.append(f"- `{name}` [{s.tier}] — {s.purpose}")

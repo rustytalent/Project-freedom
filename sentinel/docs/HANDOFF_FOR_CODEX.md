@@ -1,10 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13**
+**Status as of 2026-06-13 (Wave 3)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Last commit**: `d7eb15b` — institutional analytics layer (SVI, VaR/ES, RV cone, Crux scores)
-**Test status**: 98 passed (sentinel suite)
-**Lines of code**: ~5,000 backend + ~1,300 tests
+**Latest pass**: stress simulator + customer auditor + multi-leg builder + NIFTY top-10 contextual layer + SaaS gating + risk-dashboard wiring.
+**Test status**: **134 passed** (sentinel suite)
+**Module count**: **20** self-declared modules
+**Lines of code**: ~6,500 backend + ~1,800 tests
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
@@ -126,7 +127,7 @@ produces:
 
 ---
 
-## 3. Module inventory (15 modules, all IO-declared)
+## 3. Module inventory (20 modules, all IO-declared)
 
 | Module | Tier | Purpose |
 |--------|------|---------|
@@ -144,7 +145,12 @@ produces:
 | `calibration.py` | TRUSTED | Re-run grid search; accept only if expectancy improves |
 | `scenario_engine.py` | TRUSTED | `evaluate()`, `payoff_curve()`, `pnl_heatmap()`, `premium_sensitivity()`, risk waterfall |
 | `leakage_guard.py` | TRUSTED | CLEAN / EARNED / SUSPICIOUS verdicts on metric jumps |
-| **`institutional.py`** | TRUSTED | **NEW — see §4. Named institutional methodologies.** |
+| `institutional.py` | TRUSTED | Named institutional methodologies — see §4. |
+| **`stress.py`** | TRUSTED | **Wave 3** — 7 canned crisis scenarios, per-leg + portfolio P&L matrix |
+| **`auditor.py`** | TRUSTED | **Wave 3** — multi-leg payoff curve + Hull-taxonomy detect + risk flags |
+| **`strategy_builder.py`** | TRUSTED | **Wave 3** — 6 customer intents → legs, auto-audited |
+| **`equity_layer.py`** | TRUSTED | **Wave 3** — NIFTY top-10 regime classifier (HIDDEN_BULL etc.) |
+| **`saas.py`** | TRUSTED | **Wave 3** — RETAIL/PRO/QUANT/FOUNDER tier gates over the feature catalog |
 
 Plus: `reports.py` (writes artifacts), `server.py` (FastAPI), `config.py`,
 `io_decl.py` (the registry mechanism itself).
@@ -215,6 +221,7 @@ gate outputs by plan:
 | `test_wave2.py` | 15 | Scientists pool, full lab loop (scientists → ledger → curator → calibration), scenario engine, leakage guard, IO map, reports |
 | `test_trails_server.py` | varied | FastAPI server auth + state endpoint |
 | `test_institutional.py` | 28 | SVI round-trip, RV estimator scales, vol-cone monotonicity, CF-VaR scale on N(0,1000), ES≥VaR, Crux composite weights, roll-curve regime labels, Beasley-Springer at standard quantiles |
+| `test_wave3.py` | 36 | Stress matrix (BS + Greek proxy), Hull-taxonomy detection (long call, vertical spreads, straddles, condors, butterflies, custom), uncapped-loss flagging, regime-mismatch flagging, builder for 6 intents auto-detected by auditor, NIFTY top-10 regime classifier (HIDDEN_BULL etc.), SaaS gate matrix (RETAIL blocked from PRO, QUANT entitled to all, FOUNDER bypass, unknown plan denied) |
 
 Run:
 ```bash
@@ -225,86 +232,94 @@ python -m pytest sentinel/tests -q
 
 ## 6. What's still open (the tier-3/tier-4 roadmap)
 
-These are the remaining items from the founder's full vision. Order is
-suggested but not strict — pick the one with the highest commercial pull
-for your sprint.
+### 6.1 Top-10 NIFTY equity contextual layer ✅ DONE (Wave 3)
 
-### 6.1 Top-10 NIFTY equity contextual layer
+`sentinel/equity_layer.py` ships with `top10_contextual_layer(returns, idx)`
+returning regime labels: HIDDEN_BULL / HIDDEN_BEAR / BROAD_BULL /
+BROAD_BEAR / TRUE_FLAT, plus a scalar `weightage_divergence()`. Canned
+Q2-2026 NIFTY top-10 weights with refresh-date stamp. **Next:** wire it
+into `MarketSnapshot.context` so scientists read regime directly.
 
-**Problem**: NIFTY moves because its top constituents move. RELIANCE,
-HDFCBANK, ICICIBANK, INFY, TCS, etc. carry ~50% of the index weight. When
-the index is flat but RELIANCE is +2%, the index is masking a bull move.
+### 6.2 Real crisis stress simulator ✅ DONE (Wave 3)
 
-**Build**:
-- `sentinel/equity_layer.py` with `top10_weightage_divergence()` returning
-  contribution-to-NIFTY per stock vs raw price move per stock.
-- Wire as a context flag the scientists can consult ("hidden bull" /
-  "hidden bear" / "true flat").
+`sentinel/stress.py` ships with 7 canned scenarios: GFC_OCT_2008,
+COVID_MAR_2020, FLASH_CRASH_2010, DEMONETISATION_2016, YES_BANK_MAR_2020,
+ADANI_JAN_2023, US_DOWNGRADE_2011. Each carries (spot_shock, iv_shock,
+timeframe, narrative). Two entry points: `stress_test(legs, spot,
+scenario)` for one shock, `stress_test_all(legs, spot)` for the full
+matrix sorted worst-first. Supports BS re-price path when strikes +
+option_types provided, parametric Greek proxy otherwise.
 
-### 6.2 Real crisis stress simulator
+### 6.3 Customer-facing strategy auditor ✅ DONE (Wave 3)
 
-**Problem**: VaR/ES are statistical; a desk also wants "what happened to a
-position like this on Demonetisation day?"
+`sentinel/auditor.py` ships with `audit_strategy(legs, spot, regime)`
+returning: detected named strategy (Hull 11e taxonomy — LONG_CALL,
+BULL_CALL_SPREAD, IRON_CONDOR, IRON_BUTTERFLY, CALL_BUTTERFLY etc.),
+payoff curve, max profit / max loss, linear-interpolated breakevens, net
+Greeks (delegating to `institutional.portfolio_greek_exposures`), and
+flags for uncapped loss / negative-theta-in-chop / short-gamma-in-
+trending / vega-short-delta-neutral.
 
-**Build**:
-- `sentinel/stress.py` with canned scenarios for 2008 GFC, COVID Mar-2020,
-  Flash Crash, Demonetisation Nov-2016, Yes Bank Mar-2020, Adani Jan-2023.
-- Each scenario is a (spot_shock_pct, iv_shock_abs, timeframe) triple.
-- `stress_test(legs, scenario_name)` returns the P&L decomposition under
-  that shock.
+### 6.4 Multi-leg strategy builder ✅ DONE (Wave 3)
 
-### 6.3 Customer-facing strategy auditor
+`sentinel/strategy_builder.py` ships with `build(intent, spot, chain)`
+for 6 intents: PREMIUM_SELL_NEUTRAL (iron condor at ±2σ wings),
+PREMIUM_SELL_INCOME (short strangle), DIRECTIONAL_BULL (bull call
+spread), DIRECTIONAL_BEAR (bear put spread), VOL_BUY (long straddle),
+NEUTRAL_INCOME (iron butterfly). Picks legs from the supplied chain,
+falls back to closest strike when target is missing (recorded in
+`missing_strikes`), then runs them through the auditor automatically so
+the customer sees the verdict alongside the build.
 
-**Problem**: Customers paste their own option positions and want a
-verdict: "is this a sound strategy?" Today the scenario engine can rate
-ONE leg; multi-leg auditing is missing.
+### 6.5 Wire institutional outputs into reports ✅ DONE (Wave 3)
 
-**Build**:
-- `sentinel/auditor.py` with `audit_strategy(legs)` returning:
-  - max profit / max loss / breakeven points
-  - net delta/gamma/theta/vega
-  - margin estimate
-  - named-strategy detection (iron condor, bull call spread, etc.)
-  - flags ("naked short call — uncapped loss", "negative theta in chop")
+`reports.generate_system_report` now has section 8 "Institutional
+surfaces available" listing every named methodology, stress scenarios,
+auditor flags, builder intents, equity-layer regimes, and the SaaS
+catalog count. **Still open**: feeding fair-value-vs-market signal into
+`CuratorReport` so the curator can flag mispriced entries directly.
 
-### 6.4 Multi-leg strategy builder
+### 6.6 SaaS tier gating ✅ DONE (Wave 3)
 
-**Problem**: Customers want to ask "build me a delta-neutral premium-seller
-for this expiry."
-
-**Build**:
-- `sentinel/strategy_builder.py` with `build(intent, chain, constraints)`
-  picking legs to satisfy the intent. Intents: PREMIUM_SELL,
-  DIRECTIONAL_BULL, DIRECTIONAL_BEAR, VOL_BUY, NEUTRAL_INCOME.
-
-### 6.5 Wire institutional outputs into curator + reports
-
-**Currently**: `institutional.py` ships, but `curator.py` doesn't yet
-consult fair-value-vs-market when judging journeys, and
-`reports.write_artifacts` doesn't surface RV cone / VaR / Crux scores in
-`system_report.md`.
-
-**Build**:
-- Add to `CuratorReport`: `fair_value_misprice_pct` per journey, flagged
-  when the actual entry was >5% above fair value.
-- Add to `system_report.md`: a "Risk dashboard" section showing latest VaR,
-  ES, vol-cone percentile, Crux liquidity for the watched book.
-
-### 6.6 SaaS tier gating
-
-**Currently**: every institutional function carries a RETAIL/PRO/QUANT tag
-but nothing reads the tag.
-
-**Build**:
-- `sentinel/saas.py` with `gate(plan, function_name)` returning True/False.
-- `server.py` endpoints check the calling user's plan before invoking
-  PRO/QUANT methods; return 402 Payment Required otherwise.
+`sentinel/saas.py` ships with the FEATURE_CATALOG (every paid surface
+mapped to its required tier), `gate(plan, feature)` returning
+`GateResult(allowed, required_tier, your_tier, reason)`,
+`features_for(plan)` returning the full entitlement set, and a FOUNDER
+bypass for the user's own view. **Still open**: actually call
+`gate(...)` inside every paid endpoint in `server.py` and return 402 on
+deny.
 
 ### 6.7 UI (last)
 
-When all the above is done: build the UI in `static/` against the FastAPI
-endpoints. The architecture commitment is "backend first" — do not start
-UI work while §6.1–6.6 are open.
+When §6.5 (curator integration) and §6.6 (server enforcement) are done:
+build the UI in `static/` against the FastAPI endpoints. The
+architecture commitment is "backend first" — do not start UI work while
+§6.5–6.6 are open.
+
+### 6.8 Codex's spine items (from the unified architecture report)
+
+Codex's `opus_unified_sentinel_liquidity_architecture_report.md` lists a
+parallel queue (Patches 1–10) focused on cross-codebase wiring:
+
+- **Shared event spine**: a `DecisionEvent` / `ExecutionIntent` /
+  `OutcomeEvent` vocabulary that both Sentinel ledger and liquidity
+  backtester `ShadowLogger` honour.
+- **Research context bridge** (`sentinel/liqpool_bridge.py`): load the
+  latest `ResearchContextPack` from `liquidity_backtester` artifacts
+  into `MarketSnapshot.context` so scientists think with the real
+  research brain.
+- **Live-to-research adapter** (`sentinel_ledger_to_liqpool_shadow.py`):
+  nightly export of Sentinel JSONL → parquet → liquidity backtester's
+  shadow log partitions, so live decisions feed the flywheel.
+- **Orchestrator in the hot path**: `sentinel.server` should wrap every
+  trail / profit-lock / suggestion / scientist output as a `Signal` and
+  route through `Orchestrator` — not call them directly.
+- **Canonical ledger**: `SuggestionLedger` becomes a view over
+  `ShadowLedger`, not a separate writer.
+
+These are higher-order architectural moves and live ON THE OTHER SIDE
+of the §6.5–§6.6 finishing line. Pick them up after the SaaS
+enforcement is wired.
 
 ---
 
