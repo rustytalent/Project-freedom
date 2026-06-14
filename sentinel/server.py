@@ -40,11 +40,16 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .journey_audit import (
+    Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
+)
 from .live_equity import ConstituentBoard, DemoFeed
 from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
 from .live_publisher import LivePublisher, ModelSignal
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
+from .premium_tracker import PremiumTracker
 from .psychology import PsychologyEngine, TradeAction
+from .shadow_ledger import read_session
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
 from .shadow_ledger import ShadowLedger
@@ -141,6 +146,14 @@ class Sentinel:
             publisher=self.publisher, session=self.session,
             journal_path=cfg.journal_dir / "mind_reports.jsonl",
         )
+        # Wave 13 — per-symbol premium history + post-hoc audit.
+        self.premium_tracker = PremiumTracker()
+        self.scorecard = TradeQualityScorecard()
+        self.mistake_detector = MistakeDetector()
+        # The premium symbol the cockpit charts. None = auto-pick the
+        # largest held position; the operator can override via the API.
+        self.premium_symbol: Optional[str] = None
+        self._mistake_event_ids: set = set()    # dedupe per-row publications
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -270,7 +283,7 @@ class Sentinel:
             self._thread.join(timeout=5)
 
     def _loop(self) -> None:
-        last_pf, last_ledger, last_reco = 0.0, 0.0, 0.0
+        last_pf, last_ledger, last_reco, last_audit = 0.0, 0.0, 0.0, 0.0
         while not self._stop.is_set():
             try:
                 now = time.monotonic()
@@ -287,6 +300,9 @@ class Sentinel:
                 if now - last_reco > 60.0:
                     self._tick_recommendations()
                     last_reco = now
+                if now - last_audit > 45.0:
+                    self._tick_journey_audit()
+                    last_audit = now
             except Exception as exc:
                 LOG.exception("loop tick failed: %s", exc)
             self._stop.wait(self.cfg.poll_quote_seconds)
@@ -314,6 +330,29 @@ class Sentinel:
         for sym, q in quotes.items():
             self._last_quotes[sym] = q.ltp
             self.trails.on_tick(sym, q.ltp)
+            self.premium_tracker.update(sym, q.ltp)
+
+    def _tick_journey_audit(self) -> None:
+        """Score every completed journey + scan for mistakes. Cheap; runs
+        on a longer interval than the quote loop. New mistakes publish
+        as TRUSTED trade_mistake signals (deduped by event_id)."""
+        try:
+            rows = read_session(self.cfg.journal_dir, self.session)
+        except Exception:
+            return
+        new_mistakes: List[Mistake] = []
+        for row in rows:
+            if not (row.get("journey") or {}).get("complete"):
+                continue
+            eid = str(row.get("event_id", ""))
+            if eid in self._mistake_event_ids:
+                continue
+            self._mistake_event_ids.add(eid)
+            new_mistakes.extend(self.mistake_detector.scan_row(row))
+        if new_mistakes:
+            publish_mistakes(new_mistakes, self.publisher)
+            for m in new_mistakes:
+                self.log(f"[mistake] {m.pattern} on {m.symbol} — {m.citation}")
 
     def _tick_portfolio(self) -> None:
         try:
@@ -571,6 +610,7 @@ def state() -> JSONResponse:
         "constituent_board": CORE._board_snapshot,
         "psychology": CORE.psychology.state().to_row(),
         "intention": CORE.psychology.intention.to_row(),
+        "premium_chart": _premium_chart_payload(),
         "activity": CORE.activity[:50],
     })
 
@@ -619,6 +659,90 @@ def mind_report() -> JSONResponse:
     intention status, citations. Also appended to
     <journal>/mind_reports.jsonl for the next-day review."""
     return JSONResponse(CORE.psychology.mind_report().to_row())
+
+
+def _premium_chart_payload() -> Dict[str, Any]:
+    """The default premium chart payload: tracker snapshot for the
+    selected (or auto-picked) symbol + list of all known symbols."""
+    sym = CORE.premium_symbol or CORE.premium_tracker.select_default(
+        CORE.portfolio.positions)
+    snap = CORE.premium_tracker.snapshot(sym) if sym else None
+    return {
+        "symbol": sym,
+        "available": CORE.premium_tracker.known_symbols(),
+        "series": snap,
+    }
+
+
+class PremiumSymbolBody(BaseModel):
+    symbol: Optional[str] = None        # None = auto-pick
+
+
+@app.post("/api/premium_chart", dependencies=[Depends(auth)])
+def set_premium_symbol(body: PremiumSymbolBody) -> JSONResponse:
+    """Pin the cockpit's option-premium chart to a specific symbol; pass
+    null to revert to auto-picking the largest held position."""
+    CORE.premium_symbol = body.symbol
+    return JSONResponse(_premium_chart_payload())
+
+
+@app.get("/api/premium_chart", dependencies=[Depends(auth)])
+def get_premium_chart(symbol: Optional[str] = None) -> JSONResponse:
+    """Read the premium tracker for ?symbol= (or the auto/pinned default)."""
+    if symbol:
+        snap = CORE.premium_tracker.snapshot(symbol)
+        return JSONResponse({"symbol": symbol,
+                              "available": CORE.premium_tracker.known_symbols(),
+                              "series": snap})
+    return JSONResponse(_premium_chart_payload())
+
+
+@app.get("/api/journeys", dependencies=[Depends(auth)])
+def journeys(limit: int = 30) -> JSONResponse:
+    """Recent ledger journeys, newest first. Each row is the full
+    five-block event (identity + context + hypothesis + journey +
+    judgment) plus the trade-quality score when complete."""
+    try:
+        rows = read_session(CORE.cfg.journal_dir, CORE.session)
+    except Exception:
+        rows = []
+    # newest first
+    rows = list(reversed(rows))[: max(1, limit)]
+    scored = []
+    for r in rows:
+        item = {"row": r}
+        if (r.get("journey") or {}).get("complete"):
+            item["score"] = CORE.scorecard.score(r).to_row()
+        scored.append(item)
+    return JSONResponse({"session": CORE.session, "items": scored})
+
+
+@app.get("/api/scorecard", dependencies=[Depends(auth)])
+def scorecard_summary() -> JSONResponse:
+    """Session-level scorecard summary: average, grade distribution,
+    best / worst journey."""
+    try:
+        rows = read_session(CORE.cfg.journal_dir, CORE.session)
+    except Exception:
+        rows = []
+    scores = CORE.scorecard.score_session(rows)
+    return JSONResponse({
+        "session": CORE.session,
+        "scores": [s.to_row() for s in scores],
+        "summary": CORE.scorecard.session_summary(scores),
+    })
+
+
+@app.get("/api/mistakes", dependencies=[Depends(auth)])
+def mistakes_endpoint() -> JSONResponse:
+    """Every detected mistake this session (newest first)."""
+    try:
+        rows = read_session(CORE.cfg.journal_dir, CORE.session)
+    except Exception:
+        rows = []
+    mistakes = CORE.mistake_detector.scan_session(rows)
+    return JSONResponse({"session": CORE.session,
+                          "mistakes": [m.to_row() for m in reversed(mistakes)]})
 
 
 @app.get("/api/equity_board", dependencies=[Depends(auth)])

@@ -56,6 +56,25 @@
         <div class="note">Live spot history (last ~10 minutes at 1-2s polling). Hover for the exact value; the gold line is NIFTY, the dashed band marks high/low so far this session.</div>
       </section>
 
+      <!-- OPTION PREMIUM CHART -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Option premium · live</span>
+          <span class="meta mono" id="prem_meta">—</span>
+          <div class="right row-flex">
+            <label>SYMBOL</label>
+            <select id="prem_pick" onchange="setPremiumSymbol(this.value)" style="width:auto"></select>
+          </div>
+        </div>
+        <div class="body" style="padding:10px var(--s-3) var(--s-3)">
+          <div class="chart-wrap" id="prem_wrap" style="padding:0">
+            <svg id="prem_chart" width="100%" height="170" viewBox="0 0 840 170" preserveAspectRatio="none"></svg>
+            <div class="tip" id="prem_tip"></div>
+          </div>
+        </div>
+        <div class="note">A flat spot with expanding ATM premium is the first sign vol is being bid. Velocity ₹/min shown above — accelerating ≠ the underlying moving; sometimes only the vol is.</div>
+      </section>
+
       <!-- NIFTY CONSTITUENT BOARD -->
       <section class="panel">
         <div class="head">
@@ -236,6 +255,18 @@
           </details>
         </div>
         <div class="note">Six citation-bearing detectors (Kahneman, Steenbarger, Tversky, Shefrin & Statman, Gilovich-Vallone-Tversky, Tharp) read your action stream + tilt your composite gauge. RED band or worse refuses non-exit orders at the spine — your committed limits cannot be routed around.</div>
+      </section>
+
+      <!-- JOURNEY VIEWER + SCORECARD -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Journeys · scorecard &amp; mistakes</span>
+          <span class="meta hint" id="score_meta">no completed journeys yet</span>
+          <div class="right hint" id="score_band"></div>
+        </div>
+        <div class="body" id="score_summary" style="padding:10px var(--s-3);border-bottom:1px solid var(--line)"></div>
+        <div class="body flush" id="journey_list" style="max-height:340px;overflow-y:auto"></div>
+        <div class="note">Every completed journey graded 0-100 on five 20-point axes (reason codes, entry timing, trail discipline, exit quality, R-multiple). Mistakes scanned post-hoc with named-pattern citations.</div>
       </section>
 
       <!-- LIVE BRIEF FEED -->
@@ -479,6 +510,9 @@ function render(s){
 
   /* NIFTY spot chart */
   drawSpotChart(s.spot_history || [], s.portfolio.spot);
+
+  /* option premium chart */
+  drawPremiumChart(s.premium_chart || {});
 
   /* NIFTY constituent board */
   renderBoard(s.constituent_board);
@@ -745,6 +779,198 @@ async function setIntention(){
   await api("/api/intention", {method:"POST",
     body: JSON.stringify({max_day_loss_rupees: max_loss, no_trade_after_ist: flat})});
   refresh();
+}
+
+/* ─────────── option premium chart ─────────── */
+let PREM_CHART = null;
+async function setPremiumSymbol(sym){
+  await api("/api/premium_chart", {method:"POST",
+    body: JSON.stringify({symbol: sym || null})});
+  refresh();
+}
+function renderPremiumPicker(payload){
+  const sel = document.getElementById("prem_pick");
+  const cur = sel.value;
+  const items = payload.available || [];
+  const symbol = payload.symbol;
+  sel.innerHTML = items.map(s=>
+    `<option value="${s}" ${s===symbol?"selected":""}>${s}</option>`
+  ).join("") || `<option value="">— no symbols yet —</option>`;
+  if(symbol && sel.value !== symbol) sel.value = symbol;
+}
+function drawPremiumChart(payload){
+  renderPremiumPicker(payload || {});
+  const svg = document.getElementById("prem_chart");
+  const series = payload?.series;
+  if(!series || !series.history || series.history.length < 2){
+    svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--dim)">collecting premium ticks…</text>`;
+    document.getElementById("prem_meta").textContent = series?.symbol || "—";
+    PREM_CHART = null; return;
+  }
+  const hist = series.history;
+  const W=840, H=170, L=52, R=14, T=10, B=22;
+  const xs = hist.map((_,i)=>i), ys = hist.map(p=>p.premium);
+  const xmin=0, xmax=Math.max(1, hist.length-1);
+  const lo=Math.min(...ys), hi=Math.max(...ys);
+  const pad=(hi-lo)*0.15 || 1;
+  const ymin=Math.max(0, lo-pad), ymax=hi+pad;
+  const X=x=>L+(x-xmin)/((xmax-xmin)||1)*(W-L-R);
+  const Y=y=>T+(1-(y-ymin)/((ymax-ymin)||1))*(H-T-B);
+  let grid="";
+  for(let i=0;i<=3;i++){
+    const y=T+i/3*(H-T-B), v=ymax-i/3*(ymax-ymin);
+    grid+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line-soft)" stroke-dasharray="2 3"/>
+           <text x="${L-6}" y="${y+3}" text-anchor="end" fill="var(--dim)" font-family="JetBrains Mono" font-size="10">₹${v.toFixed(1)}</text>`;
+  }
+  const d = hist.map((p,i)=>(i?"L":"M")+X(i).toFixed(1)+","+Y(p.premium).toFixed(1)).join(" ");
+  const last = hist[hist.length-1];
+  const dir = last.premium >= hist[0].premium ? "up" : "dn";
+  const lineColor = dir==="up" ? "var(--green)" : "var(--red)";
+  svg.innerHTML = `
+    <defs><linearGradient id="pg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="${lineColor}" stop-opacity=".22"/>
+      <stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/></linearGradient></defs>
+    ${grid}
+    <path d="${d} L${X(xmax).toFixed(1)},${Y(ymin).toFixed(1)} L${X(xmin).toFixed(1)},${Y(ymin).toFixed(1)} Z" fill="url(#pg)"/>
+    <path d="${d}" fill="none" stroke="${lineColor}" stroke-width="1.6"/>
+    <circle cx="${X(hist.length-1)}" cy="${Y(last.premium)}" r="3.5" fill="${lineColor}" stroke="#0a0b0d"/>
+    <g id="prem_xhair" style="display:none">
+      <line id="pxh_v" x1="0" y1="${T}" x2="0" y2="${H-B}" stroke="var(--amber)" stroke-dasharray="3 3" opacity=".75"/>
+      <circle id="pxh_dot" r="3" fill="var(--amber)"/>
+    </g>`;
+  const vel = series.velocity_per_min;
+  const velTxt = vel != null
+    ? `vel <span class="mono ${vel>=0?'pos':'neg'}">${vel>=0?'+':''}${vel.toFixed(2)} ₹/min</span>`
+    : "";
+  document.getElementById("prem_meta").innerHTML =
+    `${series.symbol} · <span class="mono">₹${series.last_premium.toFixed(2)}</span> · ` +
+    `<span class="mono ${series.return_pct>=0?'pos':'neg'}">${series.return_pct>=0?'+':''}${series.return_pct.toFixed(2)}%</span> · ${velTxt}`;
+  PREM_CHART = {hist, X, Y, W, L, R, T, B, H,
+                Xinv: px => (px - L) / (W-L-R) * (xmax-xmin)};
+}
+(function(){
+  const svg = document.getElementById("prem_chart");
+  const tip = document.getElementById("prem_tip");
+  const wrap = document.getElementById("prem_wrap");
+  if(!svg) return;
+  function move(e){
+    if(!PREM_CHART) return;
+    const rect = svg.getBoundingClientRect();
+    const x = (e.clientX-rect.left)*(PREM_CHART.W/rect.width);
+    if(x < PREM_CHART.L || x > PREM_CHART.W-PREM_CHART.R){ leave(); return; }
+    const idx = Math.round(PREM_CHART.Xinv(x));
+    const pt = PREM_CHART.hist[Math.max(0, Math.min(PREM_CHART.hist.length-1, idx))];
+    if(!pt) return;
+    const px = PREM_CHART.X(idx), py = PREM_CHART.Y(pt.premium);
+    document.getElementById("pxh_v").setAttribute("x1", px);
+    document.getElementById("pxh_v").setAttribute("x2", px);
+    document.getElementById("pxh_dot").setAttribute("cx", px);
+    document.getElementById("pxh_dot").setAttribute("cy", py);
+    document.getElementById("prem_xhair").style.display = "";
+    const wrapRect = wrap.getBoundingClientRect();
+    const first = PREM_CHART.hist[0];
+    const delta = pt.premium - first.premium;
+    tip.style.left = Math.min(Math.max(e.clientX-wrapRect.left+12, 8), wrapRect.width-tip.offsetWidth-8)+"px";
+    tip.style.top  = Math.min(Math.max(e.clientY-wrapRect.top -12, 8), wrapRect.height-tip.offsetHeight-8)+"px";
+    tip.innerHTML = `
+      <div class="legend">premium</div>
+      <div class="row"><span class="k">at ${pt.ts_ist}</span><span class="v mono">₹${pt.premium.toFixed(2)}</span></div>
+      <div class="row"><span class="k">vs open</span><span class="v mono ${delta>=0?'pos':'neg'}">${delta>=0?'+':''}${delta.toFixed(2)}</span></div>`;
+    tip.classList.add("on");
+  }
+  function leave(){
+    const xh = document.getElementById("prem_xhair");
+    if(xh) xh.style.display = "none";
+    tip.classList.remove("on");
+  }
+  svg.addEventListener("mousemove", move);
+  svg.addEventListener("mouseleave", leave);
+})();
+
+/* ─────────── scorecard + journey viewer ─────────── */
+const GRADE_COLOR = {A:"var(--green)", B:"var(--steel)", C:"var(--amber)", D:"var(--red)", F:"#e23"};
+async function loadJourneys(){
+  try{
+    const j = await api("/api/journeys?limit=20");
+    const sc = await api("/api/scorecard");
+    renderScoreSummary(sc.summary);
+    renderJourneyList(j.items, sc.scores || []);
+  }catch(e){ /* transient */ }
+}
+function renderScoreSummary(sum){
+  if(!sum || !sum.count){
+    document.getElementById("score_meta").textContent = "no completed journeys yet";
+    document.getElementById("score_band").innerHTML = "";
+    document.getElementById("score_summary").innerHTML = '<div class="dim-text">scores appear here once journeys complete (T+60).</div>';
+    return;
+  }
+  const grade = sum.average >= 85 ? "A" : sum.average >= 70 ? "B" :
+                sum.average >= 55 ? "C" : sum.average >= 40 ? "D" : "F";
+  const color = GRADE_COLOR[grade];
+  document.getElementById("score_meta").textContent =
+    `${sum.count} journey(s) · session avg ${sum.average}`;
+  document.getElementById("score_band").innerHTML =
+    `<span class="chip" style="color:${color};border-color:${color}">GRADE ${grade}</span>`;
+  const dist = sum.grade_distribution || {};
+  const distHtml = ["A","B","C","D","F"].map(g => {
+    const n = dist[g] || 0;
+    const c = GRADE_COLOR[g];
+    return `<span style="color:${c}"><span class="mono">${g}</span> ${n}</span>`;
+  }).join(" · ");
+  document.getElementById("score_summary").innerHTML =
+    `<div class="row-flex" style="justify-content:space-between">
+       <div>
+         <div class="hint">SESSION AVG</div>
+         <div class="mono" style="font-size:var(--t-xl);color:${color}">${sum.average}/100</div>
+       </div>
+       <div>
+         <div class="hint">DISTRIBUTION</div>
+         <div style="font-size:var(--t-md);margin-top:3px">${distHtml}</div>
+       </div>
+     </div>`;
+}
+function renderJourneyList(items, scores){
+  const wrap = document.getElementById("journey_list");
+  if(!items || !items.length){
+    wrap.innerHTML = '<div class="pad dim-text">no journeys logged yet this session</div>';
+    return;
+  }
+  wrap.innerHTML = items.map(it => {
+    const r = it.row, ident = r.identity || {}, j = r.journey || {}, hyp = r.hypothesis || {};
+    const score = it.score;
+    const sym = ident.instrument || "?";
+    const isComplete = j.complete;
+    const right = score
+      ? `<span class="chip" style="color:${GRADE_COLOR[score.grade]};border-color:${GRADE_COLOR[score.grade]}">
+           ${score.grade} ${score.breakdown.total}/100</span>`
+      : isComplete
+        ? `<span class="chip">unscored</span>`
+        : `<span class="chip warn">in flight</span>`;
+    const sciencist = r.scientist || r.kind || "?";
+    const reasons = (hyp.reason_codes || []).slice(0, 4).join(" · ");
+    const breakdown = score ? `
+      <div class="row-flex" style="gap:10px;margin-top:6px;font-size:11px">
+        <span class="dim-text">RC ${score.breakdown.reason_codes}</span>
+        <span class="dim-text">EN ${score.breakdown.entry_timing}</span>
+        <span class="dim-text">TR ${score.breakdown.trail_discipline}</span>
+        <span class="dim-text">EX ${score.breakdown.exit_quality}</span>
+        <span class="dim-text">R ${score.breakdown.r_multiple}</span>
+      </div>` : "";
+    const notes = score && score.notes && score.notes.length
+      ? `<div class="hint" style="margin-top:5px">${score.notes.map(n=>`· ${n}`).join(" ")}</div>` : "";
+    return `<div style="padding:9px var(--s-3);border-bottom:1px solid var(--line-soft)">
+      <div class="row-flex" style="justify-content:space-between">
+        <div>
+          <span class="mono">${sym}</span>
+          <span class="hint mono">${r.ts_utc ? r.ts_utc.slice(11,16) : ""} · ${sciencist}</span>
+        </div>
+        ${right}
+      </div>
+      ${reasons ? `<div class="hint" style="margin-top:3px">${reasons}</div>` : ""}
+      ${breakdown}
+      ${notes}
+    </div>`;
+  }).join("");
 }
 
 /* ─────────── NIFTY constituent board ─────────── */
@@ -1144,6 +1370,7 @@ document.addEventListener("keydown", e=>{
 });
 
 refresh(); setInterval(refresh, 2000);
+loadJourneys(); setInterval(loadJourneys, 12000);
 </script>
 </body>
 </html>
