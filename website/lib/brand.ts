@@ -15,7 +15,7 @@ export const brand = {
     name: "Garvit Katyal",
   },
   contact: {
-    email: process.env.NEXT_PUBLIC_CONTACT_EMAIL ?? "hello@cruxresearch.in",
+    email: process.env.NEXT_PUBLIC_CONTACT_EMAIL ?? "garvitkatyal312@gmail.com",
     calendly: null as string | null,
   },
   // Set once the operating entity is registered. Until then, the
