@@ -45,7 +45,11 @@
         <div class="head">
           <span class="title">NIFTY · Live spot</span>
           <span class="meta mono" id="spot_meta">—</span>
-          <div class="right hint" id="spot_range">session range —</div>
+          <div class="right row-flex">
+            <span class="hint">overlays</span>
+            <span id="overlay_toggles" class="row-flex" style="gap:2px"></span>
+            <span class="hint" id="spot_range">session range —</span>
+          </div>
         </div>
         <div class="body" style="padding:10px var(--s-3) var(--s-3)">
           <div class="chart-wrap" id="spot_wrap" style="padding:0">
@@ -177,6 +181,33 @@
 
     <!-- RIGHT COLUMN -->
     <div class="col">
+
+      <!-- CRUX META-SIGNAL -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Crux · live verdict</span>
+          <span class="right hint" id="crux_ts">—</span>
+        </div>
+        <div class="body" id="crux_body" style="padding:14px var(--s-3) 12px">
+          <div class="dim-text">waiting for first cycle…</div>
+        </div>
+        <div class="note">One operator-facing fusion of every live signal + tilt + intention + position state. Hard overrides: kill, intention violated, RED tilt + losing book. Otherwise: directional census over the bus + position-management gates.</div>
+      </section>
+
+      <!-- MONTE CARLO LITE -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Monte Carlo · scenario probe</span>
+          <div class="right row-flex">
+            <span class="hint">target ₹</span><input id="mc_target" type="number" value="1500" min="100" style="width:72px">
+            <span class="hint">stop ₹</span><input id="mc_stop" type="number" value="1500" min="100" style="width:72px">
+            <button class="btn sm primary" onclick="runMonteCarlo()">Run 1k paths</button>
+          </div>
+        </div>
+        <div class="body" id="mc_out">
+          <div class="dim-text">Boyle (1977) GBM paths over next 5/15/30 min on your current book. Tier: PRO.</div>
+        </div>
+      </section>
 
       <!-- PROFIT LOCK -->
       <section class="panel">
@@ -508,14 +539,18 @@ function render(s){
       <td class="mono" style="color:var(--amber)">${r.score.toFixed(3)}</td></tr>`
   ).join("") || '<tr class="empty"><td colspan="9">no chain data yet</td></tr>';
 
-  /* NIFTY spot chart */
-  drawSpotChart(s.spot_history || [], s.portfolio.spot);
+  /* NIFTY spot chart with model-zone overlays */
+  drawSpotChart(s.spot_history || [], s.portfolio.spot, s.model_zones || []);
+  renderOverlayToggles(s.model_zones || []);
 
   /* option premium chart */
   drawPremiumChart(s.premium_chart || {});
 
   /* NIFTY constituent board */
   renderBoard(s.constituent_board);
+
+  /* Crux meta-signal */
+  renderCrux(s.crux);
 
   /* behavioral engine (Mind) */
   renderTilt({tilt: s.psychology, execution_blocked: false}, s.intention);
@@ -569,7 +604,7 @@ function render(s){
 
 /* ─────────── live NIFTY spot chart ─────────── */
 let SPOT_CHART = null;
-function drawSpotChart(hist, currentSpot){
+function drawSpotChart(hist, currentSpot, zones){
   const svg = document.getElementById("spot_chart");
   if(!hist || hist.length < 2){
     svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--dim)">collecting spot ticks…</text>`;
@@ -601,6 +636,20 @@ function drawSpotChart(hist, currentSpot){
   const last = hist[hist.length-1];
   const dir = hist.length>=2 && hist[hist.length-1].spot >= hist[0].spot ? "up" : "dn";
   const lineColor = dir==="up" ? "var(--green)" : "var(--red)";
+  // Model-zone overlays — each zone is a horizontal band [zone_low, zone_high]
+  // for the LATEST tick. Renders as a coloured strip across the chart.
+  const zoneSvg = (zones || []).filter(z =>
+      z.zone_low != null && z.zone_high != null && OVERLAY_ON[z.model] !== false &&
+      z.zone_low <= ymax && z.zone_high >= ymin)
+    .map((z, i)=>{
+      const y1 = Y(Math.min(z.zone_high, ymax));
+      const y2 = Y(Math.max(z.zone_low, ymin));
+      const opacity = 0.10 + Math.min(0.20, (z.confidence||0.5) * 0.25);
+      const colors = ["var(--amber)","var(--steel)","var(--green)","var(--red)","var(--violet)","#c08"];
+      const c = colors[i % colors.length];
+      return `<rect x="${L}" y="${y1}" width="${W-L-R}" height="${Math.max(2,y2-y1)}" fill="${c}" opacity="${opacity}"/>
+              <text x="${W-R-4}" y="${y1+10}" text-anchor="end" fill="${c}" font-family="JetBrains Mono" font-size="9">${z.model.replace('_model','')}</text>`;
+    }).join("");
   svg.innerHTML = `
     <defs>
       <linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
@@ -608,7 +657,7 @@ function drawSpotChart(hist, currentSpot){
         <stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/>
       </linearGradient>
     </defs>
-    ${grid}${hiBand}${loBand}
+    ${grid}${zoneSvg}${hiBand}${loBand}
     <path d="M${X(xmin).toFixed(1)},${Y(hist[0].spot).toFixed(1)} ${area}" fill="url(#sg)"/>
     <path d="${d}" fill="none" stroke="${lineColor}" stroke-width="1.6"/>
     <circle cx="${X(last.t)}" cy="${Y(last.spot)}" r="3.5" fill="${lineColor}" stroke="#0a0b0d" stroke-width="1"/>
@@ -779,6 +828,109 @@ async function setIntention(){
   await api("/api/intention", {method:"POST",
     body: JSON.stringify({max_day_loss_rupees: max_loss, no_trade_after_ist: flat})});
   refresh();
+}
+
+/* ─────────── Crux meta-signal ─────────── */
+const VERDICT_STYLE = {
+  EXIT_NOW:     {color: "var(--red)",    icon: "✖"},
+  TRAIL_UP:     {color: "var(--amber)",  icon: "▲"},
+  HOLD:         {color: "var(--steel)",  icon: "■"},
+  WATCH:        {color: "var(--steel)",  icon: "○"},
+  TRADE:        {color: "var(--green)",  icon: "✓"},
+  DO_NOT_CHASE: {color: "var(--red)",    icon: "⨯"},
+  WAIT:         {color: "var(--muted)",  icon: "·"},
+};
+function renderCrux(verdict){
+  const body = document.getElementById("crux_body");
+  const ts = document.getElementById("crux_ts");
+  if(!verdict){
+    body.innerHTML = '<div class="dim-text">waiting for first cycle…</div>';
+    ts.textContent = "—"; return;
+  }
+  const st = VERDICT_STYLE[verdict.verdict] || {color: "var(--muted)", icon: "·"};
+  ts.textContent = verdict.ts_ist + " IST";
+  const conf = Math.round((verdict.confidence||0) * 100);
+  const supporting = (verdict.supporting||[]).map(s=>
+    `<span class="chip" style="margin-right:4px">${s}</span>`).join("");
+  const contradicting = verdict.contradicting
+    ? `<div class="hint" style="margin-top:6px;color:var(--red)">⚠ contradicting · ${verdict.contradicting}</div>` : "";
+  body.innerHTML = `
+    <div class="row-flex" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="color:${st.color};font-size:24px;line-height:1">${st.icon}</span>
+          <span style="font-size:var(--t-2xl);letter-spacing:.06em;font-weight:600;color:${st.color}">${verdict.verdict.replace(/_/g," ")}</span>
+        </div>
+        <div style="color:var(--fg-soft);font-size:var(--t-md);margin-top:6px">${verdict.rationale}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="hint">CONFIDENCE</div>
+        <div class="mono" style="font-size:var(--t-xl);color:${st.color}">${conf}%</div>
+      </div>
+    </div>
+    ${supporting ? `<div class="hint" style="margin-top:8px">SUPPORTING</div><div style="margin-top:4px">${supporting}</div>` : ""}
+    ${contradicting}`;
+}
+
+/* ─────────── Monte Carlo ─────────── */
+function pct(v){ return (v==null?"—":(v*100).toFixed(1)+"%"); }
+async function runMonteCarlo(){
+  const out = document.getElementById("mc_out");
+  out.innerHTML = '<div class="dim-text">running 1000 paths × 3 horizons…</div>';
+  try{
+    const r = await api("/api/monte_carlo", {method:"POST", body: JSON.stringify({
+      target_pnl_rupees: +document.getElementById("mc_target").value,
+      stop_pnl_rupees: +document.getElementById("mc_stop").value,
+    }), headers: {"X-Sentinel-Plan": "PRO"}});
+    if(!r.horizons || !r.horizons.length){
+      out.innerHTML = '<div class="dim-text">no held positions to simulate — open a position to run MC.</div>';
+      return;
+    }
+    out.innerHTML = `
+      <div class="hint" style="margin-bottom:6px">σ annualised <span class="mono">${(r.sigma_annualised*100).toFixed(1)}%</span> · spot <span class="mono">${Math.round(r.spot).toLocaleString("en-IN")}</span></div>
+      <table class="dense"><thead><tr>
+        <th>Horizon</th><th>P(profit)</th><th>P(target)</th><th>P(stop)</th>
+        <th>median R</th><th>p10 R</th><th>p90 R</th><th>E[₹]</th>
+      </tr></thead><tbody>${r.horizons.map(h=>`
+        <tr><td class="mono">${h.horizon_min} min</td>
+          <td class="mono ${h.p_profit>0.5?'pos':''}">${pct(h.p_profit)}</td>
+          <td class="mono pos">${pct(h.p_target)}</td>
+          <td class="mono neg">${pct(h.p_stop)}</td>
+          <td class="mono">${h.median_r.toFixed(2)}</td>
+          <td class="mono neg">${h.p10_r.toFixed(2)}</td>
+          <td class="mono pos">${h.p90_r.toFixed(2)}</td>
+          <td class="mono ${h.expected_pnl_rupees>=0?'pos':'neg'}">${inr(h.expected_pnl_rupees)}</td>
+        </tr>`).join("")}</tbody></table>
+      <div class="hint" style="margin-top:6px">Boyle 1977; light single-asset GBM. Δ + 0.5·Γ·move² + θ approximation — good enough for 5-30 min horizons.</div>`;
+  }catch(e){
+    out.innerHTML = `<div class="lock"><span class="icon">⚠</span><span class="msg">${e.msg || "Monte Carlo failed"}</span></div>`;
+  }
+}
+
+/* ─────────── model overlay state for the spot chart ─────────── */
+const OVERLAY_ON = {};        // model name -> bool
+function knownOverlayModels(zones){
+  const names = new Set((zones||[]).map(z=>z.model));
+  return [...names];
+}
+function renderOverlayToggles(zones){
+  const wrap = document.getElementById("overlay_toggles");
+  if(!wrap) return;
+  const models = knownOverlayModels(zones);
+  // initialise on by default for newly-seen models
+  models.forEach(m => { if(!(m in OVERLAY_ON)) OVERLAY_ON[m] = true; });
+  wrap.innerHTML = models.map(m=>{
+    const on = OVERLAY_ON[m] !== false;
+    return `<button class="btn sm" style="padding:2px 8px;font-size:10px;color:${on?'var(--amber)':'var(--dim)'};border-color:${on?'var(--amber)':'var(--line)'}" onclick="toggleOverlay('${m}')">${m.replace('_model','')}</button>`;
+  }).join("") || '<span class="hint">none</span>';
+}
+function toggleOverlay(m){
+  OVERLAY_ON[m] = !(OVERLAY_ON[m] !== false);
+  // immediate re-draw from cached state
+  if(lastState) {
+    drawSpotChart(lastState.spot_history || [], lastState.portfolio.spot, lastState.model_zones || []);
+    renderOverlayToggles(lastState.model_zones || []);
+  }
 }
 
 /* ─────────── option premium chart ─────────── */

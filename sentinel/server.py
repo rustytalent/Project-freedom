@@ -40,12 +40,14 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .crux_signal import CruxVerdict, compose_from_state
 from .journey_audit import (
     Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
 )
 from .live_equity import ConstituentBoard, DemoFeed
 from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
 from .live_publisher import LivePublisher, ModelSignal
+from .monte_carlo import LegPayoff, realised_sigma_per_day, simulate
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
 from .premium_tracker import PremiumTracker
 from .psychology import PsychologyEngine, TradeAction
@@ -154,6 +156,8 @@ class Sentinel:
         # largest held position; the operator can override via the API.
         self.premium_symbol: Optional[str] = None
         self._mistake_event_ids: set = set()    # dedupe per-row publications
+        # Wave 14 — Crux meta-signal composer (latest verdict on the bus)
+        self.crux_verdict: Optional[CruxVerdict] = None
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -291,6 +295,7 @@ class Sentinel:
                 self._tick_board()
                 self._tick_models()
                 self._tick_psychology()
+                self._tick_crux()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:
                     self._tick_portfolio()
                     last_pf = now
@@ -331,6 +336,25 @@ class Sentinel:
             self._last_quotes[sym] = q.ltp
             self.trails.on_tick(sym, q.ltp)
             self.premium_tracker.update(sym, q.ltp)
+
+    def _tick_crux(self) -> None:
+        """Run the Crux meta-signal composer once per cycle. Combines
+        every live signal + tilt + intention + position state into one
+        operator-facing verdict, published as a TRUSTED 'crux' signal."""
+        positions = list(self.portfolio.positions.values())
+        has_winner = any(getattr(p, "pnl", 0) > 1000 for p in positions)
+        has_loser  = any(getattr(p, "pnl", 0) < -1000 for p in positions)
+        self.crux_verdict = compose_from_state(
+            live_signals=self.publisher.current(),
+            tilt_band=self.psychology.state().band,
+            tilt_index=self.psychology.state().index,
+            intention_violated=bool(self.psychology.intention.violated),
+            open_positions=len(positions),
+            open_pnl=float(self.portfolio.total_pnl),
+            has_winner=has_winner, has_loser=has_loser,
+            killed=bool(self.killed),
+            publisher=self.publisher,
+        )
 
     def _tick_journey_audit(self) -> None:
         """Score every completed journey + scan for mistakes. Cheap; runs
@@ -611,6 +635,8 @@ def state() -> JSONResponse:
         "psychology": CORE.psychology.state().to_row(),
         "intention": CORE.psychology.intention.to_row(),
         "premium_chart": _premium_chart_payload(),
+        "crux": CORE.crux_verdict.to_row() if CORE.crux_verdict else None,
+        "model_zones": _model_zones_payload(),
         "activity": CORE.activity[:50],
     })
 
@@ -659,6 +685,86 @@ def mind_report() -> JSONResponse:
     intention status, citations. Also appended to
     <journal>/mind_reports.jsonl for the next-day review."""
     return JSONResponse(CORE.psychology.mind_report().to_row())
+
+
+def _model_zones_payload() -> List[Dict[str, Any]]:
+    """Collect every live model signal that carries a zone and emit it
+    for the cockpit's spot-chart overlay layer. The cockpit's switcher
+    lets the operator toggle which models render."""
+    out: List[Dict[str, Any]] = []
+    for sig in CORE.publisher.current().values():
+        if sig.zone is None:
+            continue
+        out.append({
+            "model": sig.model, "asset": sig.asset,
+            "ts_ist": sig.ts_ist, "signal": sig.signal,
+            "confidence": sig.confidence,
+            "zone_low": sig.zone[0], "zone_high": sig.zone[1],
+            "reason_codes": list(sig.reason_codes),
+        })
+    return out
+
+
+class MonteCarloLegBody(BaseModel):
+    symbol: str
+    qty: int
+    entry_premium: float
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta_per_day: float = 0.0
+
+
+class MonteCarloBody(BaseModel):
+    legs: Optional[List[MonteCarloLegBody]] = None     # None = auto from book
+    spot: Optional[float] = None                        # None = current
+    horizons_min: List[int] = [5, 15, 30]
+    n_paths: int = 1000
+    target_pnl_rupees: float = 1500.0
+    stop_pnl_rupees: float = 1500.0
+    seed: int = 7
+
+
+@app.post("/api/monte_carlo", dependencies=[Depends(auth)])
+def monte_carlo(body: MonteCarloBody,
+                plan: str = Depends(resolve_plan)) -> JSONResponse:
+    """1000-path GBM probe over the held book (or supplied legs).
+    Returns p(profit/target/stop) + R-multiple distribution per horizon.
+    Tier: PRO (institutional analytics)."""
+    require("var.cornish_fisher", plan)        # PRO-grade scenario probe
+    if body.legs:
+        legs = [LegPayoff(symbol=l.symbol, qty=l.qty,
+                          entry_premium=l.entry_premium,
+                          delta=l.delta, gamma=l.gamma,
+                          theta_per_day=l.theta_per_day)
+                for l in body.legs]
+    else:
+        legs = []
+        for p in CORE.portfolio.positions.values():
+            legs.append(LegPayoff(
+                symbol=p.tradingsymbol, qty=p.quantity,
+                entry_premium=float(p.ltp),
+                delta=float(p.delta or 0.0),
+                gamma=0.0,
+                theta_per_day=float(p.theta_per_day or 0.0),
+            ))
+    spot = body.spot if body.spot else CORE.portfolio.spot or 25000.0
+    # realised σ from the recent spot history (annualised)
+    prices = [t.spot for t in CORE._tick_hist[-120:]]
+    sigma = realised_sigma_per_day(prices) if len(prices) > 10 else 0.15
+    result = simulate(
+        legs, spot=float(spot), sigma_annualised=sigma,
+        horizons_min=tuple(body.horizons_min), n_paths=body.n_paths,
+        target_pnl_rupees=body.target_pnl_rupees,
+        stop_pnl_rupees=body.stop_pnl_rupees,
+        seed=body.seed,
+    )
+    return JSONResponse(result.to_row())
+
+
+@app.get("/api/crux", dependencies=[Depends(auth)])
+def crux_verdict() -> JSONResponse:
+    """The fused Crux verdict — one operator-facing call."""
+    return JSONResponse(CORE.crux_verdict.to_row() if CORE.crux_verdict else {})
 
 
 def _premium_chart_payload() -> Dict[str, Any]:
