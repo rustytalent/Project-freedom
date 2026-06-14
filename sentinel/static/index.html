@@ -366,6 +366,47 @@
   </div>
 </div>
 
+<!-- ───────────── PREFLIGHT MODAL — gates the day ───────────── -->
+<div id="preflight_bg" class="cmdk-bg" style="display:none">
+  <div class="cmdk" style="width:560px">
+    <div style="padding:18px 22px;border-bottom:1px solid var(--line)">
+      <div style="font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--amber)">Preflight · commit before you trade</div>
+      <div style="font-size:var(--t-xl);margin-top:6px;line-height:1.3;color:var(--fg)">Read the brief. Commit the budget. Then we start.</div>
+      <div class="hint" style="margin-top:8px">Ulysses-contract pattern (Elster 2000). Until you acknowledge, Crux will surface defensive verdicts only — no TRADE.</div>
+    </div>
+    <div style="padding:14px 22px">
+      <label class="hint">MAX LOSS YOU ACCEPT FOR THE DAY ₹</label>
+      <input id="pf_loss" type="number" value="3000" min="100" style="width:100%;margin-top:5px"/>
+      <div style="margin-top:14px">
+        <label class="hint">EXPECTED REGIME</label>
+        <select id="pf_regime" style="width:100%;margin-top:5px">
+          <option value="">— no specific view —</option>
+          <option value="trending">trending</option>
+          <option value="chop">chop / consolidation</option>
+          <option value="event">event / news pending</option>
+          <option value="post_gap">post-gap day</option>
+        </select>
+      </div>
+      <div style="margin-top:14px">
+        <label class="hint">NOTES TO TOMORROW-YOU</label>
+        <input id="pf_notes" placeholder="e.g. RBI policy at 12pm — keep size light" style="width:100%;margin-top:5px"/>
+      </div>
+      <label style="display:flex;gap:8px;margin-top:14px;align-items:center;color:var(--fg-soft);font-size:var(--t-md)">
+        <input id="pf_brief" type="checkbox" checked style="width:16px;height:16px"/>
+        <span>I have read today's brief and understand the regime / key zones.</span>
+      </label>
+      <label style="display:flex;gap:8px;margin-top:8px;align-items:center;color:var(--fg-soft);font-size:var(--t-md)">
+        <input id="pf_norevenge" type="checkbox" checked style="width:16px;height:16px"/>
+        <span>I will not revenge-trade after a loss (Steenbarger 2009).</span>
+      </label>
+    </div>
+    <div style="padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn ghost" onclick="closePreflight(true)">Skip for now (Crux locked to WATCH)</button>
+      <button class="btn primary" onclick="submitPreflight()">Commit &amp; start day</button>
+    </div>
+  </div>
+</div>
+
 <!-- ───────────── COMMAND PALETTE ───────────── -->
 <div id="cmdk_bg" class="cmdk-bg" onclick="if(event.target===this) closeCmdk()">
   <div class="cmdk">
@@ -917,11 +958,20 @@ function renderOverlayToggles(zones){
   const wrap = document.getElementById("overlay_toggles");
   if(!wrap) return;
   const models = knownOverlayModels(zones);
+  // Build a model -> source map so the toggle can label provenance.
+  // L = liquidity_backtester (research engine), S = Sentinel scientist.
+  const sourceByModel = {};
+  (zones||[]).forEach(z=>{
+    const src = (z.source) || z.extras?.source || "S";
+    sourceByModel[z.model] = (src === "liqpool" || src === "L") ? "L" : "S";
+  });
   // initialise on by default for newly-seen models
   models.forEach(m => { if(!(m in OVERLAY_ON)) OVERLAY_ON[m] = true; });
   wrap.innerHTML = models.map(m=>{
     const on = OVERLAY_ON[m] !== false;
-    return `<button class="btn sm" style="padding:2px 8px;font-size:10px;color:${on?'var(--amber)':'var(--dim)'};border-color:${on?'var(--amber)':'var(--line)'}" onclick="toggleOverlay('${m}')">${m.replace('_model','')}</button>`;
+    const tag = sourceByModel[m] || "S";
+    const tagColor = tag === "L" ? "var(--steel)" : "var(--bronze-glow,var(--amber))";
+    return `<button class="btn sm" style="padding:2px 8px;font-size:10px;color:${on?'var(--amber)':'var(--dim)'};border-color:${on?'var(--amber)':'var(--line)'}" onclick="toggleOverlay('${m}')" title="source: ${tag==='L'?'liquidity_backtester':'sentinel'}"><span style="color:${tagColor};margin-right:3px;font-weight:600">[${tag}]</span>${m.replace('_model','')}</button>`;
   }).join("") || '<span class="hint">none</span>';
 }
 function toggleOverlay(m){
@@ -1520,6 +1570,44 @@ document.addEventListener("keydown", e=>{
     window.__chord = false;
   }
 });
+
+/* ─────────── preflight modal ─────────── */
+let _preflight_seen = false;
+function openPreflight(){
+  document.getElementById("preflight_bg").style.display = "flex";
+}
+function closePreflight(force){
+  document.getElementById("preflight_bg").style.display = "none";
+  if(force) _preflight_seen = true;
+}
+async function submitPreflight(){
+  const loss = parseFloat(document.getElementById("pf_loss").value);
+  if(!(loss > 0)){ alert("max loss must be > 0"); return; }
+  try{
+    await api("/api/preflight/ack", {method:"POST", body: JSON.stringify({
+      accepted_max_loss_rupees: loss,
+      expected_regime: document.getElementById("pf_regime").value,
+      read_brief: document.getElementById("pf_brief").checked,
+      no_revenge_trading: document.getElementById("pf_norevenge").checked,
+      notes: document.getElementById("pf_notes").value,
+    })});
+    closePreflight(true);
+    refresh();
+  }catch(e){ alert("preflight failed: " + (e?.message||e)); }
+}
+function maybePromptPreflight(state){
+  if(_preflight_seen) return;
+  if(state?.preflight?.acknowledged) { _preflight_seen = true; return; }
+  // Show only once per page load + only when market open or imminent
+  openPreflight(); _preflight_seen = true;
+}
+
+/* hook into the existing refresh so on first state we check preflight */
+const _origRender = render;
+render = function(s){
+  _origRender(s);
+  maybePromptPreflight(s);
+};
 
 refresh(); setInterval(refresh, 2000);
 loadJourneys(); setInterval(loadJourneys, 12000);

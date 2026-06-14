@@ -1,5 +1,15 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
+**Status as of 2026-06-14 (Wave 17 — LAUNCH READY)**
+**Branch**: `claude/liquidity-pool-backtester-1uskb`
+**Latest pass**: Wave 17 — production-readiness pieces. New `auth.py` integration plug (Codex calls `register_verifier(supabase_verify)` once at boot; Sentinel never imports Supabase). `/healthz` + `/readyz` endpoints (LB-friendly). Preflight commitment modal + `/api/preflight/ack` endpoint that seeds the Ulysses-contract intention and **gates Crux TRADE verdicts until the operator commits**. Cockpit overlay toggles now show `[L]` or `[S]` so source provenance is one glance. `LAUNCH_README.md` documents env vars, run commands, the Codex integration contract, the launch-day operator flow, and the one thing Codex must NOT touch (the trust spine). Final end-to-end soul test (`test_launch_smoke.py`) walks the whole day cycle in one test through both halves of the project.
+**Test status**: **Sentinel 326 + liquidity_backtester 841 + 33 cross-codebase = 1,200 passing — no regressions**.
+**Codex green flag**: ✓ — see §3 in `LAUNCH_README.md`. The `register_verifier(fn)` plug-in is the ONE integration point; everything else (Google OAuth, Supabase tables, plan-lookup) lives in Codex's repo and never touches Sentinel internals.
+
+---
+
+## Older waves (archived)
+
 **Status as of 2026-06-14 (Wave 15 — cross-codebase spine)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
 **Latest pass**: Wave 15 — the founder's "Sentinel + liquidity_backtester must be tightly connected" ask. Built the missing shared contracts package + live inference path + bidirectional bridge so the two halves train each other every day/night cycle. The research engine now publishes live signals during market hours (via `liqpool/live_inference.py` → `JsonlPublisher`); Sentinel's cockpit tails that JSONL through a new `LiveSignalsTail` on every quote cycle and publishes each row as a TRUSTED `ModelSignal` on its own bus. The night trainer (`scripts/train_flywheel.py`) gained `--sentinel-journal` / `--sentinel-export` flags that feed Sentinel's exported decision ledger into the flywheel's shadow-frame pile so liqpool's seven organs (regret, trust, drift, archetypes, aging, transfer, meta_calibrator) train on the live decisions Sentinel produced.

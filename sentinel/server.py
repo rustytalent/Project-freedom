@@ -40,6 +40,7 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .auth import AuthContext, verify_token
 from .crux_signal import CruxVerdict, compose_from_state
 from .journey_audit import (
     Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
@@ -165,6 +166,12 @@ class Sentinel:
         liqpool_signals_path = cfg.journal_dir / "liqpool_live_signals.jsonl"
         self.liqpool_tail = LiveSignalsTail(
             liqpool_signals_path, publisher=self.publisher)
+        # Launch-ready preflight: track whether the operator has
+        # acknowledged the pre-market brief for this session. The cockpit
+        # gates Crux verdicts on this so a fresh-login operator can't
+        # blast into the day without committing.
+        self.preflight_ack: Optional[Dict[str, Any]] = None
+        self.boot_ts = time.monotonic()
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -352,6 +359,11 @@ class Sentinel:
         positions = list(self.portfolio.positions.values())
         has_winner = any(getattr(p, "pnl", 0) > 1000 for p in positions)
         has_loser  = any(getattr(p, "pnl", 0) < -1000 for p in positions)
+        # Preflight gate: if the operator hasn't acknowledged the day's
+        # plan, Crux is allowed to surface HOLD/WATCH/WAIT/EXIT signals
+        # (defensive) but TRADE is downgraded to WATCH. Implemented by
+        # tagging the composer's open_positions=0 case differently —
+        # simplest: post-process the verdict.
         self.crux_verdict = compose_from_state(
             live_signals=self.publisher.current(),
             tilt_band=self.psychology.state().band,
@@ -363,6 +375,21 @@ class Sentinel:
             killed=bool(self.killed),
             publisher=self.publisher,
         )
+        if (self.preflight_ack is None
+                and self.crux_verdict is not None
+                and self.crux_verdict.verdict == "TRADE"):
+            # Downgrade TRADE to WATCH; record the reason so the cockpit
+            # shows the operator why.
+            self.crux_verdict = type(self.crux_verdict)(
+                verdict="WATCH",
+                confidence=min(0.6, self.crux_verdict.confidence),
+                rationale=("TRADE verdict suppressed — pre-market "
+                           "acknowledgement required before live entries"),
+                supporting=list(self.crux_verdict.supporting),
+                contradicting="preflight_not_acknowledged",
+                inputs=dict(self.crux_verdict.inputs),
+                ts_ist=self.crux_verdict.ts_ist,
+            )
 
     def _tick_journey_audit(self) -> None:
         """Score every completed journey + scan for mistakes. Cheap; runs
@@ -553,6 +580,30 @@ def auth(x_sentinel_token: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(401, "bad or missing X-Sentinel-Token")
 
 
+def resolve_auth(
+    authorization: Optional[str] = Header(default=None),
+    x_sentinel_plan: Optional[str] = Header(default=None),
+) -> Optional[AuthContext]:
+    """Auth resolver — production reads ``Authorization: Bearer <jwt>``
+    (Codex's Supabase token). Dev mode keeps the older
+    ``X-Sentinel-Plan: FOUNDER`` header working so the local cockpit
+    doesn't need Supabase running. Returns None when no valid
+    credential present — endpoints that need auth check for None and
+    return 401; endpoints that only need the plan can fall through to
+    ``resolve_plan`` below."""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        return verify_token(token)
+    if x_sentinel_plan:
+        # legacy / dev fallback — explicitly mark as demo so audit logs
+        # can tell production from local easily.
+        return AuthContext(user_id="dev",
+                           email="dev@local",
+                           plan=x_sentinel_plan.upper(),
+                           is_demo=True)
+    return None
+
+
 def resolve_plan(x_sentinel_plan: Optional[str] = Header(default=None)) -> str:
     """Plan resolver — header-driven for SaaS gating. If unset, the
     dashboard auth implies FOUNDER (the user's own view). A signed
@@ -593,6 +644,107 @@ class DirectionBody(BaseModel):
 
 class PortfolioTrailBody(BaseModel):
     cushion_rupees: float
+
+
+# ─────────────────────────────────────────────────────────────────
+# Health / observability — for whatever load balancer Codex puts in
+# front. Both unauthenticated by design.
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/healthz")
+def healthz() -> JSONResponse:
+    """Liveness probe. The process is up; this returns 200 even if the
+    market loop is stuck. For traffic-routing decisions, use /readyz."""
+    return JSONResponse({"status": "ok"})
+
+
+@app.get("/readyz")
+def readyz() -> JSONResponse:
+    """Readiness probe. The hot loop is alive (background thread up),
+    the broker connection responded recently, and the shadow ledger
+    is writable. Returns 503 if any of those fails so the LB can shed
+    traffic."""
+    issues = []
+    if CORE._thread is None or not CORE._thread.is_alive():
+        issues.append("loop_thread_dead")
+    try:
+        # round-trip a noop quote so we know the broker layer responds
+        _ = CORE.account.funds()
+    except Exception as exc:
+        issues.append(f"broker:{type(exc).__name__}")
+    try:
+        # confirm ledger dir is writable
+        (CFG.journal_dir / ".readyz_probe").touch()
+    except Exception:
+        issues.append("ledger_dir_unwritable")
+    uptime = round(time.monotonic() - CORE.boot_ts, 1)
+    if issues:
+        return JSONResponse(
+            {"status": "degraded", "issues": issues, "uptime_seconds": uptime},
+            status_code=503)
+    return JSONResponse({
+        "status": "ready",
+        "uptime_seconds": uptime,
+        "mode": "demo" if CORE.demo else ("dry_run" if getattr(CORE.account, "dry_run", True) else "live"),
+        "session": CORE.session,
+        "killed": CORE.killed,
+        "ledger_events_today": len(CORE.routed_signals),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────
+# Preflight — the Ulysses-pattern commitment before live trading
+# (Mother's Audit §3.5)
+# ─────────────────────────────────────────────────────────────────
+
+class PreflightBody(BaseModel):
+    read_brief: bool = True
+    accepted_max_loss_rupees: float
+    expected_regime: str = ""             # "trending" | "chop" | "no_view"
+    no_revenge_trading: bool = True
+    notes: str = ""
+
+
+@app.get("/api/preflight", dependencies=[Depends(auth)])
+def preflight_status() -> JSONResponse:
+    return JSONResponse({
+        "acknowledged": CORE.preflight_ack is not None,
+        "ack": CORE.preflight_ack,
+        "session": CORE.session,
+    })
+
+
+@app.post("/api/preflight/ack", dependencies=[Depends(auth)])
+def preflight_ack(body: PreflightBody) -> JSONResponse:
+    """The operator commits to the day's plan before live signals stream.
+    Sentinel doesn't refuse cockpit access without this, but the Crux
+    composer reads ``preflight_ack`` and will not surface a TRADE
+    verdict until the operator has explicitly committed. This is the
+    behavioral wall ChatGPT and the founder talked about — the
+    pre-market read happens, the commitment is made, THEN the day
+    starts."""
+    if body.accepted_max_loss_rupees <= 0:
+        raise HTTPException(400, "accepted_max_loss_rupees must be > 0")
+    CORE.preflight_ack = {
+        "at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "accepted_max_loss_rupees": body.accepted_max_loss_rupees,
+        "expected_regime": body.expected_regime,
+        "no_revenge_trading": body.no_revenge_trading,
+        "read_brief": body.read_brief,
+        "notes": body.notes,
+    }
+    # Also commit a matching intention contract so the psychology engine
+    # can enforce the limits (Ulysses pattern).
+    try:
+        CORE.psychology.set_intention(
+            max_day_loss_rupees=float(body.accepted_max_loss_rupees),
+            notes=body.notes or "set via preflight",
+        )
+    except Exception:
+        pass
+    CORE.log(f"preflight ACK: max loss ₹{body.accepted_max_loss_rupees:,.0f}"
+             + (f", regime {body.expected_regime}" if body.expected_regime else ""))
+    return JSONResponse({"ok": True, "ack": CORE.preflight_ack})
 
 
 @app.get("/")
@@ -643,6 +795,10 @@ def state() -> JSONResponse:
         "psychology": CORE.psychology.state().to_row(),
         "intention": CORE.psychology.intention.to_row(),
         "premium_chart": _premium_chart_payload(),
+        "preflight": {
+            "acknowledged": CORE.preflight_ack is not None,
+            "ack": CORE.preflight_ack,
+        },
         "crux": CORE.crux_verdict.to_row() if CORE.crux_verdict else None,
         "model_zones": _model_zones_payload(),
         "activity": CORE.activity[:50],
@@ -709,6 +865,7 @@ def _model_zones_payload() -> List[Dict[str, Any]]:
             "confidence": sig.confidence,
             "zone_low": sig.zone[0], "zone_high": sig.zone[1],
             "reason_codes": list(sig.reason_codes),
+            "source": sig.extras.get("source") if sig.extras else "sentinel",
         })
     return out
 
