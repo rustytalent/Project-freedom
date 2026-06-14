@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -45,7 +45,9 @@ from .audit_log import AuditLog
 from .auth import AuthContext, verify_token
 from .byok import GLOBAL_STORE, KiteCredentials
 from .crux_signal import CruxVerdict, compose_from_state
+from .notify import GLOBAL_NOTIFIER
 from .paper import PaperAccount
+from .rate_limit import allow as _rate_allow
 from .replay import ReplayController
 from .journey_audit import (
     Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
@@ -180,6 +182,10 @@ class Sentinel:
         # Wave 18 — institutional audit trail + BYOK credential store.
         self.audit = AuditLog(path=cfg.journal_dir / "audit.jsonl")
         self.byok = GLOBAL_STORE
+        # Notifier hook (Wave 20) — every audit event is filtered through
+        # _RENDERERS; Codex's email/push transports register on
+        # GLOBAL_NOTIFIER and receive Alerts for actionable events only.
+        GLOBAL_NOTIFIER.attach_to_audit()
         # Wave 19 — paper mode + replay
         paper_env = os.environ.get("SENTINEL_PAPER", "") == "1"
         if paper_env and not self.demo:
@@ -671,6 +677,30 @@ def require_user(ctx: Optional[AuthContext] = Depends(resolve_auth)
     return ctx
 
 
+def _client_key(req) -> str:
+    """Best-effort client key for IP-based limits. Codex's gateway
+    should set X-Forwarded-For or X-Real-IP; we fall back to the
+    socket peer."""
+    return (req.headers.get("X-Real-IP")
+            or (req.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            or (req.client.host if req.client else "")
+            or "_unknown")
+
+
+def enforce_rate(preset: str, request, ctx: Optional[AuthContext] = None) -> None:
+    """Inline rate-limit check called at the top of an endpoint.
+    Raises 429 with retry hint on throttle. Caller picks the key:
+    user_id when authenticated, IP when anonymous."""
+    key = ctx.user_id if (ctx and ctx.user_id) else _client_key(request)
+    ok, remaining = _rate_allow(preset, key)
+    if not ok:
+        raise HTTPException(429, {
+            "error": "rate_limited",
+            "preset": preset,
+            "retry_after_seconds": max(1, int(60 / max(1, remaining))),
+        })
+
+
 def resolve_plan(x_sentinel_plan: Optional[str] = Header(default=None)) -> str:
     """Plan resolver — header-driven for SaaS gating. If unset, the
     dashboard auth implies FOUNDER (the user's own view). A signed
@@ -843,12 +873,13 @@ class ByokConnectBody(BaseModel):
 
 
 @app.post("/api/byok/connect", dependencies=[Depends(auth)])
-def byok_connect(body: ByokConnectBody,
+def byok_connect(body: ByokConnectBody, request: Request,
                  ctx: AuthContext = Depends(require_user)) -> JSONResponse:
     """Customer connects their own Kite developer credentials. Stored
     encrypted in-memory keyed by ``user_id``. Cleared on process restart
     — Codex's persistence layer re-populates from Supabase as users
     come online (he holds the AT-REST master key)."""
+    enforce_rate("account", request, ctx)
     try:
         CORE.byok.set(ctx.user_id, body.api_key, body.access_token)
     except ValueError as exc:
@@ -1074,11 +1105,12 @@ class MonteCarloBody(BaseModel):
 
 
 @app.post("/api/monte_carlo", dependencies=[Depends(auth)])
-def monte_carlo(body: MonteCarloBody,
+def monte_carlo(body: MonteCarloBody, request: Request,
                 plan: str = Depends(resolve_plan)) -> JSONResponse:
     """1000-path GBM probe over the held book (or supplied legs).
     Returns p(profit/target/stop) + R-multiple distribution per horizon.
     Tier: PRO (institutional analytics)."""
+    enforce_rate("heavy", request)
     require("var.cornish_fisher", plan)        # PRO-grade scenario probe
     if body.legs:
         legs = [LegPayoff(symbol=l.symbol, qty=l.qty,

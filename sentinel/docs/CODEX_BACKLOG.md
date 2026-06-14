@@ -269,18 +269,34 @@ No Sentinel code change. **Estimated time: 1 day Codex side.**
 
 ---
 
-### 🟡 NICE-TO-HAVE — Email / push notifications
+### 🟡 NICE-TO-HAVE — Email / push notifications ✓ DONE (Wave 20)
 
-**Triggers**:
-- Tilt band crossed RED → email/push "you're tilted, take a break"
-- Intention violated → email/push "max-loss breached, flatten and stop"
-- Daily mind report ready → email next morning at 08:00 IST
+`sentinel/notify.py` ships now with renderers for the four
+actionable audit events:
+* `intention_violated` → push (subject + plain + HTML)
+* `tilt_red` → push
+* `order_blocked` → push
+* `mind_report_ready` → email (end-of-session reflection)
 
-**Hook**: Register an audit sink (same pattern as Sentry above) that
-filters for the right events and dispatches via SendGrid / Resend /
-FCM.
+Codex registers transports once at boot:
+```python
+from sentinel.notify import GLOBAL_NOTIFIER
+GLOBAL_NOTIFIER.register_transport(send_via_sendgrid)
+GLOBAL_NOTIFIER.register_transport(send_via_fcm)
+```
 
-**Estimated time**: 1 day.
+`GLOBAL_NOTIFIER.attach_to_audit()` already called at server boot —
+so every audit event is filtered through and dispatched. Broken
+transports don't take down the pipeline.
+
+### 🟡 NICE-TO-HAVE — API rate limiting ✓ DONE (Wave 20)
+
+`sentinel/rate_limit.py` ships a token-bucket limiter with four
+presets: public / polling / account / heavy. Account-touching
+endpoints (`/api/byok/connect`) and heavy compute
+(`/api/monte_carlo`) are throttled at the application layer as
+defense-in-depth alongside whatever Codex's gateway adds. 429
+response carries `retry_after_seconds` for honest backoff.
 
 ---
 
@@ -396,12 +412,13 @@ This is the inventory for compliance / due-diligence questions:
 - Audit log to JSONL + stderr + external sinks
 
 ### Tests
-- **Sentinel: 361 tests** (incl. 16 SaaS hardening, 15 launch prep,
-  19 replay+paper+mobile+backup, 1 end-to-end soul test)
+- **Sentinel: 379 tests** (incl. 16 SaaS hardening, 15 launch prep,
+  19 replay+paper+mobile+backup, 18 notify+rate-limit, 1 end-to-end
+  soul test)
 - **liquidity_backtester: 841 tests** (incl. 16 golden rows pinning
   leakage-sensitive math, 33 cross-codebase contracts + adapter +
   live inference)
-- **Total: 1,235 — both halves green on this commit.**
+- **Total: 1,253 — both halves green on this commit.**
 
 ---
 
