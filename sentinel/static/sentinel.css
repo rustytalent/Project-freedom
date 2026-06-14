@@ -400,6 +400,39 @@ kbd{
 .view{ display: none; }
 .view.on{ display: block; }
 
+/* ─────────────────────────────────────────────────────────────────
+   Mobile responsive — phone monitoring (Wave 19)
+   The cockpit is desk-density first; on phones we stack the grid,
+   collapse some panels into <details>, hide hover-only crosshairs.
+   ───────────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr !important; }
+  .shell { padding: var(--s-2); }
+  .cells { grid-template-columns: repeat(2, 1fr) !important; }
+  .topbar { height: auto; padding: var(--s-2) var(--s-3); flex-wrap: wrap; gap: var(--s-2); }
+  .topbar .kpis { gap: var(--s-3); margin-left: 0; flex-wrap: wrap; }
+  .topbar .clock { display: none; }
+  .topnav { margin-left: 0; }
+  .statusbar { font-size: 9px; padding: 0 var(--s-2); height: 22px; }
+  .statusbar .right > kbd { display: none; }      /* shortcut hints irrelevant on phone */
+  /* dense tables breathe a bit */
+  thead th, tbody td { padding: 4px 6px; font-size: var(--t-sm); }
+  /* hide hover-only crosshair primitives (touch UX) */
+  .chart-wrap svg { cursor: default; }
+  .chart-wrap .tip { display: none !important; }
+  /* command palette modal is comfier full-width */
+  .cmdk { width: 92vw; }
+}
+
+@media (max-width: 540px) {
+  .kpi .v.lg, .kpi .v { font-size: var(--t-md); }
+  .panel > .head { padding: 6px var(--s-2); flex-wrap: wrap; }
+  .panel > .body { padding: var(--s-2); }
+  .cells { grid-template-columns: 1fr 1fr !important; }
+  .stepper { flex-wrap: wrap; }
+  .feed { max-height: 160px; }
+}
+
 /* scrollbar — subtle */
 ::-webkit-scrollbar{ width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb{ background: var(--bg-3); border-radius: 8px; }

@@ -238,27 +238,21 @@ Sentry within 30s.
 
 ---
 
-### 🟡 NICE-TO-HAVE — Daily backup of `<journal_dir>`
+### 🟡 NICE-TO-HAVE — Daily backup of `<journal_dir>` ✓ DONE (Wave 19)
 
-**What's there**: shadow_ledger / suggestions / trust_promotions /
-audit.jsonl / mind_reports — all JSONL.
-
-**Why it matters**: legal/regulatory requirement for a SEBI-registered
-advisory product; also restores customer history if process crashes.
-
-**How**:
-- `cron` job at 23:55 IST tars the journal dir + uploads to S3 / B2.
-- `~/.sentinel/` per process; one tarball per (user_id, date).
-- Or use Codex's Supabase Storage bucket.
-
-Simple shell:
-```bash
-0 55 23 * * * /usr/local/bin/sentinel-backup.sh
+`sentinel/scripts/backup_journal.py` ships now:
 ```
-
-Add a checksum manifest so corruption is detectable.
-
-**Estimated time**: 2-3 hours.
+python -m sentinel.scripts.backup_journal \
+    --journal ~/.sentinel \
+    --session 2026-06-14 \
+    --out /var/lib/sentinel/backups \
+    --keep 30 \
+    --upload s3://bucket/path
+```
+Writes `sentinel-backup-<date>.tar.gz` + a sha256 manifest of every
+file (corruption detectable). Prunes older-than-keep tarballs. Optional
+S3 upload via `aws` CLI (no boto3 dep). Codex adds the cron entry —
+23:55 IST recommended.
 
 ---
 
@@ -290,17 +284,15 @@ FCM.
 
 ---
 
-### 🟢 POLISH — Mobile cockpit layout
+### 🟢 POLISH — Mobile cockpit layout ✓ DONE (Wave 19)
 
-Cockpit today is desktop-first (1700px wide grid). For ops monitoring
-from a phone, add `@media (max-width: 768px)` rules in `sentinel.css`
-that:
-- Stack the 2-column grid to 1-column
-- Collapse the Mind panel / Constituent board into accordions
-- Hide the spot-chart hover crosshair (touch UX)
-- Keep KILL button + tilt dial + Crux verdict visible
-
-**Estimated time**: 1 day.
+`@media (max-width: 900px)` + `@media (max-width: 540px)` rules in
+`sentinel.css`: 2-col grid stacks to 1-col, metric cells go to 2×N,
+hover-only crosshairs disabled (touch UX), command palette goes
+full-width, dense tables breathe, status bar shrinks. Cockpit is now
+usable on phone for ops monitoring; the full trading flow still wants
+desktop but a kill button + tilt dial + Crux verdict + position list
+are all readable.
 
 ---
 
@@ -364,6 +356,20 @@ This is the inventory for compliance / due-diligence questions:
   via JSONL tail on every quote cycle
 - Bidirectional: day (liqpool → sentinel) + night (sentinel → liqpool)
 
+### Replay + paper trading (Wave 19)
+- `sentinel/replay.py` — `ReplayController` loads a past session,
+  walks events at chosen speed, publishes onto the live bus tagged
+  SHADOW (replay can never reach EXECUTION). Refuses to start while
+  spine is live-real so synthetic signals can't influence real
+  orders. New endpoints: `POST /api/replay/{start,pause,resume,stop}`,
+  `GET /api/replay/state`.
+- `sentinel/paper.py` — `PaperAccount` wraps a real Kite (or demo)
+  account: passes through quotes/funds/positions/chain unchanged,
+  intercepts `place_market_exit` to simulate fills at LTP. Journals
+  to `paper_orders.jsonl`, tracks open book + realized P&L. Enabled
+  via `SENTINEL_PAPER=1`. Differentiator between a RETAIL "sim"
+  plan and a PRO "live" plan.
+
 ### Live cockpit (the operator UI)
 - NIFTY live spot chart with hover crosshair + model-zone overlays
 - NIFTY top-10 constituent board with move-quality verdict
@@ -390,12 +396,12 @@ This is the inventory for compliance / due-diligence questions:
 - Audit log to JSONL + stderr + external sinks
 
 ### Tests
-- **Sentinel: 342 tests** (incl. 16 SaaS hardening, 15 launch prep,
-  1 end-to-end soul test)
+- **Sentinel: 361 tests** (incl. 16 SaaS hardening, 15 launch prep,
+  19 replay+paper+mobile+backup, 1 end-to-end soul test)
 - **liquidity_backtester: 841 tests** (incl. 16 golden rows pinning
   leakage-sensitive math, 33 cross-codebase contracts + adapter +
   live inference)
-- **Total: 1,216 — both halves green on this commit.**
+- **Total: 1,235 — both halves green on this commit.**
 
 ---
 

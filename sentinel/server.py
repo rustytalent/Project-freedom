@@ -45,6 +45,8 @@ from .audit_log import AuditLog
 from .auth import AuthContext, verify_token
 from .byok import GLOBAL_STORE, KiteCredentials
 from .crux_signal import CruxVerdict, compose_from_state
+from .paper import PaperAccount
+from .replay import ReplayController
 from .journey_audit import (
     Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
 )
@@ -178,6 +180,27 @@ class Sentinel:
         # Wave 18 — institutional audit trail + BYOK credential store.
         self.audit = AuditLog(path=cfg.journal_dir / "audit.jsonl")
         self.byok = GLOBAL_STORE
+        # Wave 19 — paper mode + replay
+        paper_env = os.environ.get("SENTINEL_PAPER", "") == "1"
+        if paper_env and not self.demo:
+            # Wrap the underlying account in PaperAccount so every order
+            # is simulated. funds/positions/quotes/chain stay real.
+            self.account = PaperAccount(
+                underlying=self.account,
+                journal_path=cfg.journal_dir / "paper_orders.jsonl",
+                starting_balance=float(os.environ.get(
+                    "SENTINEL_PAPER_BALANCE", "100000")),
+            )
+            self.paper_enabled = True
+        else:
+            self.paper_enabled = False
+        self.replay = ReplayController(
+            publisher=self.publisher,
+            journal_dir=cfg.journal_dir,
+            is_live_real=lambda: (not self.demo
+                                   and not self.paper_enabled
+                                   and not getattr(self.account, "dry_run", True)),
+        )
         self.audit.write("server_started",
                           {"mode": "demo" if self.demo else (
                               "dry_run" if getattr(self.account, "dry_run", True)
@@ -750,6 +773,67 @@ class PreflightBody(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Replay — load a past session, watch it play through the cockpit
+# ─────────────────────────────────────────────────────────────────
+
+class ReplayStartBody(BaseModel):
+    session_date: str
+    speed: float = 10.0
+
+
+@app.post("/api/replay/start", dependencies=[Depends(auth)])
+def replay_start(body: ReplayStartBody) -> JSONResponse:
+    try:
+        prog = CORE.replay.start(body.session_date, body.speed)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    CORE.audit.write("replay_started", body.dict(), session=CORE.session)
+    return JSONResponse(prog.to_row())
+
+
+@app.post("/api/replay/pause", dependencies=[Depends(auth)])
+def replay_pause() -> JSONResponse:
+    return JSONResponse(CORE.replay.pause().to_row())
+
+
+@app.post("/api/replay/resume", dependencies=[Depends(auth)])
+def replay_resume() -> JSONResponse:
+    return JSONResponse(CORE.replay.resume().to_row())
+
+
+@app.post("/api/replay/stop", dependencies=[Depends(auth)])
+def replay_stop() -> JSONResponse:
+    prog = CORE.replay.stop()
+    CORE.audit.write("replay_stopped", prog.to_row(), session=CORE.session)
+    return JSONResponse(prog.to_row())
+
+
+@app.get("/api/replay/state", dependencies=[Depends(auth)])
+def replay_state() -> JSONResponse:
+    return JSONResponse(CORE.replay.state().to_row())
+
+
+# ─────────────────────────────────────────────────────────────────
+# Paper trading — read-only quotes, simulated fills
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/paper/status", dependencies=[Depends(auth)])
+def paper_status() -> JSONResponse:
+    """Surface paper-mode state for the cockpit: enabled, realized
+    P&L, open book of simulated positions."""
+    if not CORE.paper_enabled:
+        return JSONResponse({"enabled": False})
+    pa = CORE.account                          # PaperAccount
+    return JSONResponse({
+        "enabled": True,
+        "starting_balance": pa._starting_balance,
+        "realized_pnl": pa.realized_pnl(),
+        "open_book": pa.open_book(),
+        "n_orders": len(pa.orders_log),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────
 # BYOK — bring-your-own-Kite-key (SaaS multi-tenant unlock)
 # ─────────────────────────────────────────────────────────────────
 
@@ -893,6 +977,12 @@ def state() -> JSONResponse:
             "acknowledged": CORE.preflight_ack is not None,
             "ack": CORE.preflight_ack,
         },
+        "paper": {
+            "enabled": CORE.paper_enabled,
+            "realized_pnl": (CORE.account.realized_pnl()
+                              if CORE.paper_enabled else 0.0),
+        },
+        "replay": CORE.replay.state().to_row(),
         "crux": CORE.crux_verdict.to_row() if CORE.crux_verdict else None,
         "model_zones": _model_zones_payload(),
         "activity": CORE.activity[:50],

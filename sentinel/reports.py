@@ -34,8 +34,9 @@ from . import (  # noqa: F401
     curator, equity_layer, greeks,
     institutional, journey_audit, kite_client, leakage_guard, live_equity,
     live_models, live_publisher, monte_carlo, moneyness, orchestration,
-    portfolio, premium_tracker, profit_lock, psychology, saas, scenario_engine,
-    scientists, shadow_ledger, strategy_builder, stress, trails,
+    paper, portfolio, premium_tracker, profit_lock, psychology, replay,
+    saas, scenario_engine, scientists, shadow_ledger, strategy_builder,
+    stress, trails,
 )
 from .calibration import CalibrationEngine
 from .curator import Curator
