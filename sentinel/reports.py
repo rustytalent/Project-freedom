@@ -33,7 +33,7 @@ from . import (  # noqa: F401
     advisor, auditor, calibration, curator, equity_layer, greeks,
     institutional, kite_client, leakage_guard, live_equity,
     live_models, live_publisher, moneyness, orchestration, portfolio, profit_lock,
-    saas, scenario_engine, scientists, shadow_ledger, strategy_builder,
+    psychology, saas, scenario_engine, scientists, shadow_ledger, strategy_builder,
     stress, trails,
 )
 from .calibration import CalibrationEngine

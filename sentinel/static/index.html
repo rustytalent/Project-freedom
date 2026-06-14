@@ -210,6 +210,34 @@
         <div class="note">EXECUTION is reserved for trailing_stop &amp; profit_lock. Research sources are clamped to their ceiling. Every promotion is auditable.</div>
       </section>
 
+      <!-- BEHAVIORAL ENGINE / MIND -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Mind · behavioral engine</span>
+          <span class="meta hint" id="tilt_meta">TiltIndex —</span>
+          <div class="right hint" id="tilt_band_chip"></div>
+        </div>
+        <div class="body" id="tilt_dial" style="padding:14px var(--s-3)"></div>
+        <div class="body flush">
+          <div id="biases_active" style="padding:0 var(--s-3) 10px"></div>
+          <div id="bias_feed" class="feed" style="max-height:170px"></div>
+        </div>
+        <div class="body" style="border-top:1px solid var(--line);padding:10px var(--s-3)">
+          <div id="intention_status"></div>
+          <details style="margin-top:8px">
+            <summary class="hint" style="cursor:pointer">Set / update intention contract (pre-market)</summary>
+            <div style="margin-top:8px" class="row-flex">
+              <label>MAX LOSS ₹</label>
+              <input id="int_loss" type="number" value="3000" min="100">
+              <label>FLAT BY</label>
+              <input id="int_flat" type="text" value="15:15" style="width:72px;font-family:'JetBrains Mono'">
+              <button class="btn sm primary" onclick="setIntention()">Commit</button>
+            </div>
+          </details>
+        </div>
+        <div class="note">Six citation-bearing detectors (Kahneman, Steenbarger, Tversky, Shefrin & Statman, Gilovich-Vallone-Tversky, Tharp) read your action stream + tilt your composite gauge. RED band or worse refuses non-exit orders at the spine — your committed limits cannot be routed around.</div>
+      </section>
+
       <!-- LIVE BRIEF FEED -->
       <section class="panel">
         <div class="head">
@@ -455,6 +483,9 @@ function render(s){
   /* NIFTY constituent board */
   renderBoard(s.constituent_board);
 
+  /* behavioral engine (Mind) */
+  renderTilt({tilt: s.psychology, execution_blocked: false}, s.intention);
+
   /* live research signals */
   const sigs = s.live_signals || {};
   const sigEntries = Object.values(sigs).sort((a,b)=> (b.confidence||0) - (a.confidence||0));
@@ -632,6 +663,88 @@ function renderFeedRow(sig){
     <span class="t">${sig.ts_ist}</span>
     <span><span style="color:var(--amber);font-weight:500">${tag}</span> · ${sig.signal} <span class="dim-text">(${conf}%)</span></span>
   </div>`;
+}
+
+/* ─────────── behavioral engine (Mind panel) ─────────── */
+const TILT_COLOR = {GREEN:"var(--green)", AMBER:"var(--amber)", RED:"var(--red)", CIRCUIT:"#e23"};
+function renderTilt(psy, intent){
+  const tilt = psy?.tilt || {};
+  const value = tilt.index ?? 0;
+  const band  = tilt.band || "GREEN";
+  const color = TILT_COLOR[band] || "var(--muted)";
+  document.getElementById("tilt_meta").textContent =
+    `TiltIndex ${value.toFixed(0)}/100 · ${(tilt.recent||[]).length} bias event(s)`;
+  document.getElementById("tilt_band_chip").innerHTML =
+    `<span class="chip" style="color:${color};border-color:${color}">${band}</span>`;
+  // semicircular dial
+  const W=300, H=110;
+  const cx=W/2, cy=H-12, r=80;
+  const valClamped = Math.max(0, Math.min(100, value));
+  const ang = Math.PI * (1 - valClamped/100);            // π .. 0
+  const px = cx + r*Math.cos(ang), py = cy - r*Math.sin(ang);
+  // band-arc fills (4 bands)
+  function arc(from, to, col){
+    const a1 = Math.PI*(1 - from/100), a2 = Math.PI*(1 - to/100);
+    const x1 = cx + r*Math.cos(a1), y1 = cy - r*Math.sin(a1);
+    const x2 = cx + r*Math.cos(a2), y2 = cy - r*Math.sin(a2);
+    const large = Math.abs(a1-a2) > Math.PI ? 1 : 0;
+    return `<path d="M${x1} ${y1} A${r} ${r} 0 ${large} 1 ${x2} ${y2}" stroke="${col}" stroke-width="8" fill="none" stroke-linecap="butt" opacity=".85"/>`;
+  }
+  document.getElementById("tilt_dial").innerHTML = `
+    <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="display:block;margin:0 auto">
+      ${arc(0,30,"var(--green)")}${arc(30,60,"var(--amber)")}${arc(60,85,"var(--red)")}${arc(85,100,"#e23")}
+      <line x1="${cx}" y1="${cy}" x2="${px}" y2="${py}" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="${cx}" cy="${cy}" r="5" fill="${color}"/>
+      <text x="${cx}" y="${cy-r-4}" text-anchor="middle" fill="${color}" font-family="JetBrains Mono" font-size="22" font-weight="600">${value.toFixed(0)}</text>
+      <text x="${cx-r-2}" y="${cy+12}" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">0</text>
+      <text x="${cx+r-6}" y="${cy+12}" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">100</text>
+    </svg>`;
+  // active biases
+  const active = tilt.biases_active || [];
+  document.getElementById("biases_active").innerHTML = active.length
+    ? `<div class="hint" style="margin-bottom:4px">ACTIVE BIASES</div>` +
+      active.map(b=>`<span class="chip warn" style="margin-right:4px">${b}</span>`).join("")
+    : `<div class="hint" style="color:var(--green)">no biases firing — frontal lobe in charge</div>`;
+  // bias event feed
+  document.getElementById("bias_feed").innerHTML = (tilt.recent||[]).map(b=>{
+    const sev = Math.round((b.severity||0)*100);
+    return `<div class="row"><span class="t">${b.detected_at_ist}</span>
+      <span><span style="color:var(--red);font-weight:500">${b.bias}</span> ${sev}% · ${b.evidence}
+      <div class="hint" style="margin-top:2px">${b.citation}</div></span></div>`;
+  }).join("") || '<div class="row dim-text"><span>no bias events yet this session</span></div>';
+  // intention status
+  renderIntention(intent, psy?.execution_blocked);
+}
+function renderIntention(intent, blocked){
+  const wrap = document.getElementById("intention_status");
+  if(!intent || !intent.set_at_ist){
+    wrap.innerHTML = `<div class="lock" style="padding:9px var(--s-3)"><span class="icon">📜</span><span class="msg">No intention set yet. <em>Set one before the open — Ulysses contract pattern (Elster 2000).</em></span></div>`;
+    return;
+  }
+  if(intent.violated){
+    wrap.innerHTML = `<div class="lock" style="border-color:rgba(184,94,82,.65);color:var(--red);background:var(--red-soft);padding:9px var(--s-3)">
+      <span class="icon">⚠</span>
+      <span class="msg"><b>INTENTION VIOLATED:</b> ${intent.violation_reason}.<br>
+      <em>Spine refusing new non-exit orders.</em></span></div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <div class="hint" style="margin-bottom:4px">INTENTION CONTRACT · set ${intent.set_at_ist}</div>
+    <div class="row-flex" style="gap:14px;font-size:var(--t-md)">
+      <span><span class="dim-text">max loss</span> <span class="mono neg">−${inr(intent.max_day_loss_rupees)}</span></span>
+      ${intent.target_day_profit_rupees ? `<span><span class="dim-text">target</span> <span class="mono pos">+${inr(intent.target_day_profit_rupees)}</span></span>`:""}
+      ${intent.max_positions ? `<span><span class="dim-text">max pos</span> <span class="mono">${intent.max_positions}</span></span>`:""}
+      <span><span class="dim-text">flat by</span> <span class="mono">${intent.no_trade_after_ist}</span></span>
+    </div>
+    ${blocked ? '<div class="hint" style="color:var(--red);margin-top:6px">spine blocking non-exit orders (RED tilt)</div>':""}`;
+}
+async function setIntention(){
+  const max_loss = parseFloat(document.getElementById("int_loss").value);
+  const flat = document.getElementById("int_flat").value.trim();
+  if(!(max_loss>0)){ alert("max loss must be > 0"); return; }
+  await api("/api/intention", {method:"POST",
+    body: JSON.stringify({max_day_loss_rupees: max_loss, no_trade_after_ist: flat})});
+  refresh();
 }
 
 /* ─────────── NIFTY constituent board ─────────── */

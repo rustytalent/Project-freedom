@@ -44,6 +44,7 @@ from .live_equity import ConstituentBoard, DemoFeed
 from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
 from .live_publisher import LivePublisher, ModelSignal
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
+from .psychology import PsychologyEngine, TradeAction
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
 from .shadow_ledger import ShadowLedger
@@ -132,6 +133,14 @@ class Sentinel:
         self.constituent_board = ConstituentBoard(publisher=self.publisher)
         self._equity_feed: Optional[DemoFeed] = DemoFeed() if self.demo else None
         self._board_snapshot: Dict[str, Any] = {}
+        # Behavioral engine (Wave 12). Drives 6 citation-bearing bias
+        # detectors + a TiltIndex composite + the operator's Ulysses-
+        # contract; spine refuses non-hard-wired EXECUTION upgrades while
+        # tilt is in RED or worse.
+        self.psychology = PsychologyEngine(
+            publisher=self.publisher, session=self.session,
+            journal_path=cfg.journal_dir / "mind_reports.jsonl",
+        )
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -182,7 +191,15 @@ class Sentinel:
 
     def _sig_execute(self, sig: Signal) -> Optional[Dict[str, Any]]:
         """The ONE gated path to an order. Reached only by EXECUTION-tier
-        signals the spine permitted."""
+        signals the spine permitted. Hard-wired exit actors (trailing_stop,
+        profit_lock) always pass; everything else is also gated by the
+        behavioral engine — RED tilt or worse refuses non-exit orders so
+        the operator cannot route around their own committed limits."""
+        hard = sig.source in ("trailing_stop", "profit_lock")
+        if not hard and self.psychology.should_block_execution():
+            self.log(f"[psychology] BLOCKED {sig.source} order — "
+                     f"tilt band {self.psychology.state().band}")
+            return None
         p = sig.payload
         return self._exit_fn(p["symbol"], p["side"], int(p["qty"]))
 
@@ -209,7 +226,31 @@ class Sentinel:
             source="trailing_stop", tier=Tier.EXECUTION, kind="exit",
             payload={"symbol": symbol, "side": side, "qty": qty},
             reason="trailing stop / portfolio lock hit"))
+        # Record the EXIT so the disposition / revenge detectors have
+        # material to read.
+        pos = self.portfolio.positions.get(symbol)
+        self.psychology.record(TradeAction(
+            ts_ist=datetime.now(IST).strftime("%H:%M:%S"),
+            action="EXIT", symbol=symbol, qty=int(qty),
+            pnl=float(pos.pnl) if pos else 0.0,
+            premium=float(pos.ltp) if pos else 0.0,
+            spot=float(self.portfolio.spot or 0.0),
+        ))
         return resp or {}
+
+    def _tick_psychology(self) -> None:
+        """Run the behavioral engine once per cycle: record spot, fire
+        detectors, update tilt."""
+        if self.portfolio.spot:
+            self.psychology.record_spot(
+                datetime.now(IST).strftime("%H:%M:%S"),
+                float(self.portfolio.spot))
+        events = self.psychology.cycle(
+            day_pnl=float(self.portfolio.total_pnl),
+            open_positions=len(self.portfolio.positions))
+        for ev in events:
+            self.log(f"[psychology] {ev.bias} (sev {ev.severity:.0%}) — "
+                     f"{ev.evidence}")
 
     # -- background loop -------------------------------------------------
 
@@ -236,6 +277,7 @@ class Sentinel:
                 self._tick_quotes()
                 self._tick_board()
                 self._tick_models()
+                self._tick_psychology()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:
                     self._tick_portfolio()
                     last_pf = now
@@ -527,8 +569,56 @@ def state() -> JSONResponse:
         "spot_history": [{"t": round(t.ts, 1), "spot": t.spot}
                           for t in CORE._tick_hist[-180:]],
         "constituent_board": CORE._board_snapshot,
+        "psychology": CORE.psychology.state().to_row(),
+        "intention": CORE.psychology.intention.to_row(),
         "activity": CORE.activity[:50],
     })
+
+
+class IntentionBody(BaseModel):
+    max_day_loss_rupees: float
+    target_day_profit_rupees: float = 0.0
+    max_positions: int = 0
+    no_trade_after_ist: str = "15:15"
+    notes: str = ""
+
+
+@app.post("/api/intention", dependencies=[Depends(auth)])
+def set_intention(body: IntentionBody) -> JSONResponse:
+    """The operator's pre-market commitment — Ulysses contract pattern
+    (Elster 2000). The behavioral engine checks it every cycle; if it's
+    breached, INTENTION_VIOLATED fires and the spine refuses non-hard-
+    wired EXECUTION upgrades."""
+    if body.max_day_loss_rupees <= 0:
+        raise HTTPException(400, "max_day_loss_rupees must be > 0")
+    intent = CORE.psychology.set_intention(
+        max_day_loss_rupees=body.max_day_loss_rupees,
+        target_day_profit_rupees=body.target_day_profit_rupees,
+        max_positions=body.max_positions,
+        no_trade_after_ist=body.no_trade_after_ist,
+        notes=body.notes,
+    )
+    CORE.log(f"intention set: max loss ₹{body.max_day_loss_rupees:,.0f}, "
+             f"flat by {body.no_trade_after_ist}")
+    return JSONResponse(intent.to_row())
+
+
+@app.get("/api/psychology", dependencies=[Depends(auth)])
+def psychology_state() -> JSONResponse:
+    """The TiltIndex + active biases + recent bias events."""
+    return JSONResponse({
+        "tilt": CORE.psychology.state().to_row(),
+        "intention": CORE.psychology.intention.to_row(),
+        "execution_blocked": CORE.psychology.should_block_execution(),
+    })
+
+
+@app.get("/api/psychology/mind_report", dependencies=[Depends(auth)])
+def mind_report() -> JSONResponse:
+    """The end-of-session reflection: tilt avg/peak, biases-by-type,
+    intention status, citations. Also appended to
+    <journal>/mind_reports.jsonl for the next-day review."""
+    return JSONResponse(CORE.psychology.mind_report().to_row())
 
 
 @app.get("/api/equity_board", dependencies=[Depends(auth)])
@@ -573,6 +663,15 @@ def arm_trail(body: ArmBody) -> JSONResponse:
                         body.cushion_rupees, premium)
     CORE.log(f"trail armed on {body.tradingsymbol} cushion "
              f"₹{body.cushion_rupees:,.0f} @ {premium}")
+    # feed the anchoring detector: round-number cushions on small-
+    # premium contracts are the textbook anchoring tell.
+    CORE.psychology.record(TradeAction(
+        ts_ist=datetime.now(IST).strftime("%H:%M:%S"),
+        action="TRAIL_ARMED", symbol=body.tradingsymbol,
+        qty=int(body.quantity), premium=float(premium),
+        extras={"cushion_rupees": float(body.cushion_rupees),
+                "premium": float(premium)},
+    ))
     return JSONResponse(t.serialise())
 
 

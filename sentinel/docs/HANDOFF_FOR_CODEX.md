@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-14 (Wave 11 — Constituent board)**
+**Status as of 2026-06-14 (Wave 12 — Behavioral / Psychology engine)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 11 — the **NIFTY constituent board**, the founder's "is the index move real?" panel. New module `live_equity` (streaming `ConstituentBoard` + deterministic `DemoFeed` for the top 10). `equity_layer` gains `move_quality()` — verdict classifier returning STRONG / FRAGILE / MANIPULATED / ROTATION / CONSOLIDATION with reason codes + composite metrics. Sentinel's hot loop drives the board every cycle, publishing one TRUSTED `constituent_board` signal per cycle to the bus (mirrored to the ShadowLedger). Cockpit gains a board panel with the verdict in big colour-coded type, breadth chip, per-stock LTP + return + weight + contribution + sparkline. New endpoint `GET /api/equity_board`.
-**Test status**: **232 passed** (sentinel suite)
-**Module count**: **25** self-declared modules
-**Lines of code**: ~9,200 backend + ~3,600 tests + design system CSS + 2 UI pages
+**Latest pass**: Wave 12 — the **behavioral engine** the founder talks about constantly ("mechanize anti-greed psychology"). New module `psychology` with six citation-bearing bias detectors (Steenbarger 2009, Lo 2017, Gilovich-Vallone-Tversky 1985, Shefrin & Statman 1985, Tversky & Kahneman 1974, Tharp 2007) + `TiltIndex` composite gauge (0-100 with GREEN/AMBER/RED/CIRCUIT bands) + `IntentionContract` (Ulysses pattern from Elster 2000) + `MindReport` end-of-session reflection. Every bias fires as a TRUSTED `psychology` ModelSignal on the live bus; the **spine refuses non-exit EXECUTION orders while tilt ≥ RED band**, so the operator's committed limits cannot be routed around. New endpoints `POST /api/intention`, `GET /api/psychology`, `GET /api/psychology/mind_report`. Cockpit gains a Mind panel with a semicircular tilt dial, active-biases chips, recent-events feed with citations, and an intention-contract form. Almost no Indian options platform has this — it's genuinely differentiated.
+**Test status**: **265 passed** (sentinel suite)
+**Module count**: **26** self-declared modules
+**Lines of code**: ~10,000 backend + ~4,000 tests + design system CSS + 2 UI pages
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It
