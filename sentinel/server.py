@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -40,7 +41,9 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .audit_log import AuditLog
 from .auth import AuthContext, verify_token
+from .byok import GLOBAL_STORE, KiteCredentials
 from .crux_signal import CruxVerdict, compose_from_state
 from .journey_audit import (
     Mistake, MistakeDetector, TradeQualityScorecard, publish_mistakes,
@@ -172,6 +175,16 @@ class Sentinel:
         # blast into the day without committing.
         self.preflight_ack: Optional[Dict[str, Any]] = None
         self.boot_ts = time.monotonic()
+        # Wave 18 — institutional audit trail + BYOK credential store.
+        self.audit = AuditLog(path=cfg.journal_dir / "audit.jsonl")
+        self.byok = GLOBAL_STORE
+        self.audit.write("server_started",
+                          {"mode": "demo" if self.demo else (
+                              "dry_run" if getattr(self.account, "dry_run", True)
+                              else "live"),
+                            "session": self.session,
+                            "demo_mode": self.demo},
+                          session=self.session)
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -228,11 +241,27 @@ class Sentinel:
         the operator cannot route around their own committed limits."""
         hard = sig.source in ("trailing_stop", "profit_lock")
         if not hard and self.psychology.should_block_execution():
+            band = self.psychology.state().band
             self.log(f"[psychology] BLOCKED {sig.source} order — "
-                     f"tilt band {self.psychology.state().band}")
+                     f"tilt band {band}")
+            self.audit.write("order_blocked",
+                              {"source": sig.source, "reason": "red_tilt",
+                                "tilt_band": band,
+                                "symbol": sig.payload.get("symbol"),
+                                "qty": sig.payload.get("qty")},
+                              severity=AuditLog.SEV_WARN,
+                              session=self.session)
             return None
         p = sig.payload
-        return self._exit_fn(p["symbol"], p["side"], int(p["qty"]))
+        result = self._exit_fn(p["symbol"], p["side"], int(p["qty"]))
+        self.audit.write("order_placed",
+                          {"source": sig.source, "symbol": p["symbol"],
+                            "side": p["side"], "qty": p["qty"],
+                            "order_id": (result or {}).get("order_id", ""),
+                            "status": (result or {}).get("status", "")},
+                          severity=AuditLog.SEV_INFO,
+                          session=self.session)
+        return result
 
     def record_promotion(self, rec: TrustPromotionRecord) -> None:
         """Persist a trust-promotion decision (append-only) and keep a
@@ -580,28 +609,43 @@ def auth(x_sentinel_token: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(401, "bad or missing X-Sentinel-Token")
 
 
+_DEV_HEADER_FALLBACK_ALLOWED = (
+    os.environ.get("SENTINEL_DEMO", "") == "1"
+    or os.environ.get("SENTINEL_ALLOW_HEADER_AUTH", "") == "1"
+)
+
+
 def resolve_auth(
     authorization: Optional[str] = Header(default=None),
     x_sentinel_plan: Optional[str] = Header(default=None),
 ) -> Optional[AuthContext]:
     """Auth resolver — production reads ``Authorization: Bearer <jwt>``
-    (Codex's Supabase token). Dev mode keeps the older
-    ``X-Sentinel-Plan: FOUNDER`` header working so the local cockpit
-    doesn't need Supabase running. Returns None when no valid
-    credential present — endpoints that need auth check for None and
-    return 401; endpoints that only need the plan can fall through to
-    ``resolve_plan`` below."""
+    (Codex's Supabase token).
+
+    The legacy ``X-Sentinel-Plan: FOUNDER`` header is ONLY honoured when
+    ``SENTINEL_DEMO=1`` or ``SENTINEL_ALLOW_HEADER_AUTH=1`` is set —
+    otherwise prod can't accidentally ship the dev backdoor.
+
+    Returns None when no valid credential present; endpoints that need
+    auth check for None and return 401."""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
         return verify_token(token)
-    if x_sentinel_plan:
-        # legacy / dev fallback — explicitly mark as demo so audit logs
-        # can tell production from local easily.
+    if x_sentinel_plan and _DEV_HEADER_FALLBACK_ALLOWED:
         return AuthContext(user_id="dev",
                            email="dev@local",
                            plan=x_sentinel_plan.upper(),
                            is_demo=True)
     return None
+
+
+def require_user(ctx: Optional[AuthContext] = Depends(resolve_auth)
+                 ) -> AuthContext:
+    """FastAPI dependency for endpoints that need an authenticated user
+    (not just a plan). 401 on no valid credential."""
+    if ctx is None:
+        raise HTTPException(401, "authentication required")
+    return ctx
 
 
 def resolve_plan(x_sentinel_plan: Optional[str] = Header(default=None)) -> str:
@@ -703,6 +747,56 @@ class PreflightBody(BaseModel):
     expected_regime: str = ""             # "trending" | "chop" | "no_view"
     no_revenge_trading: bool = True
     notes: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────
+# BYOK — bring-your-own-Kite-key (SaaS multi-tenant unlock)
+# ─────────────────────────────────────────────────────────────────
+
+class ByokConnectBody(BaseModel):
+    api_key: str
+    access_token: str
+
+
+@app.post("/api/byok/connect", dependencies=[Depends(auth)])
+def byok_connect(body: ByokConnectBody,
+                 ctx: AuthContext = Depends(require_user)) -> JSONResponse:
+    """Customer connects their own Kite developer credentials. Stored
+    encrypted in-memory keyed by ``user_id``. Cleared on process restart
+    — Codex's persistence layer re-populates from Supabase as users
+    come online (he holds the AT-REST master key)."""
+    try:
+        CORE.byok.set(ctx.user_id, body.api_key, body.access_token)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    CORE.audit.write("byok_connect",
+                      {"connected_users": CORE.byok.connected_users()},
+                      severity=AuditLog.SEV_INFO,
+                      user_id=ctx.user_id, session=CORE.session)
+    return JSONResponse({
+        "ok": True,
+        "user_id": ctx.user_id,
+        "connected": True,
+        "connected_users_total": CORE.byok.connected_users(),
+    })
+
+
+@app.delete("/api/byok/connect", dependencies=[Depends(auth)])
+def byok_disconnect(ctx: AuthContext = Depends(require_user)) -> JSONResponse:
+    """Customer disconnects their Kite session (logout / token revoke)."""
+    removed = CORE.byok.forget(ctx.user_id)
+    CORE.audit.write("byok_disconnect", {"removed": removed},
+                      user_id=ctx.user_id, session=CORE.session)
+    return JSONResponse({"ok": True, "removed": removed})
+
+
+@app.get("/api/byok/status", dependencies=[Depends(auth)])
+def byok_status(ctx: AuthContext = Depends(require_user)) -> JSONResponse:
+    """Whether the caller has Kite credentials connected this process."""
+    return JSONResponse({
+        "user_id": ctx.user_id,
+        "connected": CORE.byok.has(ctx.user_id),
+    })
 
 
 @app.get("/api/preflight", dependencies=[Depends(auth)])
