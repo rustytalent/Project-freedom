@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardTitle } from "@/components/ui/card";
+import { brand } from "@/lib/brand";
 
 export const metadata: Metadata = {
   title: "Account",
@@ -81,10 +82,10 @@ export default function AccountPage() {
             <p>
               Email{" "}
               <a
-                href="mailto:hello@cruxresearch.in"
+                href={`mailto:${brand.contact.email}`}
                 className="text-accent underline underline-offset-4"
               >
-                hello@cruxresearch.in
+                {brand.contact.email}
               </a>{" "}
               to export or delete your data. We respond within seven
               business days.
