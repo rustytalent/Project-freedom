@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-13 (Wave 8b — institutional-tier UI)**
+**Status as of 2026-06-14 (Wave 10 — Live spine)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 8b — both pages rebuilt on a shared design system aimed at Bloomberg/Refinitiv-tier polish: refined dark palette with amber accents, tabular-nums everywhere, IST clock + NSE market-hours chip, kbd-driven UX (⌘K command palette, `1`–`5` tab keys, `g c` to console), bottom status bar with live spine + ledger counts, real grid-lined charts with breakeven diamonds and stress bullet bars, lock/upsell cards with one-click tier bump, equity-context tab with full top-10 contribution table.
-**Test status**: **194 passed** (sentinel suite)
-**Module count**: **22** self-declared modules
-**Lines of code**: ~8,000 backend + ~3,000 tests + design system CSS + 2 UI pages
+**Latest pass**: Wave 10 — the **Live Model Publisher spine** ChatGPT was right about. New modules `live_publisher` (ModelSignal contract + thread-safe in-memory bus + canonical mirror to ShadowLedger for TRUSTED+) and `live_models` (six honest stubs: reaction, proximity, liquidity, quality, post-reaction, manipulation). Sentinel's hot loop drives the pool on every tick; the cockpit gains three new live panels — **NIFTY live spot chart with hover crosshair**, **Live research signal panel** with per-model confidence bars + invalidation, and **Live brief feed** running commentary. `/api/state` now carries `live_signals`, `live_feed`, and `spot_history`; new `/api/live/signals?asset=` exposes the bus directly.
+**Test status**: **220 passed** (sentinel suite)
+**Module count**: **24** self-declared modules
+**Lines of code**: ~8,800 backend + ~3,400 tests + design system CSS + 2 UI pages
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It

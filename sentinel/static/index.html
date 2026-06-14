@@ -40,6 +40,34 @@
     <!-- LEFT COLUMN -->
     <div class="col">
 
+      <!-- LIVE NIFTY CHART -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">NIFTY · Live spot</span>
+          <span class="meta mono" id="spot_meta">—</span>
+          <div class="right hint" id="spot_range">session range —</div>
+        </div>
+        <div class="body" style="padding:10px var(--s-3) var(--s-3)">
+          <div class="chart-wrap" id="spot_wrap" style="padding:0">
+            <svg id="spot_chart" width="100%" height="170" viewBox="0 0 840 170" preserveAspectRatio="none"></svg>
+            <div class="tip" id="spot_tip"></div>
+          </div>
+        </div>
+        <div class="note">Live spot history (last ~10 minutes at 1-2s polling). Hover for the exact value; the gold line is NIFTY, the dashed band marks high/low so far this session.</div>
+      </section>
+
+      <!-- LIVE RESEARCH SIGNAL PANEL -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Live research signals</span>
+          <span class="meta hint" id="sig_meta">no models firing yet</span>
+        </div>
+        <div class="body flush" id="live_signals">
+          <div class="pad dim-text">waiting for the first model output…</div>
+        </div>
+        <div class="note">Six live models — reaction, proximity, liquidity, quality, post-reaction, manipulation — publish to one bus. The cockpit shows the latest verdict per model with confidence + invalidation; the feed below carries the running brief.</div>
+      </section>
+
       <!-- POSITIONS -->
       <section class="panel">
         <div class="head">
@@ -163,6 +191,16 @@
           <div id="promos" style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:var(--t-sm)"></div>
         </div>
         <div class="note">EXECUTION is reserved for trailing_stop &amp; profit_lock. Research sources are clamped to their ceiling. Every promotion is auditable.</div>
+      </section>
+
+      <!-- LIVE BRIEF FEED -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Live brief feed</span>
+          <span class="right hint">running commentary · model bus</span>
+        </div>
+        <div class="body flush"><div class="feed" id="live_feed" style="max-height:280px"></div></div>
+        <div class="note">Every model output the bus carries, newest first. Same stream the curator/calibration loop trains on — what you see is what gets graded.</div>
       </section>
 
       <!-- ACTIVE TRAILS -->
@@ -394,6 +432,24 @@ function render(s){
       <td class="mono" style="color:var(--amber)">${r.score.toFixed(3)}</td></tr>`
   ).join("") || '<tr class="empty"><td colspan="9">no chain data yet</td></tr>';
 
+  /* NIFTY spot chart */
+  drawSpotChart(s.spot_history || [], s.portfolio.spot);
+
+  /* live research signals */
+  const sigs = s.live_signals || {};
+  const sigEntries = Object.values(sigs).sort((a,b)=> (b.confidence||0) - (a.confidence||0));
+  document.getElementById("sig_meta").textContent =
+    sigEntries.length ? `${sigEntries.length} model(s) firing` : "no models firing yet";
+  document.getElementById("live_signals").innerHTML = sigEntries.length
+    ? sigEntries.map(renderSignal).join("")
+    : '<div class="pad dim-text">waiting for the first model output… (need ~30s of spot history)</div>';
+
+  /* live brief feed */
+  const feed = s.live_feed || [];
+  document.getElementById("live_feed").innerHTML = feed.length
+    ? feed.map(renderFeedRow).join("")
+    : '<div class="row dim-text"><span>brief feed will populate as models fire</span></div>';
+
   /* trust spine */
   const orc = s.orchestrator;
   if(orc){
@@ -424,6 +480,138 @@ function render(s){
     const imp = /KILL|FIRED|EXIT/.test(a.msg);
     return `<div class="row${imp?" imp":""}"><span class="t">${a.at}</span><span>${a.msg}</span></div>`;
   }).join("") || '<div class="row dim-text"><span>nothing yet</span></div>';
+}
+
+/* ─────────── live NIFTY spot chart ─────────── */
+let SPOT_CHART = null;
+function drawSpotChart(hist, currentSpot){
+  const svg = document.getElementById("spot_chart");
+  if(!hist || hist.length < 2){
+    svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--dim)">collecting spot ticks…</text>`;
+    document.getElementById("spot_meta").textContent = currentSpot ? currentSpot.toLocaleString("en-IN") : "—";
+    SPOT_CHART = null; return;
+  }
+  const W=840, H=170, L=52, R=14, T=10, B=22;
+  const xs = hist.map(p=>p.t), ys = hist.map(p=>p.spot);
+  const xmin=Math.min(...xs), xmax=Math.max(...xs);
+  const lo=Math.min(...ys), hi=Math.max(...ys);
+  const pad=(hi-lo)*0.12 || 1;
+  const ymin=lo-pad, ymax=hi+pad;
+  const X=x=>L+(x-xmin)/((xmax-xmin)||1)*(W-L-R);
+  const Y=y=>T+(1-(y-ymin)/((ymax-ymin)||1))*(H-T-B);
+  // axis labels
+  let grid="";
+  for(let i=0;i<=3;i++){
+    const y=T+i/3*(H-T-B), v=ymax-i/3*(ymax-ymin);
+    grid+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line-soft)" stroke-dasharray="2 3"/>`;
+    grid+=`<text x="${L-6}" y="${y+3}" text-anchor="end" fill="var(--dim)" font-family="JetBrains Mono" font-size="10">${Math.round(v).toLocaleString("en-IN")}</text>`;
+  }
+  // bands at high / low so far
+  const hiBand = `<line x1="${L}" y1="${Y(hi)}" x2="${W-R}" y2="${Y(hi)}" stroke="var(--green)" stroke-dasharray="3 4" opacity=".4"/>
+                  <text x="${W-R}" y="${Y(hi)-3}" text-anchor="end" fill="var(--green)" font-family="JetBrains Mono" font-size="10">H ${Math.round(hi).toLocaleString("en-IN")}</text>`;
+  const loBand = `<line x1="${L}" y1="${Y(lo)}" x2="${W-R}" y2="${Y(lo)}" stroke="var(--red)" stroke-dasharray="3 4" opacity=".4"/>
+                  <text x="${W-R}" y="${Y(lo)+12}" text-anchor="end" fill="var(--red)" font-family="JetBrains Mono" font-size="10">L ${Math.round(lo).toLocaleString("en-IN")}</text>`;
+  const d = hist.map((p,i)=>(i?"L":"M")+X(p.t).toFixed(1)+","+Y(p.spot).toFixed(1)).join(" ");
+  const area = `${d} L${X(xmax).toFixed(1)},${Y(ymin).toFixed(1)} L${X(xmin).toFixed(1)},${Y(ymin).toFixed(1)} Z`;
+  const last = hist[hist.length-1];
+  const dir = hist.length>=2 && hist[hist.length-1].spot >= hist[0].spot ? "up" : "dn";
+  const lineColor = dir==="up" ? "var(--green)" : "var(--red)";
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="sg" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stop-color="${lineColor}" stop-opacity=".22"/>
+        <stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    ${grid}${hiBand}${loBand}
+    <path d="M${X(xmin).toFixed(1)},${Y(hist[0].spot).toFixed(1)} ${area}" fill="url(#sg)"/>
+    <path d="${d}" fill="none" stroke="${lineColor}" stroke-width="1.6"/>
+    <circle cx="${X(last.t)}" cy="${Y(last.spot)}" r="3.5" fill="${lineColor}" stroke="#0a0b0d" stroke-width="1"/>
+    <g id="spot_xhair" style="display:none">
+      <line id="sxh_v" x1="0" y1="${T}" x2="0" y2="${H-B}" stroke="var(--amber)" stroke-dasharray="3 3" opacity=".75"/>
+      <circle id="sxh_dot" r="3" fill="var(--amber)"/>
+    </g>`;
+  document.getElementById("spot_meta").textContent =
+    (currentSpot?.toLocaleString("en-IN") || "—") +
+    " · Δ " + ((last.spot - hist[0].spot >=0 ? "+":"") + Math.round(last.spot - hist[0].spot)) + " pts";
+  document.getElementById("spot_range").textContent =
+    `session range ${Math.round(lo).toLocaleString("en-IN")} … ${Math.round(hi).toLocaleString("en-IN")} (${Math.round(hi-lo)} pts)`;
+  SPOT_CHART = {hist, X, Y, L, R, T, B, W, H, Xinv:px=> xmin+(px-L)/(W-L-R)*((xmax-xmin)||1)};
+}
+
+(function(){
+  const svg = document.getElementById("spot_chart");
+  const tip = document.getElementById("spot_tip");
+  const wrap = document.getElementById("spot_wrap");
+  if(!svg) return;
+  function nearest(t){
+    if(!SPOT_CHART) return null;
+    const h = SPOT_CHART.hist;
+    let best=h[0], bd=Math.abs(h[0].t-t);
+    for(const p of h){ const d=Math.abs(p.t-t); if(d<bd){bd=d; best=p;} }
+    return best;
+  }
+  function move(e){
+    if(!SPOT_CHART) return;
+    const rect=svg.getBoundingClientRect();
+    const x=(e.clientX-rect.left)*(SPOT_CHART.W/rect.width);
+    if(x<SPOT_CHART.L||x>SPOT_CHART.W-SPOT_CHART.R){ leave(); return; }
+    const tval=SPOT_CHART.Xinv(x);
+    const pt=nearest(tval); if(!pt){ leave(); return; }
+    const px=SPOT_CHART.X(pt.t), py=SPOT_CHART.Y(pt.spot);
+    document.getElementById("sxh_v").setAttribute("x1",px);
+    document.getElementById("sxh_v").setAttribute("x2",px);
+    document.getElementById("sxh_dot").setAttribute("cx",px);
+    document.getElementById("sxh_dot").setAttribute("cy",py);
+    document.getElementById("spot_xhair").style.display="";
+    const wrapRect=wrap.getBoundingClientRect();
+    const first=SPOT_CHART.hist[0];
+    const delta=pt.spot - first.spot;
+    tip.style.left=Math.min(Math.max(e.clientX-wrapRect.left+12,8), wrapRect.width-tip.offsetWidth-8)+"px";
+    tip.style.top =Math.min(Math.max(e.clientY-wrapRect.top -12,8), wrapRect.height-tip.offsetHeight-8)+"px";
+    tip.innerHTML = `
+      <div class="legend">spot</div>
+      <div class="row"><span class="k">NIFTY</span><span class="v mono">${Math.round(pt.spot).toLocaleString("en-IN")}</span></div>
+      <div class="row"><span class="k">vs start</span><span class="v mono ${delta>=0?'pos':'neg'}">${delta>=0?'+':''}${Math.round(delta)} pts</span></div>`;
+    tip.classList.add("on");
+  }
+  function leave(){
+    const xh=document.getElementById("spot_xhair");
+    if(xh) xh.style.display="none";
+    tip.classList.remove("on");
+  }
+  svg.addEventListener("mousemove", move);
+  svg.addEventListener("mouseleave", leave);
+})();
+
+/* ─────────── live research signal rendering ─────────── */
+function renderSignal(sig){
+  const conf = Math.round((sig.confidence||0)*100);
+  const reasons = (sig.reason_codes||[]).join(" · ");
+  return `
+    <div style="padding:10px var(--s-3);border-bottom:1px solid var(--line-soft)">
+      <div class="row-flex" style="justify-content:space-between;margin-bottom:4px">
+        <span style="font-weight:500"><span class="tier ${sig.trust_tier}" style="margin-right:6px">${sig.trust_tier}</span>${sig.model}</span>
+        <span class="hint mono">${sig.ts_ist} · ${sig.asset}</span>
+      </div>
+      <div style="color:var(--fg-soft);font-size:var(--t-md);margin-bottom:6px">${sig.signal}</div>
+      <div class="row-flex" style="gap:8px">
+        <div style="flex:1;height:6px;background:var(--bg-2);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${conf}%;background:linear-gradient(90deg,var(--amber-soft),var(--amber))"></div>
+        </div>
+        <span class="mono dim-text" style="width:36px;text-align:right">${conf}%</span>
+      </div>
+      ${reasons ? `<div class="hint mono" style="margin-top:5px">${reasons}</div>` : ""}
+      ${sig.risk ? `<div class="hint" style="margin-top:3px;color:var(--red)">⚠ ${sig.risk}</div>` : ""}
+    </div>`;
+}
+function renderFeedRow(sig){
+  const tag = sig.model.split("_")[0].toUpperCase();
+  const conf = Math.round((sig.confidence||0)*100);
+  return `<div class="row">
+    <span class="t">${sig.ts_ist}</span>
+    <span><span style="color:var(--amber);font-weight:500">${tag}</span> · ${sig.signal} <span class="dim-text">(${conf}%)</span></span>
+  </div>`;
 }
 
 /* ─────────── scenario chart — interactive crosshair, profit/loss zones ─────────── */

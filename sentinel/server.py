@@ -40,6 +40,8 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
+from .live_publisher import LivePublisher, ModelSignal
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
 from .portfolio import PortfolioState
 from .profit_lock import ProfitLock
@@ -116,6 +118,13 @@ class Sentinel:
             shadow_ledger=self.shadow_ledger,
             session=self.session,
         )
+        # The Live Model Publisher — the founder's missing live brain.
+        # Every research signal flows through here; the cockpit reads from
+        # here; TRUSTED+ signals mirror to ShadowLedger.
+        self.publisher = LivePublisher(shadow_ledger=self.shadow_ledger,
+                                       session=self.session)
+        self.live_models = LiveModelPool(DEFAULT_MODELS)
+        self._tick_hist: List[Tick] = []
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -218,6 +227,7 @@ class Sentinel:
             try:
                 now = time.monotonic()
                 self._tick_quotes()
+                self._tick_models()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:
                     self._tick_portfolio()
                     last_pf = now
@@ -307,6 +317,23 @@ class Sentinel:
                         reason=reason))
                 except Exception:
                     continue
+
+    def _tick_models(self) -> None:
+        """Drive every live research model on the latest spot tick. Each
+        non-None output goes to the publisher; deduped publishes mirror
+        to the shadow ledger and become rows on the brief feed."""
+        spot = self.portfolio.spot or self.account.spot_ltp()
+        if not spot:
+            return
+        self._tick_hist.append(Tick(ts=time.monotonic(), spot=float(spot)))
+        # bound history to ~10 minutes at 1-2s polling
+        del self._tick_hist[:-600]
+        if len(self._tick_hist) < 5:
+            return
+        for sig in self.live_models.run(self._tick_hist, asset="NIFTY"):
+            if self.publisher.publish(sig):
+                self.log(f"[{sig.model}] {sig.signal} "
+                         f"(conf {sig.confidence:.0%})")
 
     def _tick_recommendations(self) -> None:
         spot = self.portfolio.spot or self.account.spot_ltp()
@@ -470,7 +497,27 @@ def state() -> JSONResponse:
         "orchestrator": CORE.orchestrator.stats(),
         "routed_signals": CORE.routed_signals[:20],
         "promotions": CORE.promotions[:20],
+        "live_signals": {k: v.to_row() for k, v in CORE.publisher.current().items()},
+        "live_feed": [s.to_row() for s in CORE.publisher.history(limit=18)],
+        "spot_history": [{"t": round(t.ts, 1), "spot": t.spot}
+                          for t in CORE._tick_hist[-180:]],
         "activity": CORE.activity[:50],
+    })
+
+
+@app.get("/api/live/signals", dependencies=[Depends(auth)])
+def live_signals(asset: Optional[str] = None) -> JSONResponse:
+    """The live model bus, exposed. Returns the latest signal per
+    (asset, model) plus a recent history ring for the brief feed.
+    Optional ``asset`` filters to one symbol."""
+    current = CORE.publisher.current()
+    hist = CORE.publisher.history(limit=40)
+    if asset:
+        current = {k: v for k, v in current.items() if v.asset == asset}
+        hist = [s for s in hist if s.asset == asset]
+    return JSONResponse({
+        "current": {k: v.to_row() for k, v in current.items()},
+        "history": [s.to_row() for s in hist],
     })
 
 
