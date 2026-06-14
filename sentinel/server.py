@@ -46,6 +46,7 @@ from .journey_audit import (
 )
 from .live_equity import ConstituentBoard, DemoFeed
 from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
+from .liqpool_bridge import LiveSignalsTail
 from .live_publisher import LivePublisher, ModelSignal
 from .monte_carlo import LegPayoff, realised_sigma_per_day, simulate
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
@@ -158,6 +159,12 @@ class Sentinel:
         self._mistake_event_ids: set = set()    # dedupe per-row publications
         # Wave 14 — Crux meta-signal composer (latest verdict on the bus)
         self.crux_verdict: Optional[CruxVerdict] = None
+        # Wave 15 — research-engine live signals listener. Tails the
+        # JSONL liqpool's live_inference writes; each new row becomes a
+        # ModelSignal on Sentinel's bus.
+        liqpool_signals_path = cfg.journal_dir / "liqpool_live_signals.jsonl"
+        self.liqpool_tail = LiveSignalsTail(
+            liqpool_signals_path, publisher=self.publisher)
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -294,6 +301,7 @@ class Sentinel:
                 self._tick_quotes()
                 self._tick_board()
                 self._tick_models()
+                self.liqpool_tail.poll()
                 self._tick_psychology()
                 self._tick_crux()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:

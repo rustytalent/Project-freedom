@@ -203,6 +203,99 @@ def merge_into_snapshot_context(pack: ResearchContextPack,
     return snapshot_context
 
 
+# ---------------------------------------------------------------------------
+# Live signals listener — tails a JSONL stream produced by the research
+# engine's live_inference.JsonlPublisher and translates each row to a
+# ModelSignal published on Sentinel's bus. This is the OTHER half of
+# Codex's spine: liqpool now talks to Sentinel during market hours, not
+# only via the pre-market brief.
+# ---------------------------------------------------------------------------
+
+class LiveSignalsTail:
+    """Tail an append-only JSONL file (the liqpool live_inference sink)
+    and publish each new row as a ModelSignal on Sentinel's
+    LivePublisher. Stateful — remembers the file offset across polls
+    so the same row is never republished even after a restart.
+
+    Use:
+        tail = LiveSignalsTail(Path("/var/lib/liqpool/live_signals.jsonl"),
+                               publisher=sentinel.publisher)
+        sentinel.add_tick_hook(tail.poll)
+    """
+
+    def __init__(self, path: Path, publisher: Any) -> None:
+        self.path = Path(path)
+        self.publisher = publisher
+        self._offset = 0
+        # remember the inode so a log-rotated file resets the offset
+        self._inode: Optional[int] = None
+
+    def poll(self) -> int:
+        """Read new lines since the last poll; publish each. Returns
+        the number of signals published this call."""
+        if not self.path.exists():
+            return 0
+        from .live_publisher import ModelSignal as _LiveModelSignal
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return 0
+        if self._inode is not None and stat.st_ino != self._inode:
+            # log rotated — reset.
+            self._offset = 0
+        self._inode = stat.st_ino
+        n = 0
+        try:
+            with self.path.open() as f:
+                f.seek(self._offset)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    sig = _signal_from_row(row, _LiveModelSignal)
+                    if sig is None:
+                        continue
+                    try:
+                        self.publisher.publish(sig)
+                        n += 1
+                    except Exception:
+                        continue
+                self._offset = f.tell()
+        except Exception:
+            return n
+        return n
+
+
+def _signal_from_row(row: Dict[str, Any], cls):
+    """Turn a JSONL row from liqpool's live_inference into Sentinel's
+    own ModelSignal class (which has the same fields). Tolerates
+    missing optional fields."""
+    try:
+        zone = row.get("zone")
+        if isinstance(zone, list) and len(zone) == 2:
+            zone = tuple(zone)
+        else:
+            zone = None
+        return cls(
+            ts_ist=str(row.get("ts_ist", "")),
+            asset=str(row.get("asset", "")),
+            model=str(row.get("model", "")),
+            signal=str(row.get("signal", "")),
+            confidence=float(row.get("confidence", 0.0)),
+            trust_tier=str(row.get("trust_tier", "SHADOW")),
+            zone=zone,
+            risk=str(row.get("risk", "")),
+            reason_codes=list(row.get("reason_codes") or []),
+            extras=dict(row.get("extras") or {"source": row.get("source", "liqpool")}),
+        )
+    except Exception:
+        return None
+
+
 declare(IOSpec(
     module="sentinel.liqpool_bridge",
     purpose="loader for liquidity_backtester ResearchContextPack — "

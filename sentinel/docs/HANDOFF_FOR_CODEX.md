@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-14 (Waves 13-14 — Audit + Crux + MC)**
+**Status as of 2026-06-14 (Wave 15 — cross-codebase spine)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Sprint A (Wave 13) shipped premium tracker + journey lifecycle viewer + 5-axis trade quality scorecard + 5-pattern mistake detector — every completed journey graded 0-100 with citations (Tharp R-multiple, Steenbarger metrics, Hull invalidation, sentinel curator findings). Sprint B (Wave 14) shipped Monte Carlo Lite (Boyle 1977 GBM, 1k paths × 3 horizons, < 50 ms), Crux meta-signal composer (one operator verdict — EXIT_NOW / TRAIL_UP / HOLD / WATCH / TRADE / DO_NOT_CHASE / WAIT — with rationale, supporting signals, contradictions), and the model overlay switcher on the spot chart (toggle each model's zone as a coloured band). Cockpit now publishes 30 modules of self-declared IO.
-**Test status**: **310 passed** (sentinel suite)
-**Module count**: **30** self-declared modules
-**Lines of code**: ~12,000 backend + ~4,800 tests + design system CSS + 2 UI pages
+**Latest pass**: Wave 15 — the founder's "Sentinel + liquidity_backtester must be tightly connected" ask. Built the missing shared contracts package + live inference path + bidirectional bridge so the two halves train each other every day/night cycle. The research engine now publishes live signals during market hours (via `liqpool/live_inference.py` → `JsonlPublisher`); Sentinel's cockpit tails that JSONL through a new `LiveSignalsTail` on every quote cycle and publishes each row as a TRUSTED `ModelSignal` on its own bus. The night trainer (`scripts/train_flywheel.py`) gained `--sentinel-journal` / `--sentinel-export` flags that feed Sentinel's exported decision ledger into the flywheel's shadow-frame pile so liqpool's seven organs (regret, trust, drift, archetypes, aging, transfer, meta_calibrator) train on the live decisions Sentinel produced.
+**Test status**: **Sentinel 310 + liquidity_backtester 821 + 33 new integration = 1,164 total tests passing**
+**Module count**: Sentinel 30 + new `liqpool.contracts` package (events/signals/promotions/research_context/manifest) + `liqpool.live_inference` + `liqpool.sentinel_adapter`
+**Lines of code**: ~12,500 Sentinel + ~17k liquidity_backtester (+ shared contracts) + ~4,800 sentinel tests + 33 new integration tests
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It

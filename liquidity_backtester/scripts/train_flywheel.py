@@ -37,11 +37,32 @@ def _load_bundle(path: Optional[Path]):
         return pickle.load(f)
 
 
-def _load_shadow_joined(root: Optional[Path]) -> Optional[pd.DataFrame]:
-    if root is None or not root.exists():
+def _load_shadow_joined(
+    root: Optional[Path],
+    sentinel_journal: Optional[Path] = None,
+    sentinel_export: Optional[Path] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> Optional[pd.DataFrame]:
+    """Read liqpool's own shadow_log AND Sentinel's exported decisions
+    (Wave 15 cross-codebase integration). Either side may be missing;
+    the trainer's "safe-unfit" pattern handles None gracefully."""
+    parts: list = []
+    if root is not None and root.exists():
+        from liqpool.products.shadow_log import join_events_to_resolutions
+        own = join_events_to_resolutions(root)
+        if own is not None and not own.empty:
+            parts.append(own)
+    if sentinel_journal is not None or sentinel_export is not None:
+        from liqpool.sentinel_adapter import load_sentinel_as_shadow_frame
+        sent = load_sentinel_as_shadow_frame(
+            journal_dir=sentinel_journal, export_dir=sentinel_export,
+            since=since, until=until)
+        if sent is not None and not sent.empty:
+            parts.append(sent)
+    if not parts:
         return None
-    from liqpool.products.shadow_log import join_events_to_resolutions
-    return join_events_to_resolutions(root)
+    return pd.concat(parts, ignore_index=True)
 
 
 def _load_outcome_joined(root: Optional[Path]) -> Optional[pd.DataFrame]:
@@ -73,6 +94,16 @@ def main() -> int:
     p.add_argument("--bundle", type=Path, default=None)
     p.add_argument("--shadow-root", type=Path, default=None)
     p.add_argument("--outcome-root", type=Path, default=None)
+    p.add_argument("--sentinel-journal", type=Path, default=None,
+                   help="Sentinel <journal>/ledger_<date>.jsonl directory — "
+                        "the live decision stream becomes training food too")
+    p.add_argument("--sentinel-export", type=Path, default=None,
+                   help="Sentinel exported decision_events directory "
+                        "(<root>/sentinel_live/session=<date>/...)")
+    p.add_argument("--since", default=None,
+                   help="YYYY-MM-DD lower bound for sentinel rows")
+    p.add_argument("--until", default=None,
+                   help="YYYY-MM-DD upper bound for sentinel rows")
     p.add_argument("--drift-history", type=Path, default=None,
                    help="CSV of chronological run metrics + drift_fired")
     p.add_argument("--bundle-fit-date", default=None,
@@ -88,7 +119,11 @@ def main() -> int:
     hub = FlywheelHub()
     fitted = hub.fit_from_artifacts(
         report=_load_bundle(args.bundle),
-        shadow_joined=_load_shadow_joined(args.shadow_root),
+        shadow_joined=_load_shadow_joined(
+            args.shadow_root,
+            sentinel_journal=args.sentinel_journal,
+            sentinel_export=args.sentinel_export,
+            since=args.since, until=args.until),
         outcome_joined=_load_outcome_joined(args.outcome_root),
         drift_history=drift_history,
         bundle_fit_date=args.bundle_fit_date,
