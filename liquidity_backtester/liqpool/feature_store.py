@@ -31,15 +31,41 @@ from .timing import (
 )
 
 
-# Intraday-only horizons. On 5m bars these are 1h / 3h / 5h ahead — all
-# strictly within a single NSE session. The pre-MIS defaults were
-# (78, 156, 312) = 1 / 2 / 4 calendar days, which silently trained the
-# proximity/direction models on multi-day moves that an intraday-MIS trader
-# cannot capture. See docs/CODEX_HANDOFF.md and the retrain-everything-MIS
-# plan for why these changed. Legacy swing research can still override at the
-# call site.
-PROXIMITY_HORIZONS = (12, 36, 60)
-DEFAULT_DIRECTION_HORIZON = 60
+# ─────────────────────────────────────────────────────────────────────────
+# MIS-INTRADAY HORIZONS — the founder's product motive, in numbers.
+#
+# We trade weekly NIFTY/BANKNIFTY options on MIS (same-session square-off).
+# The proximity model answers ONE question: "will price touch this level
+# within H bars?" — and "H" must match the operator's actual planning
+# window, not a calendar-day swing window.
+#
+# At 5-minute base bars (cfg.base_interval = "5m"):
+#
+#       H bars       wallclock        what an MIS operator decides
+#       ─────        ─────────        ──────────────────────────────────
+#       12 bars      1 hour           "in the next hour, worth waiting?"
+#       25 bars      ~2 hours         "before lunch fade, will it touch?"
+#       78 bars      1 session        "rest-of-session reach probability"
+#
+# The legacy swing defaults were (78, 156, 312) = 1 / 2 / 4 CALENDAR days,
+# which silently trained the proximity/direction models on multi-day moves
+# an intraday-MIS trader cannot capture. Founder's call: switch to
+# (12, 25, 78) — short / medium / rest-of-session — so the model and the
+# operator answer the same question.
+#
+# DIRECTION_HORIZON stays at 78 (1 NSE session) — "by close, will NIFTY
+# be up or down vs now?" is the right question for MIS.
+#
+# A swing-research caller can still override at the call site by passing
+# horizons=... or by importing SWING_HORIZONS below.
+# ─────────────────────────────────────────────────────────────────────────
+PROXIMITY_HORIZONS = (12, 25, 78)       # MIS — 1h / ~2h / 1 session
+DEFAULT_DIRECTION_HORIZON = 78          # 1 NSE trading session
+
+# Available presets for code that lets the operator pick a motive.
+INTRADAY_HORIZONS = (12, 25, 78)         # MIS / weekly options
+SCALP_HORIZONS = (3, 6, 12)              # 15min / 30min / 1h — premium scalp
+SWING_HORIZONS = (78, 156, 312)          # legacy multi-day swing
 
 
 @dataclass

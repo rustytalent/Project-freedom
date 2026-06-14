@@ -81,7 +81,8 @@ def test_bundle_predict_one_returns_none_on_broken_model():
 def test_server_publishes_direction_signal_above_floor():
     b = LiveInferenceBundle.from_report(_FakeReport())
     sink = InMemoryPublisher()
-    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.20)
+    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.20,
+                              enforce_mis=False)
     fired = s.on_tick({"direction": {"p": 0.80}})
     assert len(fired) == 1
     sig = fired[0]
@@ -94,7 +95,8 @@ def test_server_publishes_direction_signal_above_floor():
 def test_server_suppresses_low_confidence_direction():
     b = LiveInferenceBundle.from_report(_FakeReport())
     sink = InMemoryPublisher()
-    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.30)
+    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.30,
+                              enforce_mis=False)
     # p=0.55 -> conf 0.10 -> below floor -> no publish
     fired = s.on_tick({"direction": {"p": 0.55}})
     assert fired == []
@@ -103,7 +105,8 @@ def test_server_suppresses_low_confidence_direction():
 def test_server_publishes_quality_signal_with_grade():
     b = LiveInferenceBundle.from_report(_FakeReport())
     sink = InMemoryPublisher()
-    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.30)
+    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.30,
+                              enforce_mis=False)
     fired = s.on_tick({"quality": {"p": 0.71}})
     assert len(fired) == 1
     assert fired[0].model == "quality_model"
@@ -113,7 +116,8 @@ def test_server_publishes_quality_signal_with_grade():
 def test_server_publishes_proximity_signal_with_horizon():
     b = LiveInferenceBundle.from_report(_FakeReport())
     sink = InMemoryPublisher()
-    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.20)
+    s = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.20,
+                              enforce_mis=False)
     fired = s.on_tick({"proximity_h78": {"p": 0.62}})
     assert len(fired) == 1
     assert fired[0].model == "proximity_model"
@@ -125,7 +129,8 @@ def test_server_assigns_trust_tier_per_head():
     sink = InMemoryPublisher()
     s = LiveInferenceServer(
         bundle=b, publisher=sink,
-        trust_tier_per_head={"direction": "LOGGED"})
+        trust_tier_per_head={"direction": "LOGGED"},
+        enforce_mis=False)
     fired = s.on_tick({"direction": {"p": 0.85}})
     assert fired[0].trust_tier == "LOGGED"
 
@@ -146,7 +151,8 @@ def test_end_to_end_liqpool_to_sentinel_via_jsonl(tmp_path):
     LiveSignalsTail reads it and publishes on the sentinel bus."""
     sink = JsonlPublisher(tmp_path / "live.jsonl")
     b = LiveInferenceBundle.from_report(_FakeReport())
-    server = LiveInferenceServer(bundle=b, publisher=sink, publish_floor=0.20)
+    server = LiveInferenceServer(bundle=b, publisher=sink,
+                                   publish_floor=0.20, enforce_mis=False)
     fired = server.on_tick({
         "direction": {"p": 0.80},
         "proximity_h78": {"p": 0.62},
@@ -173,3 +179,92 @@ def test_tail_handles_missing_file_gracefully(tmp_path):
     pub = sentinel.LivePublisher()
     tail = LiveSignalsTail(tmp_path / "does_not_exist.jsonl", publisher=pub)
     assert tail.poll() == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# MIS session-window enforcement (Mother's Audit §3.1 fix)
+# ─────────────────────────────────────────────────────────────────
+
+def test_mis_session_window_suppresses_outside_session(monkeypatch):
+    """At 23:00 IST nothing should publish — the F&O session is closed."""
+    from datetime import datetime, timedelta, timezone
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 14, 23, 0, 0, tzinfo=tz or IST)
+
+    monkeypatch.setattr("liqpool.live_inference.datetime", _FakeDatetime)
+    b = LiveInferenceBundle.from_report(_FakeReport())
+    sink = InMemoryPublisher()
+    server = LiveInferenceServer(bundle=b, publisher=sink,
+                                  enforce_mis=True, publish_floor=0.20)
+    fired = server.on_tick({"direction": {"p": 0.85}})
+    assert fired == []                      # rejected outside session
+    assert sink.all() == []
+
+
+def test_mis_no_new_entry_tag_after_1430(monkeypatch):
+    """At 14:35 IST signals still publish but carry
+    mis_no_new_entry=True so Crux can refuse new entries."""
+    from datetime import datetime, timedelta, timezone
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 14, 14, 35, 0, tzinfo=tz or IST)
+
+    monkeypatch.setattr("liqpool.live_inference.datetime", _FakeDatetime)
+    b = LiveInferenceBundle.from_report(_FakeReport())
+    sink = InMemoryPublisher()
+    server = LiveInferenceServer(bundle=b, publisher=sink,
+                                  enforce_mis=True, publish_floor=0.20)
+    fired = server.on_tick({"direction": {"p": 0.85}})
+    assert len(fired) == 1
+    assert fired[0].extras.get("mis_no_new_entry") is True
+    assert fired[0].extras.get("mis_squareoff") is False
+
+
+def test_mis_squareoff_tag_after_1515(monkeypatch):
+    """At 15:20 IST every signal carries mis_squareoff=True so the
+    cockpit can show 'MIS exit window' and refuse new entries
+    aggressively."""
+    from datetime import datetime, timedelta, timezone
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 14, 15, 20, 0, tzinfo=tz or IST)
+
+    monkeypatch.setattr("liqpool.live_inference.datetime", _FakeDatetime)
+    b = LiveInferenceBundle.from_report(_FakeReport())
+    sink = InMemoryPublisher()
+    server = LiveInferenceServer(bundle=b, publisher=sink,
+                                  enforce_mis=True, publish_floor=0.20)
+    fired = server.on_tick({"direction": {"p": 0.85}})
+    assert len(fired) == 1
+    assert fired[0].extras.get("mis_squareoff") is True
+    assert fired[0].extras.get("mis_no_new_entry") is True
+
+
+def test_mis_enforcement_can_be_disabled_for_backtesting(monkeypatch):
+    """enforce_mis=False lets replay scripts publish at any wallclock
+    time (e.g. midnight backtest)."""
+    from datetime import datetime, timedelta, timezone
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 14, 23, 0, 0, tzinfo=tz or IST)
+
+    monkeypatch.setattr("liqpool.live_inference.datetime", _FakeDatetime)
+    b = LiveInferenceBundle.from_report(_FakeReport())
+    sink = InMemoryPublisher()
+    server = LiveInferenceServer(bundle=b, publisher=sink,
+                                  enforce_mis=False, publish_floor=0.20)
+    fired = server.on_tick({"direction": {"p": 0.85}})
+    assert len(fired) == 1                  # back-test mode = no window check

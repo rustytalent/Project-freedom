@@ -204,23 +204,64 @@ class LiveInferenceServer:
     # Trust tier each head's output starts at — research models begin
     # SHADOW; Sentinel's curator graduates them as they earn it.
     trust_tier_per_head: Dict[str, str] = field(default_factory=dict)
+    # MIS-aware session windows. Outside the session, suppress entirely.
+    # After NO_NEW_ENTRY cutoff, still publish but tag the signal so the
+    # Crux composer + the cockpit can refuse new entries.
+    enforce_mis: bool = True
 
     def now_ist(self) -> str:
         return datetime.now(IST).strftime("%H:%M:%S")
+
+    def _mis_state(self) -> Dict[str, Any]:
+        """Returns the MIS window context the signal extras should carry:
+
+          {
+            "in_session": bool,
+            "mis_no_new_entry": bool,    # >= 14:30 IST
+            "mis_squareoff": bool,        # >= 15:15 IST
+          }
+
+        Outside trading hours (or before 09:15) returns
+        in_session=False; the caller suppresses publishing entirely."""
+        from liqpool.intraday import (
+            EOD_SQUAREOFF_IST_MIN, NO_NEW_ENTRY_AFTER_IST_MIN,
+            SESSION_CLOSE_IST_MIN, SESSION_OPEN_IST_MIN,
+        )
+        now = datetime.now(IST)
+        m = now.hour * 60 + now.minute
+        in_session = SESSION_OPEN_IST_MIN <= m < SESSION_CLOSE_IST_MIN
+        return {
+            "in_session": in_session,
+            "mis_no_new_entry": m >= NO_NEW_ENTRY_AFTER_IST_MIN,
+            "mis_squareoff": m >= EOD_SQUAREOFF_IST_MIN,
+        }
 
     def on_tick(self, features_per_head: Dict[str, Dict[str, Any]],
                 asset: Optional[str] = None,
                 extras: Optional[Dict[str, Any]] = None) -> List[ModelSignal]:
         """Run every head whose features are supplied. Publish
-        non-trivial outputs. Returns the signals that fired."""
+        non-trivial outputs. Returns the signals that fired.
+
+        MIS enforcement: outside 09:15-15:30 IST nothing publishes.
+        After 14:30 IST every published signal carries
+        ``mis_no_new_entry=True`` in extras so the Crux composer can
+        refuse new entries. After 15:15 the spine should already be
+        squaring off via TrailEngine; we additionally flag
+        ``mis_squareoff=True``."""
         asset = asset or self.asset
+        signal_extras = dict(extras or {})
+        if self.enforce_mis:
+            window = self._mis_state()
+            if not window["in_session"]:
+                return []                          # nothing publishes outside session
+            signal_extras.update(window)
         fired: List[ModelSignal] = []
         ts = self.now_ist()
         for head, features in features_per_head.items():
             prob = self.bundle.predict_one(head, features)
             if prob is None:
                 continue
-            sig = self._signal_for(head, prob, asset, ts, extras or {})
+            sig = self._signal_for(head, prob, asset, ts, signal_extras)
             if sig is None:
                 continue
             fired.append(sig)
