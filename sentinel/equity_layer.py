@@ -147,6 +147,91 @@ def top10_contextual_layer(stock_returns_pct: Mapping[str, float],
     )
 
 
+def move_quality(ctx: EquityContext) -> Dict[str, Any]:
+    """The founder's 'is the index move real?' verdict over an
+    EquityContext snapshot. Returns:
+
+      STRONG       — broad, weight-aligned move (real strength / weakness)
+      FRAGILE      — index moved but breadth + heavyweights don't agree
+      MANIPULATED  — index move concentrated in 1-2 heavyweights, breadth flat
+      ROTATION     — dispersion: both large gainers AND losers, index flat-ish
+      CONSOLIDATION — everything tight, nothing moving
+
+    Methodology: dispersion + breadth + heavyweight-concentration
+    composite (NYSE Tick / breadth-of-market analytics, standard since
+    the 1980s; this is the desk-grade verdict equivalent for NIFTY).
+    Sentinel SCORE_TIER: PRO.
+    """
+    idx = ctx.index_return_pct
+    top10 = ctx.top10_summed_contribution_pct
+    breadth_up = ctx.breadth_up
+    breadth_dn = ctx.breadth_down
+    contribs = ctx.contributions or []
+    abs_returns = sorted([abs(c.return_pct) for c in contribs], reverse=True)
+    top2_share = (sum(abs_returns[:2]) / sum(abs_returns)
+                  if abs_returns and sum(abs_returns) > 0 else 0.0)
+    dispersion = (max(c.return_pct for c in contribs)
+                  - min(c.return_pct for c in contribs)) if contribs else 0.0
+    aligned = (idx * top10) > 0      # same sign — heavyweights agree with index
+
+    reason_codes: list = []
+    if abs(idx) < 0.15 and dispersion < 1.0:
+        verdict = "CONSOLIDATION"
+        headline = "everything tight, nothing moving"
+        conf = 0.65
+        reason_codes = ["index_flat", "no_dispersion"]
+    elif abs(idx) < 0.20 and dispersion >= 2.0:
+        verdict = "ROTATION"
+        headline = f"flat index but {dispersion:.1f}% dispersion across top-10"
+        conf = 0.7
+        reason_codes = ["flat_index", "high_dispersion"]
+    elif aligned and abs(top10) > 0.4 and breadth_up >= 7 if idx > 0 else breadth_dn >= 7:
+        verdict = "STRONG"
+        headline = ("broad strength: heavyweights leading + breadth confirms"
+                    if idx > 0 else
+                    "broad weakness: heavyweights leading + breadth confirms")
+        conf = 0.85
+        reason_codes = ["aligned_heavyweights",
+                        "breadth_confirms",
+                        f"top10_contrib={top10:+.2f}%"]
+    elif top2_share > 0.55 and abs(idx) >= 0.15:
+        verdict = "MANIPULATED"
+        leaders = [c.symbol for c in
+                   sorted(contribs, key=lambda c: abs(c.contribution_pct),
+                          reverse=True)[:2]]
+        headline = (f"{int(top2_share*100)}% of the move is in "
+                    f"{', '.join(leaders)} — fragile")
+        conf = 0.78
+        reason_codes = ["concentrated_in_top2", "low_breadth", "fragile_move"]
+    elif aligned and abs(top10) > 0.2:
+        # the move is real-ish but breadth doesn't confirm
+        verdict = "FRAGILE"
+        headline = (f"index {'+' if idx>0 else ''}{idx}% but only "
+                    f"{breadth_up} up / {breadth_dn} down")
+        conf = 0.70
+        reason_codes = ["breadth_weak", "narrow_participation"]
+    else:
+        verdict = "FRAGILE"
+        headline = "index move not confirmed by heavyweights"
+        conf = 0.65
+        reason_codes = ["unaligned_heavyweights"]
+
+    return {
+        "verdict": verdict,
+        "headline": headline,
+        "confidence": conf,
+        "reason_codes": reason_codes,
+        "metrics": {
+            "index_return_pct": idx,
+            "top10_contribution_pct": top10,
+            "breadth_up": breadth_up,
+            "breadth_down": breadth_dn,
+            "top2_share_of_move": round(top2_share, 3),
+            "dispersion_pct": round(dispersion, 2),
+        },
+    }
+
+
 def weightage_divergence(stock_returns_pct: Mapping[str, float],
                           index_return_pct: float) -> float:
     """The single scalar: top-10 weighted contribution minus index return.

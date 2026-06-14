@@ -1,11 +1,11 @@
 # Sentinel — Handoff Documentation (for Codex / any agent picking this up)
 
-**Status as of 2026-06-14 (Wave 10 — Live spine)**
+**Status as of 2026-06-14 (Wave 11 — Constituent board)**
 **Branch**: `claude/liquidity-pool-backtester-1uskb`
-**Latest pass**: Wave 10 — the **Live Model Publisher spine** ChatGPT was right about. New modules `live_publisher` (ModelSignal contract + thread-safe in-memory bus + canonical mirror to ShadowLedger for TRUSTED+) and `live_models` (six honest stubs: reaction, proximity, liquidity, quality, post-reaction, manipulation). Sentinel's hot loop drives the pool on every tick; the cockpit gains three new live panels — **NIFTY live spot chart with hover crosshair**, **Live research signal panel** with per-model confidence bars + invalidation, and **Live brief feed** running commentary. `/api/state` now carries `live_signals`, `live_feed`, and `spot_history`; new `/api/live/signals?asset=` exposes the bus directly.
-**Test status**: **220 passed** (sentinel suite)
-**Module count**: **24** self-declared modules
-**Lines of code**: ~8,800 backend + ~3,400 tests + design system CSS + 2 UI pages
+**Latest pass**: Wave 11 — the **NIFTY constituent board**, the founder's "is the index move real?" panel. New module `live_equity` (streaming `ConstituentBoard` + deterministic `DemoFeed` for the top 10). `equity_layer` gains `move_quality()` — verdict classifier returning STRONG / FRAGILE / MANIPULATED / ROTATION / CONSOLIDATION with reason codes + composite metrics. Sentinel's hot loop drives the board every cycle, publishing one TRUSTED `constituent_board` signal per cycle to the bus (mirrored to the ShadowLedger). Cockpit gains a board panel with the verdict in big colour-coded type, breadth chip, per-stock LTP + return + weight + contribution + sparkline. New endpoint `GET /api/equity_board`.
+**Test status**: **232 passed** (sentinel suite)
+**Module count**: **25** self-declared modules
+**Lines of code**: ~9,200 backend + ~3,600 tests + design system CSS + 2 UI pages
 
 This document is the single source of truth for what Sentinel is, how it's
 wired, what's done, and what's left. Read this before touching the code. It

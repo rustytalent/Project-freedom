@@ -56,6 +56,23 @@
         <div class="note">Live spot history (last ~10 minutes at 1-2s polling). Hover for the exact value; the gold line is NIFTY, the dashed band marks high/low so far this session.</div>
       </section>
 
+      <!-- NIFTY CONSTITUENT BOARD -->
+      <section class="panel">
+        <div class="head">
+          <span class="title">Constituent board · NIFTY top-10</span>
+          <span class="meta hint" id="board_meta">waiting for first tick…</span>
+          <div class="right hint" id="board_breadth"></div>
+        </div>
+        <div class="body" id="board_verdict" style="padding:10px var(--s-3);border-bottom:1px solid var(--line)"></div>
+        <div class="body flush">
+          <table id="board_table"><thead><tr>
+            <th>Symbol</th><th>LTP</th><th>Return</th><th>Weight</th>
+            <th>Contribution</th><th>Trail</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div class="note">Heavyweights carry ~50% of the index. Verdict reads STRONG / FRAGILE / MANIPULATED / ROTATION / CONSOLIDATION based on dispersion + breadth + top-2 concentration. Sparkline shows last ~2 min of price action per name.</div>
+      </section>
+
       <!-- LIVE RESEARCH SIGNAL PANEL -->
       <section class="panel">
         <div class="head">
@@ -435,6 +452,9 @@ function render(s){
   /* NIFTY spot chart */
   drawSpotChart(s.spot_history || [], s.portfolio.spot);
 
+  /* NIFTY constituent board */
+  renderBoard(s.constituent_board);
+
   /* live research signals */
   const sigs = s.live_signals || {};
   const sigEntries = Object.values(sigs).sort((a,b)=> (b.confidence||0) - (a.confidence||0));
@@ -612,6 +632,76 @@ function renderFeedRow(sig){
     <span class="t">${sig.ts_ist}</span>
     <span><span style="color:var(--amber);font-weight:500">${tag}</span> · ${sig.signal} <span class="dim-text">(${conf}%)</span></span>
   </div>`;
+}
+
+/* ─────────── NIFTY constituent board ─────────── */
+const VERDICT_COLOR = {
+  STRONG:        "var(--green)",
+  FRAGILE:       "var(--amber)",
+  MANIPULATED:   "var(--red)",
+  ROTATION:      "var(--steel)",
+  CONSOLIDATION: "var(--muted)",
+};
+function pcSign(v, decimals=2){
+  if(v==null) return "—";
+  return (v>=0?"+":"") + Number(v).toFixed(decimals) + "%";
+}
+function sparkSvg(values, w=80, h=22){
+  if(!values || values.length < 2) return `<svg class="spark"></svg>`;
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const pad = (hi-lo)*0.1 || 1;
+  const ymin = lo - pad, ymax = hi + pad;
+  const X = i => 1 + i/(values.length-1)*(w-2);
+  const Y = v => 1 + (1 - (v-ymin)/(ymax-ymin))*(h-2);
+  const d = values.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+","+Y(v).toFixed(1)).join(" ");
+  const last = values[values.length-1], first = values[0];
+  const color = last >= first ? "var(--green)" : "var(--red)";
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.3"/></svg>`;
+}
+function renderBoard(board){
+  const meta = document.getElementById("board_meta");
+  const verdictEl = document.getElementById("board_verdict");
+  const tbody = document.querySelector("#board_table tbody");
+  const breadth = document.getElementById("board_breadth");
+  if(!board || !board.stocks || !board.stocks.length){
+    meta.textContent = "waiting for first tick…";
+    tbody.innerHTML = '<tr class="empty"><td colspan="6">no data yet</td></tr>';
+    verdictEl.innerHTML = '';
+    breadth.textContent = '';
+    return;
+  }
+  const q = board.quality || {};
+  const verdict = q.verdict || "—";
+  const color = VERDICT_COLOR[verdict] || "var(--muted)";
+  const conf = Math.round((q.confidence || 0) * 100);
+  meta.textContent = `regime ${board.regime}`;
+  breadth.innerHTML = `<span class="pos mono">▲ ${board.breadth_up}</span> · <span class="neg mono">▼ ${board.breadth_down}</span> · index <span class="mono ${board.index_return_pct>=0?'pos':'neg'}">${pcSign(board.index_return_pct,2)}</span>`;
+  verdictEl.innerHTML = `
+    <div class="row-flex" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <div class="hint">MOVE QUALITY</div>
+        <div style="font-size:var(--t-xl);color:${color};font-weight:600;letter-spacing:.06em;line-height:1.2">${verdict}</div>
+        <div style="color:var(--fg-soft);font-size:var(--t-md);margin-top:3px">${q.headline||""}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="hint">CONFIDENCE</div>
+        <div class="mono" style="font-size:var(--t-xl);color:${color}">${conf}%</div>
+      </div>
+    </div>
+    ${(q.reason_codes||[]).length
+      ? `<div class="hint mono" style="margin-top:6px">${(q.reason_codes||[]).join(" · ")}</div>` : ""}`;
+  tbody.innerHTML = board.stocks.map(s => {
+    const sign = s.return_pct >= 0 ? "pos" : "neg";
+    return `<tr>
+      <td class="mono">${s.symbol}</td>
+      <td class="mono">${s.ltp.toFixed(2)}</td>
+      <td class="mono ${sign}">${pcSign(s.return_pct,2)}</td>
+      <td class="mono dim-text">${(s.weight*100).toFixed(2)}%</td>
+      <td class="mono ${s.contribution_pct>=0?'pos':'neg'}">${pcSign(s.contribution_pct,3)}</td>
+      <td>${sparkSvg(s.history)}</td>
+    </tr>`;
+  }).join("");
 }
 
 /* ─────────── scenario chart — interactive crosshair, profit/loss zones ─────────── */

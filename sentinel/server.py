@@ -40,6 +40,7 @@ from .institutional import (
     expected_shortfall, historical_var, parametric_var, vol_cone,
 )
 from .kite_client import DemoAccount, KiteAccount, InstrumentMeta
+from .live_equity import ConstituentBoard, DemoFeed
 from .live_models import DEFAULT_MODELS, LiveModelPool, Tick
 from .live_publisher import LivePublisher, ModelSignal
 from .orchestration import Orchestrator, Signal, Tier, TrustPromotionRecord
@@ -125,6 +126,12 @@ class Sentinel:
                                        session=self.session)
         self.live_models = LiveModelPool(DEFAULT_MODELS)
         self._tick_hist: List[Tick] = []
+        # NIFTY constituent board (Wave 11). In demo mode we feed a
+        # deterministic synthetic top-10 walker so the panel comes alive
+        # without Kite quotes; live mode plugs into account.quotes().
+        self.constituent_board = ConstituentBoard(publisher=self.publisher)
+        self._equity_feed: Optional[DemoFeed] = DemoFeed() if self.demo else None
+        self._board_snapshot: Dict[str, Any] = {}
         self.maximizer = Maximizer(self.ledger)
         # Ratcheting day-profit lock (the founder's locked/floating model).
         self.profit_lock: Optional[ProfitLock] = None
@@ -227,6 +234,7 @@ class Sentinel:
             try:
                 now = time.monotonic()
                 self._tick_quotes()
+                self._tick_board()
                 self._tick_models()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:
                     self._tick_portfolio()
@@ -317,6 +325,23 @@ class Sentinel:
                         reason=reason))
                 except Exception:
                     continue
+
+    def _tick_board(self) -> None:
+        """Pump the NIFTY constituent board. Demo mode uses DemoFeed;
+        live mode reads top-10 quotes from the broker."""
+        if self._equity_feed is not None:
+            quotes = self._equity_feed.next()
+        else:
+            try:
+                live = self.account.quotes(
+                    [f"NSE:{s}" for s in self.constituent_board.weights])
+                quotes = {k.split(":")[-1]: q.ltp for k, q in live.items()}
+            except Exception:
+                return
+        try:
+            self._board_snapshot = self.constituent_board.tick(quotes)
+        except Exception as exc:
+            self.log(f"constituent board tick failed: {exc}")
 
     def _tick_models(self) -> None:
         """Drive every live research model on the latest spot tick. Each
@@ -501,8 +526,17 @@ def state() -> JSONResponse:
         "live_feed": [s.to_row() for s in CORE.publisher.history(limit=18)],
         "spot_history": [{"t": round(t.ts, 1), "spot": t.spot}
                           for t in CORE._tick_hist[-180:]],
+        "constituent_board": CORE._board_snapshot,
         "activity": CORE.activity[:50],
     })
+
+
+@app.get("/api/equity_board", dependencies=[Depends(auth)])
+def equity_board() -> JSONResponse:
+    """The live NIFTY constituent board snapshot — regime, move-quality
+    verdict, per-stock contributions, leaders, laggards. Same payload
+    /api/state carries under `constituent_board`."""
+    return JSONResponse(CORE._board_snapshot or {})
 
 
 @app.get("/api/live/signals", dependencies=[Depends(auth)])
