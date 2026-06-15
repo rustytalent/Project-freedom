@@ -857,6 +857,27 @@ def main():
                     comp = report.unified_ml.predict_components(X, [p]).iloc[0].to_dict()
                     q = float(comp["blended_q"])
                     q_components = comp
+                    # Phase 3D — if a Phase 3C learned dynamic gate was fit on
+                    # the OOS audit, override the static per-sector blend with
+                    # the per-pool learned blend. Falls through silently when
+                    # the gate isn't loaded (Phase 3E safety rail).
+                    gate = getattr(report, "unified_learned_gate", None)
+                    if gate is not None:
+                        sec_q_raw = comp.get("sector_q")
+                        sec_q = float(sec_q_raw) if sec_q_raw is not None and not pd.isna(sec_q_raw) else None
+                        learned_w, learned_q = gate.blend_one(
+                            global_q=float(comp.get("global_q", q)),
+                            sector_q=sec_q,
+                            sector=str(comp.get("sector", sector_of(symbol))),
+                            asset=str(comp.get("asset", symbol)),
+                            pool_score=float(p.score),
+                            pool_width=float(p.price_high - p.price_low),
+                            n_tfs=int(len(set(p.tfs))),
+                            distance_atr=float(dist_atr),
+                        )
+                        q = learned_q
+                        q_components["learned_gate_weight"] = learned_w
+                        q_components["learned_blended_q"] = learned_q
                 else:
                     q = float(report.unified_ml.predict(X, pools=[p])[0])
                 t_by_h = {}

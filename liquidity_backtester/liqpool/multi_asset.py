@@ -47,7 +47,9 @@ from .policy_model import PolicyOutcomeModelSuite
 from .stats import wilson_score_interval, bootstrap_proportion_ci
 from .indicators import atr
 from .stratified import _headline_factor
-from .sectors import sector_of
+from .sectors import (sector_of, compute_sector_metrics, sector_regime_signal,
+                      per_sector_oos, per_asset_reliability)
+from .learned_gate import LearnedGateModel
 
 
 @dataclass
@@ -86,6 +88,11 @@ class MultiAssetReport:
     unified_stratified: Optional[StratifiedRespectModel] = None
     unified_timing_report: Optional[TimingReport] = None
     unified_oos_audit: Optional["OOSPredictionAudit"] = None
+    # Phase 3B/3C: per-pool dynamic gate learned from the OOS audit. ``None``
+    # when the audit didn't carry enough signal to fit one — callers must keep
+    # using the SectorMoE's static per-sector weight in that case.
+    unified_learned_gate: Optional["LearnedGateModel"] = None
+    learned_gate_metrics: Optional[QualityModelAuditMetrics] = None
     post_touch_reaction_metrics: Dict = field(default_factory=dict)
     reaction_model: Optional[ReactionModelSuite] = None
     reaction_model_report: List[Dict] = field(default_factory=list)
@@ -370,6 +377,63 @@ def build_oos_prediction_audit(model: Union[PoolRespectModel, SectorMoERespectMo
     return OOSPredictionAudit(table=table, metrics=metrics,
                               sector_calibration=sector_calib,
                               distance_bucket_metrics=distance_metrics)
+
+
+def _fit_and_apply_learned_gate(report: MultiAssetReport,
+                                ml: SectorMoERespectModel,
+                                oos_pools: List[Pool],
+                                oos_results: List[PoolResult],
+                                asset_dfs: Dict[str, pd.DataFrame],
+                                seed: int = 200) -> None:
+    """Try to fit a per-pool learned gate (Phase 3B+3C) from the audit table.
+
+    Mutates ``report`` in place: on success attaches the gate to
+    ``report.unified_learned_gate``, recomputes ``learned_blended_q`` per row,
+    and records audit metrics for that column. On failure leaves the static
+    blend untouched — this is the explicit Phase 3E safety rail.
+    """
+    audit = report.unified_oos_audit
+    if audit is None or audit.table.empty:
+        return
+    # Side-channel inputs the gate needs at fit time. Kept here (not on the
+    # audit table) so the schema of the audit is stable across runs.
+    sector_metrics = compute_sector_metrics(asset_dfs)
+    sectors_seen = sorted({sector_of(p.asset) for p in oos_pools})
+    regime_by_sector = {sec: sector_regime_signal(sector_metrics, sec) for sec in sectors_seen}
+    sector_oos_raw = per_sector_oos(oos_pools, oos_results)
+    sector_strict = {sec: float(v.get("strict_respect", 0.5)) for sec, v in sector_oos_raw.items()}
+    reliability_raw = per_asset_reliability(report)
+    asset_reliability = {asset: float(v) for asset, v in reliability_raw.items()}
+
+    gate = LearnedGateModel.fit_from_audit(
+        audit.table,
+        sector_regime_by_sector=regime_by_sector,
+        sector_oos_strict_by_sector=sector_strict,
+        asset_reliability_by_asset=asset_reliability,
+        seed=seed,
+    )
+    if gate is None:
+        # The orchestrator deliberately stays quiet on the skip case — the
+        # next-chat handoff explicitly wants "fall back to fixed blend" with
+        # no behaviour change for downstream consumers. The console block
+        # emitted later prints whether the gate was tried + skipped.
+        return
+
+    enriched = gate.apply(audit.table)
+    audit.table["learned_gate_weight"] = enriched["learned_gate_weight"].to_numpy(dtype=float)
+    audit.table["learned_blended_q"] = enriched["learned_blended_q"].to_numpy(dtype=float)
+
+    valid = audit.table["actual"].notna() & audit.table["learned_blended_q"].notna()
+    if valid.any():
+        metrics = _prediction_metrics(
+            "learned_blended",
+            audit.table.loc[valid, "actual"].to_numpy(dtype=float),
+            audit.table.loc[valid, "learned_blended_q"].to_numpy(dtype=float),
+        )
+        audit.metrics["learned_blended"] = metrics
+        report.learned_gate_metrics = metrics
+
+    report.unified_learned_gate = gate
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +736,18 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                 ml, multi_feat, all_oos_pools, all_oos_results, asset_dfs=asset_dfs,
             )
             if report.unified_oos_audit is not None and not report.unified_oos_audit.table.empty:
+                # Phase 3B/3C — fit the per-pool learned gate from the OOS
+                # audit. The gate is OPTIONAL and FALLBACK-SAFE: when
+                # `fit_from_audit` returns None the static per-sector weight
+                # stays in effect.
+                try:
+                    _fit_and_apply_learned_gate(
+                        report, ml, all_oos_pools, all_oos_results, asset_dfs,
+                        seed=cfg.opt_seed + 200,
+                    )
+                except Exception as gate_exc:
+                    print(f"[multi_asset] learned gate fit skipped: {gate_exc}")
+
                 report.post_touch_reaction_metrics = build_post_touch_reaction_metrics(
                     all_oos_pools, all_oos_results,
                     q_values=report.unified_oos_audit.table["blended_q"].to_numpy(dtype=float),
@@ -983,7 +1059,7 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
         print(f"\n[Phase 3A OOS prediction audit]", file=file)
         print(f"  {'model':<14} {'n':>6} {'brier':>8} {'logloss':>8} {'auc':>6} "
               f"{'top10_hit':>10} {'base':>7} {'mean_q':>7}", file=file)
-        for name in ("global", "sector_expert", "blended"):
+        for name in ("global", "sector_expert", "blended", "learned_blended"):
             mt = audit.metrics.get(name)
             if mt is None:
                 continue
@@ -991,6 +1067,26 @@ def print_multi_asset_summary(report: MultiAssetReport, file=None) -> None:
             print(f"  {name:<14} {mt.n:>6} {mt.brier:>8.4f} {mt.logloss:>8.4f} "
                   f"{auc_s:>6} {mt.top_decile_hit_rate:>9.1%} "
                   f"{mt.base_rate:>6.1%} {mt.mean_prediction:>6.1%}", file=file)
+        # Phase 3B/3C — show whether the learned dynamic gate was fit, and how
+        # much it beat the static blend. Blank when the gate fell back.
+        gate = report.unified_learned_gate
+        if gate is not None and gate.stats is not None:
+            st = gate.stats
+            pearson_s = f"{st.val_pearson:+.3f}" if st.val_pearson is not None else "n/a"
+            print(f"\n[Phase 3C learned dynamic gate]  val MAE vs constant baseline",
+                  file=file)
+            print(f"  trained n={st.n_train}, val n={st.n_val}, "
+                  f"target_mean={st.mean_target:.3f}", file=file)
+            print(f"  val_mae={st.val_mae:.4f}  baseline={st.baseline_val_mae:.4f}  "
+                  f"Δ={st.mae_improvement:+.4f}  pearson={pearson_s}", file=file)
+            print(f"  weight clip = [{st.target_floor:.2f}, {st.target_ceiling:.2f}], "
+                  f"disagreement floor = {st.disagreement_floor:.3f}", file=file)
+            for fi in gate.feature_importance(8):
+                print(f"    {fi['feature']:<28} {fi['importance_gain']:>10.1f}",
+                      file=file)
+        elif report.unified_oos_audit is not None and not report.unified_oos_audit.table.empty:
+            print(f"\n[Phase 3C learned dynamic gate]  not fit — "
+                  f"static per-sector weight retained (Phase 3E fallback)", file=file)
         if not audit.sector_calibration.empty:
             print(f"\n[Phase 3A per-sector calibration]  mean_q - actual", file=file)
             print(f"  {'model':<14} {'sector':<10} {'n':>6} {'actual':>8} "
