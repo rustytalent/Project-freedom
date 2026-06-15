@@ -1,16 +1,21 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from liqpool.research import (
     ConstituentState,
+    IndexStateBuildConfig,
+    build_index_manipulation_dataset,
     build_manipulation_state_frame,
     classify_index_manipulation,
     rank_random_hypotheses,
     summarize_state_frame,
 )
+from liqpool.warehouse import WarehouseReader
 
 
 class ManipulationAtlasTests(unittest.TestCase):
@@ -87,6 +92,71 @@ class StateDatasetTests(unittest.TestCase):
         summary = summarize_state_frame(states)
         self.assertEqual(summary["rows"], 1)
         self.assertEqual(summary["labels"]["broad_sponsorship"], 1)
+
+
+class IndexStateBuilderTests(unittest.TestCase):
+    def test_build_index_manipulation_dataset_from_synthetic_warehouse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            symbols = ("A", "B", "C", "D", "E")
+            for i, symbol in enumerate(symbols):
+                _write_resampled_symbol(root, symbol, base=100 + i * 10)
+            _write_spot_index(root, base=1000)
+
+            reader = WarehouseReader(root=str(root))
+            constituents, states, summary = build_index_manipulation_dataset(
+                reader,
+                IndexStateBuildConfig(
+                    symbols=symbols,
+                    index="NIFTY50",
+                    tf="5m",
+                    historical_window_bars=3,
+                    min_history_bars=1,
+                    forward_bars=(1, 2),
+                    min_constituents=5,
+                ),
+            )
+
+            self.assertFalse(constituents.empty)
+            self.assertFalse(states.empty)
+            self.assertIn("today_avwap_dist_atr", constituents.columns)
+            self.assertIn("prev_session_avwap_dist_atr", constituents.columns)
+            self.assertIn("state_label", states.columns)
+            self.assertIn("forward_index_return_1b_pct", states.columns)
+            self.assertEqual(summary["symbols_missing"], [])
+            self.assertEqual(summary["rows"], len(states))
+
+
+def _synthetic_bars(symbol: str, base: float) -> pd.DataFrame:
+    ts = list(pd.date_range("2026-06-10 09:15", periods=8, freq="5min", tz="Asia/Kolkata"))
+    ts += list(pd.date_range("2026-06-11 09:15", periods=8, freq="5min", tz="Asia/Kolkata"))
+    drift = np.linspace(0, 3.0, len(ts))
+    close = base + drift
+    return pd.DataFrame(
+        {
+            "timestamp": ts,
+            "open": close - 0.1,
+            "high": close + 0.3,
+            "low": close - 0.3,
+            "close": close,
+            "volume": 1000,
+            "symbol": symbol,
+        }
+    )
+
+
+def _write_resampled_symbol(root: Path, symbol: str, base: float) -> None:
+    path = root / "resampled" / "5m"
+    path.mkdir(parents=True, exist_ok=True)
+    _synthetic_bars(symbol, base).to_parquet(path / f"{symbol}_5m.parquet")
+
+
+def _write_spot_index(root: Path, base: float) -> None:
+    path = root / "spot" / "NIFTY50"
+    path.mkdir(parents=True, exist_ok=True)
+    frame = _synthetic_bars("NIFTY50", base)
+    frame["open_interest"] = 0
+    frame.to_parquet(path / "5min.parquet")
 
 
 if __name__ == "__main__":

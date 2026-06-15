@@ -27,6 +27,13 @@ from .hypothesis_miner import (
     rank_random_hypotheses,
     sample_random_hypotheses,
 )
+from .index_state_builder import (
+    DEFAULT_FORWARD_BARS,
+    IndexStateBuildConfig,
+    build_index_manipulation_dataset,
+    parse_weights_text,
+    read_weights_csv,
+)
 from .library import HYPOTHESIS_LIBRARY, register_hypothesis
 from .manipulation_atlas import (
     ConstituentState,
@@ -43,18 +50,23 @@ __all__ = [
     "BacktestTrade",
     "Condition",
     "ConstituentState",
+    "DEFAULT_FORWARD_BARS",
     "HYPOTHESIS_LIBRARY",
     "HypothesisHarness",
     "HypothesisMetrics",
     "HypothesisReport",
     "HypothesisSpec",
+    "IndexStateBuildConfig",
     "ManipulationState",
     "MinerHypothesisSpec",
     "StateDatasetConfig",
     "build_manipulation_state_frame",
+    "build_index_manipulation_dataset",
     "classify_index_manipulation",
     "evaluate_hypothesis",
+    "parse_weights_text",
     "rank_random_hypotheses",
+    "read_weights_csv",
     "register_hypothesis",
     "sample_random_hypotheses",
     "simulate_trades",
