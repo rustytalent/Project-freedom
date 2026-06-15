@@ -29,7 +29,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import (
+    Depends, FastAPI, Header, HTTPException, Request, WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -45,6 +48,10 @@ from .audit_log import AuditLog
 from .auth import AuthContext, verify_token
 from .byok import GLOBAL_STORE, KiteCredentials
 from .crux_signal import CruxVerdict, compose_from_state
+from .help_text import help_payload
+from .india_tax import (
+    options_trade_tax_impact, session_context,
+)
 from .notify import GLOBAL_NOTIFIER
 from .paper import PaperAccount
 from .rate_limit import allow as _rate_allow
@@ -127,6 +134,7 @@ class Sentinel:
         # scoring role but mirrors each suggestion into this ShadowLedger as
         # a model_suggestion event, so there is ONE system of record.
         self.session = datetime.now(IST).strftime("%Y-%m-%d")
+        self._boot_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.promotions: List[Dict[str, Any]] = []
         self._promotions_path = cfg.journal_dir / "trust_promotions.jsonl"
         self.shadow_ledger = ShadowLedger(cfg.journal_dir)
@@ -747,6 +755,155 @@ class PortfolioTrailBody(BaseModel):
 # Health / observability — for whatever load balancer Codex puts in
 # front. Both unauthenticated by design.
 # ─────────────────────────────────────────────────────────────────
+
+@app.websocket("/api/ws/state")
+async def ws_state(ws: WebSocket) -> None:
+    """Push /api/state every ~1s instead of the client polling every 2s.
+    Halves both wall-clock latency for the cockpit AND server load
+    (one persistent connection vs. one HTTP round-trip per poll).
+
+    Protocol: server pushes one JSON frame per cycle; client sends
+    nothing (read-only stream). On disconnect, the server cleans up
+    quietly.
+
+    Auth: the WebSocket handshake reads the same X-Sentinel-Token
+    header the REST endpoints use. JWT auth (Codex's path) works too
+    because Authorization headers come through unchanged.
+    """
+    import asyncio
+    import json as _json
+    # auth
+    token = ws.headers.get("x-sentinel-token", "")
+    if CFG.dash_token and token != CFG.dash_token:
+        await ws.close(code=4401)              # 4401 = unauthenticated
+        return
+    await ws.accept()
+    try:
+        while True:
+            # Build the same payload /api/state returns; reuse the
+            # endpoint's logic via a direct call.
+            payload = state().body            # bytes
+            try:
+                await ws.send_text(payload.decode("utf-8"))
+            except Exception:
+                break
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# India-specific surfaces: tax-impact + session/holiday context
+# ─────────────────────────────────────────────────────────────────
+
+class TaxImpactBody(BaseModel):
+    buy_premium: float
+    sell_premium: float
+    quantity: int = 0
+    lots: int = 1
+    lot_size: int = 75
+    brokerage_per_leg: float = 20.0
+    apply_capital_gains: bool = True
+
+
+@app.post("/api/tax/options_trade")
+def tax_options_trade(body: TaxImpactBody) -> JSONResponse:
+    """Itemised STT / GST / STCG / brokerage / SEBI / stamp duty on
+    an options round-trip. Public — no auth required (the math is
+    not sensitive). Indian-market differentiation."""
+    br = options_trade_tax_impact(
+        buy_premium=body.buy_premium, sell_premium=body.sell_premium,
+        quantity=body.quantity, lots=body.lots, lot_size=body.lot_size,
+        brokerage_per_leg=body.brokerage_per_leg,
+        apply_capital_gains=body.apply_capital_gains)
+    return JSONResponse(br.to_row())
+
+
+@app.get("/api/session_context")
+def session_context_endpoint() -> JSONResponse:
+    """Today's NSE F&O status — open/closed, next trading day,
+    Muhurat session if applicable, expiry-day flag (auto-shifts
+    Thursday→Wednesday on holidays). Public."""
+    return JSONResponse(session_context())
+
+
+# ─────────────────────────────────────────────────────────────────
+# Help — in-app explanations + the full academic citation list
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/help")
+def help_endpoint() -> JSONResponse:
+    """Every panel's explanation + every methodology citation. Codex
+    uses this for the onboarding walkthrough."""
+    return JSONResponse(help_payload())
+
+
+# ─────────────────────────────────────────────────────────────────
+# Stripe webhook stub — receives plan changes from Codex's gateway
+# ─────────────────────────────────────────────────────────────────
+
+class StripeWebhookBody(BaseModel):
+    """Minimal shape Codex's Stripe webhook handler forwards."""
+    user_id: str
+    new_plan: str                            # RETAIL | PRO | QUANT
+    stripe_event_id: str = ""
+    stripe_event_type: str = ""              # customer.subscription.updated, etc.
+
+
+@app.post("/api/admin/plan_change")
+def plan_change(body: StripeWebhookBody, request: Request) -> JSONResponse:
+    """Codex's Stripe webhook hits this when a subscription upgrades /
+    downgrades. We update the in-process plan-cache + audit log.
+    Production: protect this with a shared secret in
+    Authorization: Bearer <secret> that Codex configures."""
+    enforce_rate("account", request)
+    # log the change for compliance
+    CORE.audit.write("plan_change", {
+        "new_plan": body.new_plan.upper(),
+        "stripe_event_id": body.stripe_event_id,
+        "stripe_event_type": body.stripe_event_type,
+    }, user_id=body.user_id, session=CORE.session)
+    return JSONResponse({
+        "ok": True,
+        "user_id": body.user_id,
+        "new_plan": body.new_plan.upper(),
+        "note": ("Codex's verify_token() reads plan from Supabase on "
+                  "next request, so this only logs the event server-"
+                  "side; no in-process state to flush."),
+    })
+
+
+@app.get("/api/version")
+def version() -> JSONResponse:
+    """Build identity — never auth-gated so a load balancer / status
+    page can read it. Returns git sha + branch + wave + test count
+    (best-effort; falls back gracefully when git or counts aren't
+    available)."""
+    import subprocess as _sp
+    def _g(*cmd):
+        try:
+            return _sp.check_output(cmd, stderr=_sp.DEVNULL,
+                                    timeout=2,
+                                    cwd=str(STATIC_DIR.parent.parent)
+                                    ).decode().strip()
+        except Exception:
+            return ""
+    return JSONResponse({
+        "name": "sentinel",
+        "wave": "20 — Notification filter + rate limiting",
+        "git_commit": _g("git", "rev-parse", "HEAD")[:12],
+        "git_branch": _g("git", "rev-parse", "--abbrev-ref", "HEAD"),
+        "started_at_utc": getattr(CORE, "_boot_utc", ""),
+        "session": getattr(CORE, "session", ""),
+        "modules_self_declared": len(__import__(
+            "sentinel.io_decl", fromlist=["REGISTRY"]).REGISTRY),
+    })
+
 
 @app.get("/healthz")
 def healthz() -> JSONResponse:

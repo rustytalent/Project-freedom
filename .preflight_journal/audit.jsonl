@@ -1,0 +1,2 @@
+{"ts_utc":"2026-06-15T01:59:06.737905Z","event":"server_started","severity":"INFO","user_id":"","session":"2026-06-15","pid":1395,"payload":{"mode":"demo","session":"2026-06-15","demo_mode":true}}
+{"ts_utc":"2026-06-15T02:06:20.340067Z","event":"server_started","severity":"INFO","user_id":"","session":"2026-06-15","pid":4963,"payload":{"mode":"demo","session":"2026-06-15","demo_mode":true}}
