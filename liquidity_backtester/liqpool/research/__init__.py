@@ -1,41 +1,55 @@
-"""Research — the alpha-discovery sub-package.
+"""Research primitives for profitability-first alpha discovery.
 
-The Profitability Doctrine identified that the missing link in the
-codebase is not infrastructure but EDGE. We have a beautiful kitchen
-and no recipes that have been proven to make food.
+This package is intentionally separate from the production Arsenal.
+It contains two complementary layers:
 
-This package is where recipes (hypotheses) get tested against the
-warehouse honestly. The discipline:
+* the harness/library layer for explicit strategy hypotheses, and
+* the miner/atlas layer for discovering and classifying candidate states.
 
-  1. Every hypothesis is a CALLABLE that, given a bar series,
-     emits {entries, exits}.
-  2. The harness simulates trades using real costs (sentinel.india_tax
-     STT + GST + brokerage + slippage) and walk-forward windows
-     (purged + embargoed, same as the quality model).
-  3. The harness returns a HypothesisReport with Sharpe, Sortino,
-     max_dd, expectancy_R, hit_rate, and per-regime breakdowns.
-  4. Decision rule: keep hypotheses with OOS Sharpe ≥ 1.0 after
-     costs; kill the rest. Two-thirds will die. That's normal.
-
-Public surface:
-  HypothesisSpec     — what to test
-  HypothesisReport   — what came back
-  HypothesisHarness  — the runner
-  HYPOTHESIS_LIBRARY — the registry of candidate strategies
+``HypothesisSpec`` remains the harness contract for backwards
+compatibility. The rule-miner contract is exported as
+``MinerHypothesisSpec`` to avoid mixing the two meanings.
 """
+
 from .harness import (
-    BacktestTrade, HypothesisHarness, HypothesisReport, HypothesisSpec,
-    simulate_trades, trade_stats,
+    BacktestTrade,
+    HypothesisHarness,
+    HypothesisReport,
+    HypothesisSpec,
+    simulate_trades,
+    trade_stats,
+)
+from .hypothesis_miner import (
+    Condition,
+    HypothesisMetrics,
+    HypothesisSpec as MinerHypothesisSpec,
+    evaluate_hypothesis,
+    rank_random_hypotheses,
+    sample_random_hypotheses,
 )
 from .library import HYPOTHESIS_LIBRARY, register_hypothesis
+from .manipulation_atlas import (
+    ConstituentState,
+    ManipulationState,
+    classify_index_manipulation,
+)
 
 __all__ = [
     "BacktestTrade",
+    "Condition",
+    "ConstituentState",
+    "HYPOTHESIS_LIBRARY",
     "HypothesisHarness",
+    "HypothesisMetrics",
     "HypothesisReport",
     "HypothesisSpec",
+    "ManipulationState",
+    "MinerHypothesisSpec",
+    "classify_index_manipulation",
+    "evaluate_hypothesis",
+    "rank_random_hypotheses",
+    "register_hypothesis",
+    "sample_random_hypotheses",
     "simulate_trades",
     "trade_stats",
-    "HYPOTHESIS_LIBRARY",
-    "register_hypothesis",
 ]
