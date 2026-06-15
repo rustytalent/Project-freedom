@@ -34,63 +34,37 @@ Branch: `claude/liquidity-pool-backtester-1uskb`
 
 ## 1. What's REMAINING — by priority, with how-to
 
-### 🔴 BLOCKER for real-money launch — Live Kite WebSocket producer
+### 🔴 BLOCKER — Live Kite WebSocket producer ✓ DONE (Wave 22)
 
-**Why it matters**: REST polling = 1 quote per second. WebSocket =
-sub-100ms ticks. Without WS you can't run a tick-driven model.
+`liqpool/live_feed.py` ships now. Full path:
 
-**Where it plugs in**: `liqpool/live_inference.py` already exposes
-`LiveInferenceServer.on_tick(features_per_head, asset)`. You need
-a feeder that calls it.
+  KiteTicker → MinuteBarAggregator (5-min OHLCV at boundary) →
+  BarStateFeatureBuilder (returns, ATR proxy, momentum, zscore,
+  session position, streak) → LiveInferenceBundle.predict_one per head
+  → JsonlPublisher → `/var/lib/sentinel/liqpool_live_signals.jsonl` →
+  Sentinel's `LiveSignalsTail.poll()` reads on every quote cycle.
 
-**How**:
-```python
-# liqpool/live_feed.py  (Codex writes this)
-from kiteconnect import KiteTicker
-from liqpool.live_inference import LiveInferenceBundle, LiveInferenceServer, JsonlPublisher
-from liqpool.timing import StateFeaturizer
-import pandas as pd
+CLI: `python -m scripts.run_live_feed --api-key ... --access-token ...
+--bundle bundle.pkl --instruments 256265 --asset NIFTY
+--jsonl /var/lib/sentinel/liqpool_live_signals.jsonl`
 
-class LiveFeed:
-    def __init__(self, api_key, access_token, instrument_tokens):
-        self.kt = KiteTicker(api_key, access_token)
-        self.kt.on_ticks = self._on_ticks
-        self.kt.on_connect = lambda ws, response: ws.subscribe(instrument_tokens)
-        self.kt.on_close = self._on_close
-        # bar builder: aggregate ticks into 5m OHLCV
-        self.bar_builder = MinuteBarAggregator(timeframe="5m")
-        bundle = LiveInferenceBundle.from_pickle("/path/to/bundle.pkl")
-        self.server = LiveInferenceServer(
-            bundle=bundle,
-            publisher=JsonlPublisher("/var/lib/sentinel/liqpool_live_signals.jsonl"),
-            asset="NIFTY",
-            enforce_mis=True)
+Handles:
+  * KiteTicker disconnect (marks reconnect, kt's auto-reconnect kicks in)
+  * SIGINT/SIGTERM (clean shutdown, flushes open bar)
+  * MIS session windows (inherits enforce_mis from LiveInferenceServer)
+  * Heartbeat (FeedHeartbeat with last_tick / last_bar / n_reconnects)
+  * Audit sink to stderr per state change
 
-    def _on_ticks(self, ws, ticks):
-        for tick in ticks:
-            closed_bars = self.bar_builder.feed(tick)
-            for bar in closed_bars:
-                features = StateFeaturizer().features_at(bar)
-                self.server.on_tick({
-                    "direction": features,
-                    "proximity_h12": features,
-                    "proximity_h25": features,
-                    "proximity_h78": features,
-                    "quality": features,
-                })
+**Tested**: 18 tests in `liquidity_backtester/tests/test_live_feed.py`
+including end-to-end ticks → bars → features → JSONL → Sentinel bus.
 
-    def _on_close(self, ws, code, reason):
-        # exponential backoff reconnect — Kite drops sessions daily
-        ws.reconnect()
-
-    def run(self):
-        self.kt.connect(threaded=True)
-```
-
-**Acceptance**: a flowing 5-min `bars.parquet` produced from live
-ticks. Existing `test_live_inference.py` already pins the contract.
-
-**Estimated time**: 1-2 days.
+**Honest caveat (queued in MOTHERS_AUDIT §3.2 follow-up)**: the slim
+`BarStateFeatureBuilder` gives the bundle's heads ENOUGH features to
+score (returns, ATR, momentum, zscore, session position, streak) but
+NOT the full `StateFeaturizer` feature set (pools, multi-tf AVWAP/
+FRVP, sector regime). Live prediction quality won't fully match the
+training-time backtest until those are streamed in. Downgrade
+confidence via `publish_floor` if needed.
 
 ---
 
