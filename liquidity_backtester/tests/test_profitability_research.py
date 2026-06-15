@@ -6,8 +6,10 @@ import pandas as pd
 
 from liqpool.research import (
     ConstituentState,
+    build_manipulation_state_frame,
     classify_index_manipulation,
     rank_random_hypotheses,
+    summarize_state_frame,
 )
 
 
@@ -66,6 +68,26 @@ class HypothesisMinerTests(unittest.TestCase):
         self.assertTrue(spec["conditions"])
 
 
+class StateDatasetTests(unittest.TestCase):
+    def test_build_manipulation_state_frame_groups_constituents(self):
+        frame = pd.DataFrame(
+            [
+                {"ts": "2026-06-15 09:20", "symbol": "A", "weight": 0.2, "return_pct": 1.0, "today_avwap_dist_atr": 0.7, "prev_session_avwap_dist_atr": 0.4, "index_return_pct": 0.5, "breadth_positive_frac": 0.8},
+                {"ts": "2026-06-15 09:20", "symbol": "B", "weight": 0.2, "return_pct": 0.8, "today_avwap_dist_atr": 0.6, "prev_session_avwap_dist_atr": 0.3, "index_return_pct": 0.5, "breadth_positive_frac": 0.8},
+                {"ts": "2026-06-15 09:20", "symbol": "C", "weight": 0.2, "return_pct": 0.6, "today_avwap_dist_atr": 0.5, "prev_session_avwap_dist_atr": 0.2, "index_return_pct": 0.5, "breadth_positive_frac": 0.8},
+                {"ts": "2026-06-15 09:20", "symbol": "D", "weight": 0.2, "return_pct": 0.4, "today_avwap_dist_atr": 0.4, "prev_session_avwap_dist_atr": 0.1, "index_return_pct": 0.5, "breadth_positive_frac": 0.8},
+                {"ts": "2026-06-15 09:20", "symbol": "E", "weight": 0.2, "return_pct": -0.1, "today_avwap_dist_atr": 0.1, "prev_session_avwap_dist_atr": 0.1, "index_return_pct": 0.5, "breadth_positive_frac": 0.8},
+            ]
+        )
+        states = build_manipulation_state_frame(frame)
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states.iloc[0]["state_label"], "broad_sponsorship")
+        self.assertEqual(states.iloc[0]["n_constituents"], 5)
+
+        summary = summarize_state_frame(states)
+        self.assertEqual(summary["rows"], 1)
+        self.assertEqual(summary["labels"]["broad_sponsorship"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
-

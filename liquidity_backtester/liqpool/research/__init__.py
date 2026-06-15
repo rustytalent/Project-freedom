@@ -33,6 +33,11 @@ from .manipulation_atlas import (
     ManipulationState,
     classify_index_manipulation,
 )
+from .state_dataset import (
+    StateDatasetConfig,
+    build_manipulation_state_frame,
+    summarize_state_frame,
+)
 
 __all__ = [
     "BacktestTrade",
@@ -45,11 +50,14 @@ __all__ = [
     "HypothesisSpec",
     "ManipulationState",
     "MinerHypothesisSpec",
+    "StateDatasetConfig",
+    "build_manipulation_state_frame",
     "classify_index_manipulation",
     "evaluate_hypothesis",
     "rank_random_hypotheses",
     "register_hypothesis",
     "sample_random_hypotheses",
     "simulate_trades",
+    "summarize_state_frame",
     "trade_stats",
 ]
