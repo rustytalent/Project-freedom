@@ -27,6 +27,7 @@ from liqpool.policy_model import (
     PolicyReturnModelSuite,
     _chronological_split,
     _winsorize,
+    score_candidates_with_return_model,
 )
 
 
@@ -184,6 +185,71 @@ def test_backward_compat_default_attributes():
             setattr(report, attr, default)
     assert report.policy_return_model is None
     assert report.policy_return_model_report == []
+
+
+def test_score_candidates_returns_empty_when_suite_is_none():
+    """The predict-path helper must no-op cleanly when no R policy bundle
+    is loaded — the gate falls back to the legacy reasons set."""
+    rows = [{
+        "key": 1, "mode": "touch_confirmed", "symbol": "S0", "sector": "BANKING",
+        "side": "buy", "direction": "UP", "direction_sign": 1,
+        "pool_low": 100.0, "pool_high": 105.0, "pool_mid": 102.5,
+        "available_at": "2025-01-01 09:30", "formed_at": "2025-01-01 08:30",
+        "score": 0.7, "tf_count": 2, "factor": "EQHL",
+    }]
+    assert score_candidates_with_return_model(rows, None, "touch_confirmed") == {}
+
+
+def test_score_candidates_returns_empty_when_mode_missing():
+    """Wrong mode -> no model lookup -> empty dict, no crash."""
+    labels = _synthetic_labels(n=180, seed=11)
+    suite = PolicyReturnModelSuite().fit(labels, labels, seed=42, min_trades=50)
+    assert "touch_confirmed" in suite.models
+    rows = [{
+        "key": 7, "mode": "blind_limit", "symbol": "S0", "sector": "BANKING",
+        "side": "buy", "direction": "UP", "direction_sign": 1,
+        "pool_low": 100.0, "pool_high": 105.0, "pool_mid": 102.5,
+        "available_at": "2025-01-01 09:30", "formed_at": "2025-01-01 08:30",
+        "score": 0.7, "tf_count": 2, "factor": "EQHL",
+    }]
+    # blind_limit has no model — function must return {} not raise.
+    assert score_candidates_with_return_model(rows, suite, "blind_limit") == {}
+
+
+def test_score_candidates_roundtrip_with_real_suite():
+    """End-to-end: fit a suite, build candidate rows in the live-runner shape,
+    score them, get a finite predicted R per row keyed by `key`."""
+    labels = _synthetic_labels(n=180, seed=12)
+    suite = PolicyReturnModelSuite().fit(labels, labels, seed=42, min_trades=50)
+    rows = []
+    for i, score in enumerate(np.linspace(0.1, 0.9, 6)):
+        rows.append({
+            "key": 1000 + i,
+            "mode": "touch_confirmed",
+            "symbol": f"S{i % 5}",
+            "sector": "BANKING",
+            "side": "buy",
+            "direction": "UP",
+            "direction_sign": 1,
+            "pool_low": float(score * 100),
+            "pool_high": float(score * 100 + 5),
+            "pool_mid": float(score * 100 + 2.5),
+            "available_at": f"2025-02-{1 + i:02d} 09:30",
+            "formed_at": f"2025-02-{1 + i:02d} 08:30",
+            "score": float(score),
+            "tf_count": 2,
+            "factor": "EQHL",
+        })
+    preds = score_candidates_with_return_model(rows, suite, "touch_confirmed")
+    assert set(preds.keys()) == {row["key"] for row in rows}
+    for r in preds.values():
+        assert np.isfinite(r), "predictions must be finite"
+    # Monotone signal: higher `score` (the informative feature in the synthetic
+    # data generator) should correspond to higher predicted R.
+    scores = np.array([row["score"] for row in rows])
+    ordered_pred = np.array([preds[row["key"]] for row in rows])
+    rho = np.corrcoef(scores, ordered_pred)[0, 1]
+    assert rho > 0.5, f"predicted R should track the informative feature, got rho={rho:.2f}"
 
 
 def test_metrics_to_dict_is_serialisable():

@@ -370,6 +370,30 @@ class PolicyOutcomeModelSuite:
         return pd.DataFrame(rows)
 
 
+def score_candidates_with_return_model(rows: List[Dict],
+                                       return_suite,
+                                       execution_mode: str) -> Dict:
+    """Score live candidate rows with the trained R-policy regressor.
+
+    ``rows`` are plain dicts shaped like a single ``policy_labels`` row plus a
+    ``"key"`` field the caller uses to map the returned predicted_r back onto
+    its candidate object (typically ``id(candidate)``).
+
+    Returns ``{key: predicted_r_float}`` for every row the model scored, or
+    ``{}`` when the suite has no model for ``execution_mode``. Pulled out of
+    the runner so it's unit-testable without spinning a CLI run.
+    """
+    if return_suite is None or not rows:
+        return {}
+    models = getattr(return_suite, "models", {}) or {}
+    model = models.get(execution_mode)
+    if model is None:
+        return {}
+    frame = pd.DataFrame(rows)
+    preds = model.predict_frame(frame)
+    return {row["key"]: float(p) for row, p in zip(rows, preds)}
+
+
 # ---------------------------------------------------------------------------
 # R1: Policy RETURN model — regression on realized net R per generated trade.
 #

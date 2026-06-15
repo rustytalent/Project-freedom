@@ -244,6 +244,40 @@ def _finite_or_none(value):
     return out if np.isfinite(out) else None
 
 
+def _candidate_predicted_r(candidates, return_suite, execution_mode: str):
+    """Thin wrapper around :func:`policy_model.score_candidates_with_return_model`
+    that maps the live-candidate dict shape onto the model's feature schema.
+
+    Returns ``{id(cand): predicted_r}`` for each candidate the suite can score,
+    or ``{}`` when no suite is loaded / no model exists for the mode."""
+    from liqpool.policy_model import score_candidates_with_return_model
+
+    if return_suite is None or not candidates:
+        return {}
+    payload = [{
+        "key": id(cand),
+        "mode": execution_mode,
+        "symbol": cand.get("symbol"),
+        "sector": cand.get("sector"),
+        "side": cand.get("side"),
+        "direction": cand.get("direction"),
+        "direction_sign": int(cand.get("direction_sign") or 0),
+        "pool_low": float(cand["pool"].price_low),
+        "pool_high": float(cand["pool"].price_high),
+        "pool_mid": float(cand["pool"].mid),
+        "available_at": str(getattr(cand["pool"], "available_at", "")),
+        "formed_at": str(getattr(cand["pool"], "formed_at", "")),
+        "score": float(cand.get("q") or 0.0),
+        "tf_count": int(cand.get("tf_count") or 0),
+        "factor": cand.get("headline_factor") or "",
+    } for cand in candidates]
+    try:
+        return score_candidates_with_return_model(payload, return_suite, execution_mode)
+    except Exception as exc:
+        print(f"  [r_policy] predict failed for mode={execution_mode}: {exc}")
+        return {}
+
+
 def _fmt_pct(value) -> str:
     value = _finite_or_none(value)
     return "n/a" if value is None else f"{value:.0%}"
@@ -963,12 +997,33 @@ def main():
                            "after costs")
         return reasons
 
+    # R1: score every live candidate with the policy_return_model regressor (if
+    # present in the bundle). Always populated for display/CSV even when no
+    # threshold is set; only applied as a gate reason when --r-policy-threshold
+    # is explicitly enabled.
+    r_policy_suite = getattr(report, "policy_return_model", None)
+    r_policy_preds = _candidate_predicted_r(
+        candidates, r_policy_suite, args.execution_mode,
+    )
+    r_policy_threshold = args.r_policy_threshold
+    r_policy_active = r_policy_threshold is not None and bool(r_policy_preds)
+    for c in candidates:
+        pred = r_policy_preds.get(id(c))
+        c["predicted_r"] = pred  # may be None — caller treats as "no signal"
+
     gate_decisions = []
     tradeable = []
     watch_only = []
     rejected = []
     for c in candidates:
         reasons = live_gate_reasons(c)
+        if r_policy_active:
+            pred_r = c.get("predicted_r")
+            if pred_r is not None and pred_r < r_policy_threshold:
+                reasons.append(
+                    f"predicted R {pred_r:+.2f} < r-policy threshold "
+                    f"{r_policy_threshold:+.2f}"
+                )
         if not reasons:
             decision_name = "TRADEABLE"
         elif c["q"] >= TRADEABLE_Q or c["t_by_h"].get(primary_h, 0.0) >= 0.20:
@@ -1011,6 +1066,7 @@ def main():
             "target": c["target"],
             "decision": decision_name,
             "reasons": reasons,
+            "policy_return_model_predicted_r": c.get("predicted_r"),
         }
         gate_decisions.append(decision)
         c["gate_reasons"] = reasons
@@ -1077,6 +1133,27 @@ def main():
           f"DIR_ALIGN, {PRACTICAL_MIN_ATR:.1f}-{PRACTICAL_MAX_ATR:.1f}ATR, "
           f"bucket n≥{MIN_BUCKET_N}, post-touch strict≥{MIN_POST_TOUCH_STRICT:.0%}, "
           f"net EV>0")
+    if r_policy_suite is not None:
+        scored = sum(1 for c in candidates if c.get("predicted_r") is not None)
+        if scored > 0:
+            pred_vals = [c["predicted_r"] for c in candidates
+                         if c.get("predicted_r") is not None]
+            mean_pred = sum(pred_vals) / max(1, len(pred_vals))
+            line = (f"  R policy (mode={args.execution_mode}): "
+                    f"scored {scored}/{len(candidates)} candidates, "
+                    f"mean predicted R={mean_pred:+.2f}")
+            if r_policy_active:
+                cut = sum(1 for c in candidates
+                          if (c.get("predicted_r") is not None
+                              and c["predicted_r"] < r_policy_threshold))
+                line += (f"  |  gate ON @ threshold={r_policy_threshold:+.2f}; "
+                         f"would demote {cut}/{scored}")
+            else:
+                line += "  |  gate OFF (set --r-policy-threshold to enable)"
+            print(line)
+        else:
+            print(f"  R policy: no model for mode={args.execution_mode} "
+                  f"(suite has: {sorted(getattr(r_policy_suite, 'models', {}).keys())})")
     print("----------------------------------------------------------")
 
     # Per-asset compact dashboard
