@@ -479,8 +479,13 @@ class SectorMoERespectModel:
     sector_models: Dict[str, PoolRespectModel] = field(default_factory=dict)
     sector_stats: Dict[str, Dict] = field(default_factory=dict)
     sector_weights: Dict[str, float] = field(default_factory=dict)
-    expert_weight: float = 0.70          # cap only; per-sector weights are dynamic.
-    global_weight: float = 0.30
+    # Cap only; per-sector weights are dynamic. Aligned with the Phase 3C
+    # learned dynamic gate ceiling (``GATE_WEIGHT_CEILING=0.85``) so an
+    # exceptionally well-validated expert can route at the same maximum the
+    # learned gate would assign per-pool — otherwise the static cap would
+    # silently shrink expert influence even when the gate would have lifted it.
+    expert_weight: float = 0.85
+    global_weight: float = 0.15
     min_sector_train_n: int = 60
     min_sector_class_n: int = 8
     min_sector_oos_n: int = 20

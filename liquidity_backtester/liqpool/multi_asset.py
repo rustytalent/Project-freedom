@@ -718,7 +718,9 @@ def run_multi_asset(symbols: List[str], cfg: Config,
                 X_oos=X_oos_all, oos_pools=all_oos_pools, oos_results=all_oos_results,
                 val_frac=0.25, seed=cfg.opt_seed + 100,
                 min_sector_train_n=60, min_sector_class_n=8, min_sector_oos_n=20,
-                expert_weight=0.70,
+                # Aligned with GATE_WEIGHT_CEILING=0.85 so the static cap
+                # doesn't silently throttle the Phase 3C learned gate's ceiling.
+                expert_weight=0.85,
                 sample_start_times=[p.available_at for p in train_pool_keep],
                 sample_end_times=[label_end_time(p, r)
                                   for p, r in zip(train_pool_keep, train_result_keep)],

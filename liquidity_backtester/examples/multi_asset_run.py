@@ -133,6 +133,11 @@ def _load_predict_report(model_dir: str, data_provider: ParquetProvider, cfg: Co
         ("policy_return_model_report", []),
         ("policy_return_model_calibration", []),
         ("policy_return_model_feature_importance", []),
+        # Phase 3B/3C learned dynamic gate. Older bundles predate this so
+        # the default is None and the predict path falls back to the static
+        # per-sector blend (the Phase 3E safety rail).
+        ("unified_learned_gate", None),
+        ("learned_gate_metrics", None),
     ):
         if not hasattr(report, attr):
             setattr(report, attr, default)
