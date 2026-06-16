@@ -46,8 +46,8 @@ behaving **normally**, or revealing **abnormal belief**?
 | 4 | **Fair response model** | `fair_response.py` | ✅ shipped |
 | 4 | **Residual / deviation-of-deviation (slot-specific)** | `residual.py` | ✅ shipped |
 | 4 | **Spread & liquidity friendliness** | `spread.py` | ✅ shipped |
-| 5 | Multi-strike battlefield heatmap (σ maps) | `battlefield.py` | next |
-| 5 | IV / skew pressure state | `iv_state.py` | |
+| 5 | **Multi-strike battlefield heatmap (σ maps)** | `battlefield.py` | ✅ shipped |
+| 5 | **IV / skew pressure state** | `iv_state.py` | ✅ shipped |
 | 6 | Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis) | `thesis_memory.py` | |
 | 7 | Winding-zone detector (4 types) | `winding.py` | |
 | 7 | State machines (bull continuation / bear continuation / liquidity sweep) | `state_machines.py` | |
@@ -91,6 +91,26 @@ behaving **normally**, or revealing **abnormal belief**?
   (clean/widening/dangerous/improving). Elevated states gated on absolute
   pct so a sub-tight-threshold wiggle can't false-trigger on robust-z.
 - `is_execution_friendly` gate: dangerous spread is never friendly.
+
+### Battlefield + IV state (Phase 5 — done)
+- `RailSummary` per side: weighted (by behavior band) signed mean dod_z,
+  weighted abs mean, fraction abnormal, **dispersion_score** (Herfindahl-
+  based: 0 = even spread across slots, 1 = one-slot concentration),
+  epicenter label + signed level, state (strong_bull/strong_bear/mixed/
+  quiet). Behavior weights: future_like 1.0, directional_itm 0.95,
+  gamma_atm 0.90, convex_otm 0.65, lottery_otm 0.40.
+- `battlefield_snapshot` cross-rail verdict: bullish_agreement /
+  bearish_agreement / vol_expansion / vol_contraction / single_distortion /
+  quiet. Distortion takes priority — fires either when an active rail
+  is too disperse OR when the rail-mean is quiet but a single slot's
+  |dod_z| exceeds the abnormal threshold (the quiet rail mean IS the
+  distortion fingerprint).
+- `classify_iv_state` 7-state machine: dirty_data → liquidity_distortion
+  → common_shock → directional_bull/bear (battlefield-declared) →
+  acceptance-skew directional_bull/bear (broad CE-defended + PE-rejected
+  patterns even when rail-mean is quiet — the founder's whole point) →
+  vol_contraction → neutral. Data quality dominates direction: a clean
+  bullish agreement on a dirty book is worthless.
 
 ### Winding zone (Phase 7 — design pinned, not built)
 Inside an unfinished candle/segment, `X` = reference, `Y+`/`Y-` =
