@@ -31,7 +31,9 @@ import numpy as np
 import pandas as pd
 
 from liqpool.research import (
+    GpConfig,
     evaluate_across_regimes,
+    evolve,
     mine_per_regime,
     rank_walk_forward_hypotheses,
     regime_specialization_score,
@@ -148,6 +150,30 @@ def main() -> None:
               f"consistency={row['consistency']:.2f}  "
               f"trades={int(row['n_trades_total'])}  "
               f"side={row['side']}  name={row['name']}")
+
+    print("\n[stage 5]  GP evolution — refine the survivors via mutation + crossover")
+
+    def progress(gen, stats):
+        print(f"  gen {gen:>2}  best={stats.best_fitness:+.2f}  "
+              f"median={stats.median_fitness:+.2f}  "
+              f"diversity={stats.diversity:.2f}")
+
+    gp_cfg = GpConfig(population_size=40, n_generations=6, tournament_k=3,
+                       elite_count=3, max_conditions=2, n_folds=4,
+                       min_bars_per_fold=300, hall_of_fame_size=5)
+    gp_report = evolve(
+        frame, forward_return_col="fwd_r",
+        feature_columns=["x", "y", "z"],
+        cfg=gp_cfg, seed=53, progress=progress,
+    )
+    print("\nGP hall of fame (top 5):")
+    for ind in gp_report.hall_of_fame:
+        conds = " AND ".join(
+            f"{c.feature}{c.op}{c.threshold:.2f}" for c in ind.spec.conditions
+        )
+        print(f"  fitness={ind.fitness:+.2f}  OOS Sharpe={ind.mean_oos_sharpe:+.2f}  "
+              f"consistency={ind.consistency:.2f}  trades={ind.n_trades_total}  "
+              f"gen_born={ind.generation_born}  side={ind.spec.side}  rule=[{conds}]")
 
 
 if __name__ == "__main__":
