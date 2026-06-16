@@ -48,7 +48,7 @@ behaving **normally**, or revealing **abnormal belief**?
 | 4 | **Spread & liquidity friendliness** | `spread.py` | ✅ shipped |
 | 5 | **Multi-strike battlefield heatmap (σ maps)** | `battlefield.py` | ✅ shipped |
 | 5 | **IV / skew pressure state** | `iv_state.py` | ✅ shipped |
-| 6 | Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis) | `thesis_memory.py` | |
+| 6 | **Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis)** | `thesis_memory.py` | ✅ shipped |
 | 7 | Winding-zone detector (4 types) | `winding.py` | |
 | 7 | State machines (bull continuation / bear continuation / liquidity sweep) | `state_machines.py` | |
 | 8 | Decision layer (avoid-trade + hold/exit + best strike) | `decision.py` | |
@@ -127,10 +127,24 @@ continuation vs reversal. Four types:
 - **Bear-trap winding:** mirror → CE scalp.
 This is the entry/exit subsystem for scalping.
 
-### Thesis memory hysteresis (Phase 6 — design pinned)
-- entry confidence threshold = 70, exit = 45, no-trade danger = 65.
-- Scores decay/update per bar; pullback that survives nicks the score a
-  little; pullback that breaks structure cuts it hard.
+### Thesis memory hysteresis (Phase 6 — done)
+- Five scores in [0,100]: bull_thesis, bear_thesis, vol_expansion,
+  liquidity_danger, no_trade.
+- Hysteresis thresholds (founder's numbers): entry = 70, exit = 45,
+  no_trade_danger = 65. The 25-pt gap between entry and exit is what
+  stops the engine from flipping like a scared retail trader.
+- Update dynamics: per-bar decay 0.94 (≈16-bar half-life); confirming
+  signals add positive deltas (battlefield agreement, with extra bonus
+  for acceptance-skew IV); damaging signals subtract — counter-direction
+  read = small nick, regime_break on held side = large cut, STRONG_TRAP
+  on held side = cut, basic trap = half cut.
+- Composite states: BULL_ENTRY / BEAR_ENTRY / HOLD_BULL / HOLD_BEAR /
+  EXIT_BULL / EXIT_BEAR / NO_TRADE_DANGER / NEUTRAL.
+- Entry requires the chosen direction to STRICTLY dominate the other by
+  ≥10 — avoids entering during vol expansion when both sides are elevated.
+- NO_TRADE_DANGER overrides direction: any composite of liquidity_danger
+  and vol_expansion/2 above the danger threshold blocks new entries
+  regardless of how high bull_thesis is.
 
 ### Honest scope
 - Strong: bad-trade avoidance, fake-pullback holding, exit improvement,
