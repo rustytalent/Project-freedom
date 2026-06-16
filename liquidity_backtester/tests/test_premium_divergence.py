@@ -19,6 +19,8 @@ from liqpool.research.premium_divergence import (
     BULL_TRAP,
     CONFIRMED_UP,
     NEUTRAL,
+    STRONG_BEAR_TRAP,
+    STRONG_BULL_TRAP,
     DivergenceSignal,
     PremiumDivergenceConfig,
     compute_divergence_frame,
@@ -26,6 +28,42 @@ from liqpool.research.premium_divergence import (
     divergence_signals,
     summarize_divergence,
 )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Founder's ₹43/₹44 canonical scenario for Layer 2 + Layer 3
+# ─────────────────────────────────────────────────────────────────
+
+def _fair_value_rejection_frame(n: int = 400, seed: int = 11) -> pd.DataFrame:
+    """Spot ramps up over 5 bars, then plateaus at peak. The put leg falls
+    honestly during the ramp (touching its fair value at the bottom — the
+    'wick to ₹43') then is HELD UP at fair + ~10% for many bars (the
+    'accepted ₹44 above'). All three layers should agree at the moment the
+    rejection persists: bearish net intent, abnormally positive put
+    residual, and fair-value rejection sustained."""
+    rng = np.random.default_rng(seed)
+    spot = 23000 + np.cumsum(rng.normal(0, 5, n))
+    d_spot = np.diff(spot, prepend=spot[0])
+    call = 100 + np.cumsum(0.5 * d_spot + rng.normal(0, 1.0, n))
+    put = 100 + np.cumsum(-0.5 * d_spot + rng.normal(0, 1.0, n))
+
+    a, b, plateau_end = 200, 205, 226
+    spot[a:b] += np.linspace(0, 40, b - a)
+    spot[b:plateau_end] += 40
+    call[a:b] += 0.5 * np.linspace(0, 40, b - a)
+    call[b:plateau_end] += 0.5 * 40
+    # Put track honestly through the ramp (so it touches fair at bar b-1),
+    # then JUMPS up by ~10% of its current value at bar b (the rejection)
+    # and holds there.
+    put[a:b] += -0.5 * np.linspace(0, 40, b - a)
+    put[b:plateau_end] = put[b - 1] + 8
+
+    return pd.DataFrame({
+        "ts": pd.date_range("2026-06-16 09:15", periods=n, freq="1min"),
+        "spot": spot,
+        "call_premium": np.clip(call, 1, None),
+        "put_premium": np.clip(put, 1, None),
+    })
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -286,15 +324,19 @@ def test_determinism_same_frame_same_signals():
 def test_summarize_schema_and_counts_add_up():
     df = _inject_bull_trap(_base_frame(seed=1))
     summ = summarize_divergence(df)
-    expected_keys = {"n_bars", "n_signals", "signal_rate", "bull_traps",
-                     "bear_traps", "confirmed_up", "confirmed_down", "neutral"}
+    expected_keys = {"n_bars", "n_signals", "signal_rate",
+                     "strong_bull_traps", "strong_bear_traps",
+                     "bull_traps", "bear_traps", "confirmed_up",
+                     "confirmed_down", "neutral"}
     assert expected_keys.issubset(summ.keys())
-    # Verdict counts partition the bars.
-    total = (summ["bull_traps"] + summ["bear_traps"] + summ["confirmed_up"]
-             + summ["confirmed_down"] + summ["neutral"])
+    # Verdict counts partition the bars across all tiers.
+    total = (summ["strong_bull_traps"] + summ["strong_bear_traps"]
+             + summ["bull_traps"] + summ["bear_traps"]
+             + summ["confirmed_up"] + summ["confirmed_down"] + summ["neutral"])
     assert total == summ["n_bars"]
-    # Signals are exactly the trap bars.
-    assert summ["n_signals"] == summ["bull_traps"] + summ["bear_traps"]
+    # Signals fire for both basic and strong traps.
+    assert summ["n_signals"] == (summ["strong_bull_traps"] + summ["strong_bear_traps"]
+                                  + summ["bull_traps"] + summ["bear_traps"])
 
 
 def test_signal_to_dict_is_json_serializable():
@@ -303,3 +345,115 @@ def test_signal_to_dict_is_json_serializable():
     assert sigs
     import json
     json.dumps([s.to_dict() for s in sigs], default=str)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Layer 2 — residual anomaly ("deviation of deviation")
+# ─────────────────────────────────────────────────────────────────
+
+def test_residual_anomaly_z_columns_are_populated_and_bounded():
+    df = _base_frame(seed=21)
+    enriched = compute_divergence_frame(df)
+    assert "call_resid_anomaly_z" in enriched.columns
+    assert "put_resid_anomaly_z" in enriched.columns
+    # Cap enforced — no astronomical z-scores even on weird bars.
+    assert enriched["call_resid_anomaly_z"].abs().max() <= 8.0 + 1e-9
+    assert enriched["put_resid_anomaly_z"].abs().max() <= 8.0 + 1e-9
+
+
+def test_residual_anomaly_z_is_zero_centered_on_honest_data():
+    """A honest random walk's residuals should yield a residual-anomaly z
+    centered near zero — the rolling median tracks the residual's drift."""
+    df = _base_frame(seed=22)
+    enriched = compute_divergence_frame(df)
+    # Skip warmup bars.
+    warm_idx = 60
+    body = enriched.iloc[warm_idx:]
+    assert abs(body["call_resid_anomaly_z"].median()) < 0.5
+    assert abs(body["put_resid_anomaly_z"].median()) < 0.5
+
+
+# ─────────────────────────────────────────────────────────────────
+# Layer 3 — fair-value rejection (the ₹43/₹44 pattern)
+# ─────────────────────────────────────────────────────────────────
+
+def test_fair_price_columns_match_residual_identity():
+    """fair_call ≡ call − call_resid by construction. If the identity
+    holds, our fair price is exactly the prior premium plus the
+    delta-explained move."""
+    df = _base_frame(seed=23)
+    enriched = compute_divergence_frame(df)
+    np.testing.assert_allclose(
+        enriched["fair_call"], enriched["call_premium"] - enriched["call_resid"],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        enriched["fair_put"], enriched["put_premium"] - enriched["put_resid"],
+        equal_nan=True,
+    )
+
+
+def test_put_fair_rejection_detected_when_put_holds_above_fair():
+    """The founder's ₹43/₹44 pattern. The put leg must be flagged as
+    rejecting fair around the wick→hold transition (bars 200..210). The
+    rejection fires precisely at the acceptance-failure moment; it then
+    naturally expires as the held-level becomes the new floor of the
+    rolling window — that's the correct lifetime of an event signal."""
+    df = _fair_value_rejection_frame()
+    enriched = compute_divergence_frame(df)
+    rejected_in_window = enriched.loc[200:210, "put_fair_rejected"].sum()
+    assert rejected_in_window >= 1, (
+        "put must be flagged as rejecting fair at the wick→hold transition"
+    )
+
+
+def test_strong_bull_trap_fires_only_when_all_three_layers_agree():
+    """In the ₹43/₹44 scenario, all three layers align: bearish intent,
+    abnormal put residual, fair rejected → STRONG_BULL_TRAP."""
+    df = _fair_value_rejection_frame()
+    sigs = divergence_signals(df, cooldown_bars=10)
+    strong_bull = [s for s in sigs if s.verdict == STRONG_BULL_TRAP
+                   and 195 <= s.index <= 235]
+    assert strong_bull, "STRONG_BULL_TRAP must fire in the ₹43/₹44 window"
+    s = strong_bull[0]
+    assert s.tier == "strong"
+    assert s.leg == "put"
+    assert s.direction == -1
+    # Layer 2: residual anomaly is positive and elevated (puts abnormally strong).
+    assert s.residual_anomaly_z > 1.5
+    # Layer 3: fair value was rejected.
+    assert s.fair_value_rejected is True
+    # The fair price is below the entry premium (puts ARE held above fair).
+    assert s.fair_price < s.entry_premium
+
+
+def test_basic_trap_alone_does_not_promote_to_strong():
+    """The original Layer-1-only synthetic (bull trap with both legs
+    boosted but no fair-value rejection plateau) must produce BULL_TRAPs
+    that stay tier=basic — Layer 3 must not be over-eager."""
+    df = _inject_bull_trap(_base_frame(seed=1))
+    sigs = divergence_signals(df)
+    # Some bull traps fire in the window; none should be strong-tier here.
+    in_window = [s for s in sigs if 195 <= s.index <= 250]
+    assert in_window, "the Layer 1 synthetic must still produce traps"
+    assert all(s.tier == "basic" for s in in_window), (
+        "Layer 1 only must not auto-promote to strong tier"
+    )
+
+
+def test_strong_only_filter_excludes_basic_signals():
+    df = _fair_value_rejection_frame()
+    all_sigs = divergence_signals(df, cooldown_bars=10)
+    strong_sigs = divergence_signals(df, cooldown_bars=10, strong_only=True)
+    assert any(s.tier == "basic" for s in all_sigs)
+    assert all(s.tier == "strong" for s in strong_sigs)
+    assert len(strong_sigs) < len(all_sigs)
+
+
+def test_summary_partitions_include_strong_tiers():
+    df = _fair_value_rejection_frame()
+    summ = summarize_divergence(df)
+    # The strong tier counts contribute to n_signals.
+    assert summ["strong_bull_traps"] >= 1
+    assert summ["n_signals"] == (summ["strong_bull_traps"] + summ["strong_bear_traps"]
+                                  + summ["bull_traps"] + summ["bear_traps"])
