@@ -43,10 +43,10 @@ behaving **normally**, or revealing **abnormal belief**?
 | 1 | Logging engine | (quote frames) | substrate |
 | 2 | **Mark-price + data quality** | `mark_price.py` | ✅ shipped |
 | 3 | **Moneyness identity** | `moneyness.py` | ✅ shipped |
-| 4 | Fair response model | `fair_response.py` | next |
-| 4 | Residual / deviation-of-deviation (slot-specific) | `residual.py` | next |
-| 4 | Spread & liquidity friendliness | `spread.py` | next |
-| 5 | Multi-strike battlefield heatmap (σ maps) | `battlefield.py` | |
+| 4 | **Fair response model** | `fair_response.py` | ✅ shipped |
+| 4 | **Residual / deviation-of-deviation (slot-specific)** | `residual.py` | ✅ shipped |
+| 4 | **Spread & liquidity friendliness** | `spread.py` | ✅ shipped |
+| 5 | Multi-strike battlefield heatmap (σ maps) | `battlefield.py` | next |
 | 5 | IV / skew pressure state | `iv_state.py` | |
 | 6 | Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis) | `thesis_memory.py` | |
 | 7 | Winding-zone detector (4 types) | `winding.py` | |
@@ -73,6 +73,24 @@ behaving **normally**, or revealing **abnormal belief**?
   gamma_atm (≥0.40) / convex_otm (≥0.18) / lottery_otm (<0.18).
 - `detect_identity_anomaly` — the "ITM not behaving like ITM" tell:
   realized effective |Δ| matching a *different* slot's regime → flag.
+
+### Fair response + residual (Phase 4 — done)
+- `estimate_effective_delta`: rolling Cov(Δmark,Δspot)/Var(Δspot), shrunk
+  toward `slot.expected_signed_delta` by `n/(n+prior_strength)`, clipped to
+  the option's sign. Converges to the true delta, prior-carried when thin.
+- `fair_change = eff_delta · Δspot`; `residual = Δmark − fair_change`.
+- `deviation_of_deviation`: robust z of residual vs its own rolling
+  median ± IQR band (slot-specific), capped at ±8.
+- `acceptance` state: "defended" (residual persistently abnormally
+  positive — premium held above fair) / "rejected" (persistently abnormally
+  negative) / "normal". The ₹43/₹44 read at the residual level.
+
+### Spread friendliness (Phase 4 — done)
+- `spread_pct`, `spread_z` (vs the contract's own rolling normal),
+  `depth_score`, `friendliness` ∈ [0,1], and a state machine
+  (clean/widening/dangerous/improving). Elevated states gated on absolute
+  pct so a sub-tight-threshold wiggle can't false-trigger on robust-z.
+- `is_execution_friendly` gate: dangerous spread is never friendly.
 
 ### Winding zone (Phase 7 — design pinned, not built)
 Inside an unfinished candle/segment, `X` = reference, `Y+`/`Y-` =

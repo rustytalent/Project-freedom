@@ -40,6 +40,11 @@ See ROADMAP.md for the full build order and design notes.
 """
 from __future__ import annotations
 
+from .fair_response import (
+    FairResponseConfig,
+    estimate_effective_delta,
+    fair_response_frame,
+)
 from .mark_price import (
     MarkPrice,
     MarkPriceConfig,
@@ -55,17 +60,44 @@ from .moneyness import (
     expected_abs_delta,
     moneyness_behavior,
 )
+from .residual import (
+    ResidualConfig,
+    deviation_of_deviation,
+    slot_residual_frame,
+)
+from .spread import (
+    CLEAN,
+    DANGEROUS,
+    IMPROVING,
+    WIDENING,
+    SpreadConfig,
+    is_execution_friendly,
+    spread_friendliness_frame,
+)
 
 __all__ = [
+    "CLEAN",
+    "DANGEROUS",
+    "FairResponseConfig",
+    "IMPROVING",
     "MarkPrice",
     "MarkPriceConfig",
     "MarkPriceTracker",
     "MoneynessSlot",
     "Quote",
+    "ResidualConfig",
+    "SpreadConfig",
+    "WIDENING",
     "build_chain_slots",
     "classify_moneyness",
     "compute_mark",
     "detect_identity_anomaly",
+    "deviation_of_deviation",
+    "estimate_effective_delta",
     "expected_abs_delta",
+    "fair_response_frame",
+    "is_execution_friendly",
     "moneyness_behavior",
+    "slot_residual_frame",
+    "spread_friendliness_frame",
 ]
