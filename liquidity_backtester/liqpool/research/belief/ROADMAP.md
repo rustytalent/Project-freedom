@@ -49,8 +49,8 @@ behaving **normally**, or revealing **abnormal belief**?
 | 5 | **Multi-strike battlefield heatmap (σ maps)** | `battlefield.py` | ✅ shipped |
 | 5 | **IV / skew pressure state** | `iv_state.py` | ✅ shipped |
 | 6 | **Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis)** | `thesis_memory.py` | ✅ shipped |
-| 7 | Winding-zone detector (4 types) | `winding.py` | |
-| 7 | State machines (bull continuation / bear continuation / liquidity sweep) | `state_machines.py` | |
+| 7 | **Winding-zone detector (4 types)** | `winding.py` | ✅ shipped |
+| 7 | **State machines (bull continuation / bear continuation / liquidity sweep)** | `state_machines.py` | ✅ shipped |
 | 8 | Decision layer (avoid-trade + hold/exit + best strike) | `decision.py` | |
 | 8 | Engine orchestrator (streaming) | `engine.py` | |
 | 9 | Paper execution | | |
@@ -112,20 +112,34 @@ behaving **normally**, or revealing **abnormal belief**?
   vol_contraction → neutral. Data quality dominates direction: a clean
   bullish agreement on a dirty book is worthless.
 
-### Winding zone (Phase 7 — design pinned, not built)
-Inside an unfinished candle/segment, `X` = reference, `Y+`/`Y-` =
-excursions. When price reaches an excursion and pauses, that region is a
-*winding zone* — a temporary auction where premium decides
-continuation vs reversal. Four types:
-- **Bullish winding-up:** spot near upper range, CE strong, PE weak,
-  spread clean, multi-strike CE agreement, pullbacks don't damage CE →
-  likely continuation up.
-- **Bearish winding-down:** mirror → likely continuation down.
-- **Bull-trap winding:** spot near upper range but CE stops expanding, PE
-  refuses to fall, spread worsens, CE residual fades → up move may fail,
-  PE scalp.
-- **Bear-trap winding:** mirror → CE scalp.
-This is the entry/exit subsystem for scalping.
+### Winding zone (Phase 7 — done)
+- `WindingDetector.observe(last_price, battlefield, iv_state, spread_friendly)`
+  tracks recent excursions and emits one of four zone labels plus a
+  scalp direction.
+- A `pause_zscore` gate (second-half drift / band width) ensures fast
+  one-way moves are NOT yet winding; only paused excursions qualify.
+- BULLISH_WINDING_UP: upper excursion paused + battlefield bullish + IV
+  bull + clean spread → scalp CE (continuation up).
+- BULL_TRAP_WINDING: upper excursion paused but battlefield bearish /
+  vol_expansion / single_distortion OR spread bad → scalp PE.
+- Mirror for BEARISH_WINDING_DOWN and BEAR_TRAP_WINDING at the lower
+  excursion. NO_WINDING when neither excursion is paused or inputs are
+  ambiguous.
+
+### State machines (Phase 7 — done)
+Three independent stateful walkers, each tracking a numbered narrative
+the founder specified:
+- `BullContinuationMachine` walks 0 → 1 (impulse forming) → 2 (confirmed)
+  → 3 (pullback test) → 4 (pullback survived) → 5 (winding up) →
+  6 (continuation trigger), with 7 (damaged) / 8 (invalidated) escape
+  states. REGIME_BREAK_DOWN or STRONG_BULL_TRAP cuts to 8 immediately;
+  battlefield turning bearish cuts to 7 (recoverable).
+- `BearContinuationMachine` mirror with bounce_test / bounce_failed.
+- `LiquiditySweepMachine` walks 0 → 1 (local extreme taken by hunt
+  verdict) → 2 (opposite premium fails) → 3 (same-side survives) →
+  4 (spread normalises) → 5 (reversal trigger). Auto-aborts if a state
+  doesn't progress within `_max_bars`. Output tells operator "take CE"
+  or "take PE" on state 5.
 
 ### Thesis memory hysteresis (Phase 6 — done)
 - Five scores in [0,100]: bull_thesis, bear_thesis, vol_expansion,
