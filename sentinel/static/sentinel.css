@@ -533,6 +533,104 @@ kbd{
   font-size: var(--t-xl);
   font-weight: 600;
 }
+.slot-heatmap{
+  display: grid;
+  grid-template-columns: 48px repeat(var(--slot-cols, 11), minmax(58px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.slot-rail{ display: contents; }
+.slot-side,
+.slot-level-head{
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-2);
+  color: var(--muted);
+  font: 600 var(--t-xs)/1 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.slot-side{
+  background: var(--bg-0);
+  color: var(--fg-soft);
+}
+.slot-side.muted{ color: var(--dim); }
+.slot-cell{
+  min-height: 76px;
+  padding: 7px;
+  background: var(--bg-0);
+  border: 1px solid transparent;
+  overflow: hidden;
+}
+.slot-cell.quiet{ background: #0d0f12; }
+.slot-cell.pos{ background: rgba(106,153,113,.095); }
+.slot-cell.neg{ background: rgba(184,94,82,.095); }
+.slot-cell.hot-pos{
+  background: linear-gradient(180deg, rgba(106,153,113,.25), rgba(106,153,113,.08));
+  border-color: rgba(106,153,113,.45);
+}
+.slot-cell.hot-neg{
+  background: linear-gradient(180deg, rgba(184,94,82,.25), rgba(184,94,82,.08));
+  border-color: rgba(184,94,82,.45);
+}
+.slot-cell.warn{
+  background: rgba(212,162,89,.075);
+  border-color: rgba(212,162,89,.28);
+}
+.slot-cell.bad{
+  background: rgba(184,94,82,.13);
+  border-color: rgba(184,94,82,.45);
+}
+.slot-cell.abnormal{ box-shadow: inset 0 0 0 1px rgba(212,162,89,.72); }
+.slot-cell.missing{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
+  font-size: var(--t-xs);
+}
+.slot-top{
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--fg-soft);
+  font: 600 var(--t-xs)/1.1 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+}
+.slot-top span{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slot-accept{
+  margin-top: 8px;
+  color: var(--fg);
+  font-size: var(--t-md);
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+.slot-meta{
+  margin-top: 7px;
+  color: var(--dim);
+  font: var(--t-xs)/1.2 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.slot-legend{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+.slot-legend b{
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--fg);
+}
 .belief-chart{
   min-height: 190px;
 }
@@ -583,6 +681,10 @@ kbd{
   .belief-kpis { grid-template-columns: repeat(2, 1fr) !important; }
   .phase-grid { grid-template-columns: repeat(2, 1fr) !important; }
   .rail-grid { grid-template-columns: 1fr !important; }
+  .slot-heatmap {
+    grid-template-columns: 44px repeat(var(--slot-cols, 11), minmax(52px, 1fr));
+    overflow-x: auto;
+  }
   .shell { padding: var(--s-2); }
   .cells { grid-template-columns: repeat(2, 1fr) !important; }
   .topbar { height: auto; padding: var(--s-2) var(--s-3); flex-wrap: wrap; gap: var(--s-2); }

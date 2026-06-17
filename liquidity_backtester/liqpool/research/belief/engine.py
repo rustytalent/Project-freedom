@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 from typing import Any, Deque, Dict, List, Optional
 
 import pandas as pd
@@ -47,7 +48,7 @@ from .decision import (
 )
 from .fair_response import FairResponseConfig
 from .iv_state import IVState, IVStateConfig, classify_iv_state, IV_DIRTY_DATA
-from .mark_price import MarkPriceConfig, MarkPriceTracker, Quote
+from .mark_price import MarkPrice, MarkPriceConfig, MarkPriceTracker, Quote
 from .moneyness import MoneynessSlot, classify_moneyness
 from .residual import ResidualConfig, slot_residual_frame
 from .spread import SpreadConfig, spread_friendliness_frame, CLEAN as SPREAD_CLEAN
@@ -69,6 +70,54 @@ from .winding import WindingConfig, WindingDetector, WindingZone
 # Per-contract rolling history cap. The Phase-4 residual + spread modules
 # need ~60-bar windows; we keep ~3x that so freshly-rolled stats are stable.
 _HISTORY_BARS: int = 240
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    """Return a JSON-safe float, preserving missing/non-finite values as None."""
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _slot_reading_payload(
+    reading: SlotReading,
+    *,
+    mark: Optional[MarkPrice],
+    spread_state: str,
+) -> Dict[str, Any]:
+    """Compact Phase-4 slot row for Sentinel's 22-cell CE/PE heatmap.
+
+    The aggregate battlefield tells us what the rails think. This row keeps
+    the individual slot evidence that produced that aggregate verdict, including
+    the mark source and quality so the cockpit can distinguish real pressure
+    from dirty quote artifacts.
+    """
+    slot = reading.slot
+    return {
+        "strike": _finite_float(slot.strike),
+        "option_type": slot.option_type,
+        "moneyness_label": slot.label,
+        "label": slot.label,
+        "level": int(slot.level),
+        "behavior": slot.behavior,
+        "expected_abs_delta": _finite_float(slot.expected_abs_delta),
+        "expected_signed_delta": _finite_float(slot.expected_signed_delta),
+        "mark_source": mark.source if mark is not None else "unknown",
+        "mark_quality": _finite_float(mark.quality) if mark is not None else None,
+        "mark_quality_label": mark.quality_label if mark is not None else "unknown",
+        "mark_price": _finite_float(mark.price) if mark is not None else None,
+        "mark_spread": _finite_float(mark.spread) if mark is not None else None,
+        "mark_spread_pct": _finite_float(mark.spread_pct) if mark is not None else None,
+        "ltp_confirms": bool(mark.ltp_confirms) if mark is not None else False,
+        "mark_flags": list(mark.flags) if mark is not None else [],
+        "friendliness": _finite_float(reading.friendliness),
+        "spread_state": spread_state,
+        "acceptance": reading.acceptance,
+        "dod_z": _finite_float(reading.dod_z),
+        "is_abnormal": bool(reading.is_abnormal),
+    }
 
 
 @dataclass
@@ -103,6 +152,7 @@ class BeliefSnapshot:
     bear_state: StateUpdate
     sweep_state: StateUpdate
     decision: Decision
+    slot_readings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -118,6 +168,7 @@ class BeliefSnapshot:
             "bear_state": self.bear_state.to_dict(),
             "sweep_state": self.sweep_state.to_dict(),
             "decision": self.decision.to_dict(),
+            "slot_readings": list(self.slot_readings),
         }
 
 
@@ -224,9 +275,11 @@ class BeliefEngine:
         clean_count = 0
         total = max(1, len(quotes))
         marks: Dict[Any, float] = {}
+        mark_details: Dict[Any, MarkPrice] = {}
         for key, q in quotes.items():
             m = self._mark_tracker.update(key, q)
             marks[key] = m.price
+            mark_details[key] = m
             if m.source in ("microprice", "mid"):
                 clean_count += 1
         clean_fraction = clean_count / total
@@ -252,6 +305,7 @@ class BeliefEngine:
         # rolling history (only when enough bars exist; otherwise default
         # to dod_z=0, normal acceptance, full friendliness).
         readings: List[SlotReading] = []
+        slot_readings: List[Dict[str, Any]] = []
         friendliness_acc = 0.0
         spread_state_counts: Dict[str, int] = {}
         for key, hist in self._hist.items():
@@ -260,9 +314,15 @@ class BeliefEngine:
                 continue
             df = hist.to_frame()
             if len(df) < max(cfg.fair_cfg.delta_window, cfg.resid_cfg.band_window) + 4:
-                readings.append(SlotReading(
+                reading = SlotReading(
                     slot=slot, dod_z=0.0, is_abnormal=False,
                     friendliness=1.0, acceptance="normal",
+                )
+                readings.append(reading)
+                slot_readings.append(_slot_reading_payload(
+                    reading,
+                    mark=mark_details.get(key),
+                    spread_state=SPREAD_CLEAN,
                 ))
                 friendliness_acc += 1.0
                 spread_state_counts[SPREAD_CLEAN] = spread_state_counts.get(SPREAD_CLEAN, 0) + 1
@@ -277,11 +337,17 @@ class BeliefEngine:
             except Exception:
                 last_resid = {"dod_z": 0.0, "is_abnormal": False, "acceptance": "normal"}
                 friend = 1.0; sstate = SPREAD_CLEAN
-            readings.append(SlotReading(
+            reading = SlotReading(
                 slot=slot, dod_z=float(last_resid["dod_z"]),
                 is_abnormal=bool(last_resid["is_abnormal"]),
                 friendliness=friend,
                 acceptance=str(last_resid["acceptance"]),
+            )
+            readings.append(reading)
+            slot_readings.append(_slot_reading_payload(
+                reading,
+                mark=mark_details.get(key),
+                spread_state=sstate,
             ))
             friendliness_acc += friend
             spread_state_counts[sstate] = spread_state_counts.get(sstate, 0) + 1
@@ -351,4 +417,12 @@ class BeliefEngine:
             thesis=thesis, iv_state=iv, battlefield=bf,
             winding=winding, bull_state=bull_state, bear_state=bear_state,
             sweep_state=sweep_state, decision=decision,
+            slot_readings=sorted(
+                slot_readings,
+                key=lambda r: (
+                    str(r.get("option_type") or ""),
+                    int(r.get("level") or 0),
+                    float(r.get("strike") or 0.0),
+                ),
+            ),
         )

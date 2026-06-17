@@ -1672,6 +1672,7 @@ def premium_belief(limit: int = 80) -> JSONResponse:
     latest = rows[0]
     snap = _belief_snapshot(latest)
     extras = latest.get("extras") or {}
+    slot_readings = snap.get("slot_readings") or []
     chronological = list(reversed(rows))
     series = []
     for row in chronological:
@@ -1724,12 +1725,15 @@ def premium_belief(limit: int = 80) -> JSONResponse:
         "phases": _belief_phase_cards(latest),
         "series": series,
         "contracts": extras.get("contracts") or [],
+        "slot_readings": slot_readings,
+        "slot_reading_count": len(slot_readings),
         "stream": extras.get("streaming_divergence") or {},
         "raw_snapshot": snap,
         "refresh_seconds": 1,
         "data_contract": {
             "mode": "quote_polling",
             "truth_source": "Kite quote depth microprice when clean, mid fallback, fresh LTP fallback",
+            "slot_readings": "Phase-4 per-strike CE/PE rows: strike, option type, moneyness, behavior, mark source, friendliness, acceptance, DOD z, abnormal flag",
             "orders": "shadow_only",
         },
     })

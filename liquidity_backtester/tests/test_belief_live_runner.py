@@ -79,6 +79,21 @@ def test_make_live_row_is_sentinel_model_signal_compatible():
     assert row["asset"] == "NIFTY"
     assert row["trust_tier"] == "SHADOW"
     assert row["extras"]["belief_snapshot"]["decision"]["action"]
+    slot_readings = row["extras"]["belief_snapshot"]["slot_readings"]
+    assert len(slot_readings) == 2
+    assert {
+        "strike",
+        "option_type",
+        "moneyness_label",
+        "level",
+        "behavior",
+        "mark_source",
+        "friendliness",
+        "acceptance",
+        "dod_z",
+        "is_abnormal",
+    }.issubset(slot_readings[0])
+    assert slot_readings[0]["mark_source"] in {"microprice", "mid", "last_valid", "ltp", "invalid"}
 
 
 def test_demo_runner_writes_sentinel_compatible_jsonl(tmp_path):
@@ -95,3 +110,4 @@ def test_demo_runner_writes_sentinel_compatible_jsonl(tmp_path):
     assert len(rows) == 3
     assert "premium_belief_engine" in rows[-1]
     assert "belief_snapshot" in rows[-1]
+    assert "slot_readings" in rows[-1]

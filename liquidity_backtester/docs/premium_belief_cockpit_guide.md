@@ -305,28 +305,43 @@ nearest-expiry contracts the engine is reading.
 
 This is for debugging. It exposes the exact JSON snapshot that Sentinel received.
 
-## What Is Still Missing
+## Phase-4 Slot Heatmap Contract
 
-The cockpit can now display the full aggregate engine output, but the runner does
-not yet serialize every per-strike Phase 4 slot reading into the JSON snapshot.
-That means the cockpit cannot yet render a true 22-cell CE/PE heatmap per strike.
+The cockpit now receives a compact `slot_readings` array from
+`BeliefSnapshot.to_dict()`. Each row is one CE or PE moneyness slot and is the
+atomic evidence behind the aggregate battlefield rails.
 
-The next data-contract upgrade should add a compact `slot_readings` array to
-`BeliefSnapshot.to_dict()` with:
+Each slot row includes:
 
-- strike,
-- option type,
-- moneyness label,
-- level,
-- behavior,
-- mark source,
-- friendliness,
-- acceptance,
-- DOD z,
-- abnormal flag.
+- `strike`,
+- `option_type`,
+- `moneyness_label`,
+- `level`,
+- `behavior`,
+- `expected_abs_delta` and `expected_signed_delta`,
+- `mark_source`,
+- `mark_quality` and `mark_quality_label`,
+- `mark_price`, `mark_spread`, and `mark_spread_pct`,
+- `ltp_confirms` and `mark_flags`,
+- `friendliness`,
+- `spread_state`,
+- `acceptance`,
+- `dod_z`,
+- `is_abnormal`.
 
-Once that exists, the Sentinel tab can render a real battlefield heatmap instead
-of only CE and PE rail summaries.
+Sentinel also exposes the same array at the top level of `/api/premium_belief`
+as `slot_readings`, so the UI does not need to dig into `raw_snapshot`.
+
+### Reading The Heatmap
+
+Green cells mean premium is defending above the fair-response path. Red cells
+mean premium is rejecting below the fair-response path. Amber or dim cells mean
+the read is contaminated by mark quality or spread friendliness and should be
+treated as weaker evidence. An outlined cell means the slot crossed the
+abnormality threshold.
+
+This is the first cockpit surface that lets the operator see whether the rail
+verdict is broad agreement across the chain or just one noisy contract.
 
 ## Practical Operating Rules
 

@@ -260,6 +260,13 @@
         </div>
 
         <div class="panel">
+          <div class="head"><span class="title">Strike heatmap</span><span class="right hint" id="be_slot_count">0 cells</span></div>
+          <div class="body" id="be_slot_heatmap">
+            <div class="dim-text">Phase-4 CE/PE slot readings will appear after the next belief tick.</div>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="head"><span class="title">Thesis memory</span><span class="right hint">hysteresis scores</span></div>
           <div class="body" id="be_thesis">
             <div class="dim-text">Waiting for thesis memory.</div>
@@ -906,6 +913,70 @@ function beRail(name, rail){
     <div class="hint" style="margin-top:8px">epicenter <span class="mono">${esc(rail.epicenter_label || "NA")}</span> · level <span class="mono">${esc(rail.epicenter_level ?? "NA")}</span></div>
   </div>`;
 }
+function beSlotTone(row){
+  const z = Number(row?.dod_z || 0);
+  const friendly = Number(row?.friendliness ?? 1);
+  const source = String(row?.mark_source || "");
+  if(source === "invalid" || friendly < 0.25) return "bad";
+  if(row?.is_abnormal && z > 0) return "hot-pos";
+  if(row?.is_abnormal && z < 0) return "hot-neg";
+  if(z > 0.75) return "pos";
+  if(z < -0.75) return "neg";
+  if(source === "last_valid" || source === "ltp" || friendly < 0.45) return "warn";
+  return "quiet";
+}
+function beSlotCell(row){
+  const z = Number(row?.dod_z || 0);
+  const friendly = Number(row?.friendliness ?? 0);
+  const q = Number(row?.mark_quality ?? 0);
+  const spreadPct = Number(row?.mark_spread_pct ?? 0);
+  const tone = beSlotTone(row);
+  const flags = Array.isArray(row?.mark_flags) ? row.mark_flags.join(", ") : "";
+  const title = [
+    `${row?.label || row?.moneyness_label || "slot"} strike ${row?.strike ?? "NA"}`,
+    `behavior=${row?.behavior || "NA"}`,
+    `mark=${row?.mark_source || "unknown"} q=${q.toFixed(2)}`,
+    `friendly=${friendly.toFixed(2)} spread=${Number.isFinite(spreadPct) ? (spreadPct*100).toFixed(2)+"%" : "NA"}`,
+    `acceptance=${row?.acceptance || "normal"} dod_z=${z.toFixed(2)}`,
+    flags ? `flags=${flags}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<div class="slot-cell ${tone} ${row?.is_abnormal ? "abnormal" : ""}" title="${esc(title)}">
+    <div class="slot-top"><span>${esc(row?.moneyness_label || row?.label || "NA")}</span><b class="${cls(z)}">${signed(z)}</b></div>
+    <div class="slot-accept">${esc(row?.acceptance || "normal")}</div>
+    <div class="slot-meta">${esc(row?.mark_source || "unknown")} · F ${friendly.toFixed(2)}</div>
+  </div>`;
+}
+function renderBeliefSlotHeatmap(rows){
+  const count = Array.isArray(rows) ? rows.length : 0;
+  document.getElementById("be_slot_count").textContent = `${count} cells`;
+  const el = document.getElementById("be_slot_heatmap");
+  if(!count){
+    el.innerHTML = `<div class="dim-text">No slot_readings found in this row. Restart the Premium Belief runner after pulling the latest code.</div>`;
+    return;
+  }
+  const levels = [...new Set(rows.map(r=>Number(r.level)).filter(Number.isFinite))].sort((a,b)=>a-b);
+  const bySide = side => levels.map(level => rows.find(r => String(r.option_type).toUpperCase() === side && Number(r.level) === level));
+  const levelHead = levels.map(l=>`<div class="slot-level-head">${l === 0 ? "ATM" : (l < 0 ? `ITM${Math.abs(l)}` : `OTM${l}`)}</div>`).join("");
+  const rail = side => `<div class="slot-rail" style="--slot-cols:${levels.length}">
+    <div class="slot-side ${side === "CE" ? "pos" : "neg"}">${side}</div>
+    ${bySide(side).map(r => r ? beSlotCell(r) : `<div class="slot-cell missing">missing</div>`).join("")}
+  </div>`;
+  const abnormal = rows.filter(r=>r.is_abnormal).length;
+  const dirty = rows.filter(r=>["invalid","last_valid","ltp"].includes(String(r.mark_source))).length;
+  el.innerHTML = `
+    <div class="slot-heatmap" style="--slot-cols:${levels.length}">
+      <div class="slot-side muted">side</div>
+      ${levelHead}
+      ${rail("CE")}
+      ${rail("PE")}
+    </div>
+    <div class="slot-legend">
+      <span><b class="pos">green</b> premium defended/stronger than fair</span>
+      <span><b class="neg">red</b> premium rejected/weaker than fair</span>
+      <span><b class="warn">amber</b> dirty mark or unfriendly spread</span>
+      <span><b>${abnormal}</b> abnormal cells · <b>${dirty}</b> dirty-source cells</span>
+    </div>`;
+}
 function renderBelief(payload){
   BE_LAST = payload;
   const status = document.getElementById("be_status");
@@ -931,6 +1002,7 @@ function renderBelief(payload){
   const conf = Number(d.confidence ?? latest.confidence ?? 0);
   const spot = Number(snap.spot || latest?.extras?.spot || 0);
   const dataContract = payload.data_contract || {};
+  const slotReadings = payload.slot_readings || snap.slot_readings || [];
   const rowKey = `${latest.ts_ist || snap.ts || ""}|${snap.bars_seen ?? ""}|${spot.toFixed(2)}`;
   const nowMs = Date.now();
   if(rowKey !== BE_LAST_ROW_KEY){
@@ -984,6 +1056,7 @@ function renderBelief(payload){
       ${beRail("PE", b.pe_rail)}
     </div>
     <div class="note">${esc(b.note || "No battlefield note.")}</div>`;
+  renderBeliefSlotHeatmap(slotReadings);
 
   document.getElementById("be_thesis").innerHTML = `
     <div class="row-flex" style="justify-content:space-between;margin-bottom:10px">
