@@ -51,8 +51,8 @@ behaving **normally**, or revealing **abnormal belief**?
 | 6 | **Thesis memory (bull/bear/vol/liquidity/no-trade + hysteresis)** | `thesis_memory.py` | ✅ shipped |
 | 7 | **Winding-zone detector (4 types)** | `winding.py` | ✅ shipped |
 | 7 | **State machines (bull continuation / bear continuation / liquidity sweep)** | `state_machines.py` | ✅ shipped |
-| 8 | Decision layer (avoid-trade + hold/exit + best strike) | `decision.py` | |
-| 8 | Engine orchestrator (streaming) | `engine.py` | |
+| 8 | **Decision layer (avoid-trade + hold/exit + best strike)** | `decision.py` | ✅ shipped |
+| 8 | **Engine orchestrator (streaming)** | `engine.py` | ✅ shipped |
 | 9 | Paper execution | | |
 | 10 | Tiny live execution | | |
 
@@ -159,6 +159,23 @@ the founder specified:
 - NO_TRADE_DANGER overrides direction: any composite of liquidity_danger
   and vol_expansion/2 above the danger threshold blocks new entries
   regardless of how high bull_thesis is.
+
+### Decision layer + engine (Phase 8 — done)
+- `decide(...)` precedence: dirty data / liquidity distortion / no-trade
+  danger / common shock / single distortion → exit (state 8 or thesis
+  EXIT_*) → trap-winding scalps → BULL_ENTRY / BEAR_ENTRY → state-6
+  continuation → sweep state-5 reversal → HOLD → WAIT. Each Decision
+  carries: action, trade_allowed, direction, confidence,
+  StrikeRecommendation (ATM CE / ATM PE for directional; configurable
+  for scalps), thesis_state, invalidation_rule, exit_rule,
+  no_trade_reason, spread_friendliness, notes.
+- `BeliefEngine` is the live tick handler: per-contract MarkPriceTracker
+  (Phase 2), per-contract rolling history (240 bars cap), 22-slot
+  moneyness identity that rebuilds on ATM drift, per-slot Phase-4 reads
+  on each tick, Phase-5 battlefield + IV state, Phase-6 thesis memory,
+  Phase-7 winding + 3 state machines, Phase-8 decide(). Warmup gate
+  (default 80 bars) refuses to act until rolling stats are stable.
+  Reset clears the whole stack.
 
 ### Honest scope
 - Strong: bad-trade avoidance, fake-pullback holding, exit improvement,

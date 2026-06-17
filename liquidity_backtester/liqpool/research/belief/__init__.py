@@ -40,6 +40,25 @@ See ROADMAP.md for the full build order and design notes.
 """
 from __future__ import annotations
 
+from .decision import (
+    ACTION_ENTER_LONG,
+    ACTION_ENTER_SHORT,
+    ACTION_EXIT,
+    ACTION_HOLD,
+    ACTION_NO_TRADE,
+    ACTION_SCALP_CALL,
+    ACTION_SCALP_PUT,
+    ACTION_WAIT,
+    Decision,
+    DecisionConfig,
+    StrikeRecommendation,
+    decide,
+)
+from .engine import (
+    BeliefEngine,
+    BeliefEngineConfig,
+    BeliefSnapshot,
+)
 from .battlefield import (
     BattlefieldConfig,
     BattlefieldSnapshot,
@@ -138,6 +157,14 @@ from .winding import (
 )
 
 __all__ = [
+    "ACTION_ENTER_LONG",
+    "ACTION_ENTER_SHORT",
+    "ACTION_EXIT",
+    "ACTION_HOLD",
+    "ACTION_NO_TRADE",
+    "ACTION_SCALP_CALL",
+    "ACTION_SCALP_PUT",
+    "ACTION_WAIT",
     "BEARISH_WINDING_DOWN",
     "BEAR_ENTRY",
     "BEAR_TRAP_WINDING",
@@ -147,8 +174,13 @@ __all__ = [
     "BattlefieldConfig",
     "BattlefieldSnapshot",
     "BearContinuationMachine",
+    "BeliefEngine",
+    "BeliefEngineConfig",
+    "BeliefSnapshot",
     "BullContinuationMachine",
     "CLEAN",
+    "Decision",
+    "DecisionConfig",
     "DANGEROUS",
     "EXIT_BEAR",
     "EXIT_BULL",
@@ -192,6 +224,7 @@ __all__ = [
     "SlotReading",
     "SpreadConfig",
     "StateUpdate",
+    "StrikeRecommendation",
     "ThesisMemory",
     "ThesisMemoryConfig",
     "ThesisSnapshot",
@@ -204,6 +237,7 @@ __all__ = [
     "classify_iv_state",
     "classify_moneyness",
     "compute_mark",
+    "decide",
     "detect_identity_anomaly",
     "deviation_of_deviation",
     "estimate_effective_delta",
