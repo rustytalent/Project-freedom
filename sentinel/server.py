@@ -1413,6 +1413,191 @@ def live_signals(asset: Optional[str] = None) -> JSONResponse:
     })
 
 
+def _belief_signal_rows(limit: int = 80) -> List[Dict[str, Any]]:
+    """Latest Premium Belief rows from the live model bus.
+
+    The live runner publishes the whole 8-phase engine snapshot under
+    extras.belief_snapshot. Sentinel keeps it generic on the bus, then this
+    endpoint projects it into a belief-specific cockpit payload.
+    """
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    candidates = [
+        s.to_row()
+        for s in CORE.publisher.history(limit=limit)
+        if s.model == "premium_belief_engine"
+    ]
+    candidates.extend(
+        s.to_row()
+        for s in CORE.publisher.current().values()
+        if s.model == "premium_belief_engine"
+    )
+    for row in candidates:
+        key = json.dumps([
+            row.get("ts_ist"),
+            row.get("asset"),
+            row.get("model"),
+            (row.get("extras") or {}).get("spot"),
+            row.get("signal"),
+            row.get("confidence"),
+        ], sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    rows.sort(key=lambda r: str(r.get("ts_ist") or ""), reverse=True)
+    return rows[:limit]
+
+
+def _belief_num(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _belief_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
+    extras = row.get("extras") or {}
+    snap = extras.get("belief_snapshot") or {}
+    return snap if isinstance(snap, dict) else {}
+
+
+def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    snap = _belief_snapshot(row)
+    extras = row.get("extras") or {}
+    decision = snap.get("decision") or {}
+    thesis = snap.get("thesis") or {}
+    iv = snap.get("iv_state") or {}
+    battlefield = snap.get("battlefield") or {}
+    ce = (battlefield.get("ce_rail") or {})
+    pe = (battlefield.get("pe_rail") or {})
+    winding = snap.get("winding") or {}
+    bull = snap.get("bull_state") or {}
+    bear = snap.get("bear_state") or {}
+    sweep = snap.get("sweep_state") or {}
+    contracts = extras.get("contracts") or []
+    strike = decision.get("strike") or {}
+
+    return [
+        {
+            "phase": "Phase 1",
+            "title": "Logging + Live Bus",
+            "state": "row received",
+            "primary": f"{row.get('asset', 'NIFTY')} @ {row.get('ts_ist') or snap.get('ts') or 'NA'}",
+            "secondary": f"model {row.get('model', 'premium_belief_engine')}",
+            "health": "ok",
+        },
+        {
+            "phase": "Phase 2",
+            "title": "Mark Price + Data Quality",
+            "state": iv.get("state", "NA"),
+            "primary": f"clean marks {_belief_num(iv.get('clean_mark_fraction')):.0%}",
+            "secondary": f"spread friendliness {_belief_num(decision.get('spread_friendliness')):.0%}",
+            "health": "bad" if iv.get("state") in {"dirty_data", "liquidity_distortion"} else "ok",
+        },
+        {
+            "phase": "Phase 3",
+            "title": "Moneyness Identity",
+            "state": strike.get("label") or "NA",
+            "primary": f"{len(contracts)} selected contracts",
+            "secondary": f"side {strike.get('side') or 'NA'} level {strike.get('level', 'NA')}",
+            "health": "ok" if contracts else "warn",
+        },
+        {
+            "phase": "Phase 4",
+            "title": "Residual + Spread Read",
+            "state": "slot response",
+            "primary": f"CE z {_belief_num(ce.get('weighted_mean_signed_z')):+.2f} / PE z {_belief_num(pe.get('weighted_mean_signed_z')):+.2f}",
+            "secondary": f"CE disp {_belief_num(ce.get('dispersion_score')):.2f} / PE disp {_belief_num(pe.get('dispersion_score')):.2f}",
+            "health": "warn" if max(_belief_num(ce.get("dispersion_score")), _belief_num(pe.get("dispersion_score"))) > 0.65 else "ok",
+        },
+        {
+            "phase": "Phase 5",
+            "title": "Battlefield + IV State",
+            "state": battlefield.get("verdict", "NA"),
+            "primary": f"field conf {_belief_num(battlefield.get('confidence')):.0%}",
+            "secondary": f"IV {iv.get('state', 'NA')} dir {iv.get('direction', 'NA')} conf {_belief_num(iv.get('confidence')):.0%}",
+            "health": "bad" if battlefield.get("verdict") == "single_distortion" else "ok",
+        },
+        {
+            "phase": "Phase 6",
+            "title": "Thesis Memory",
+            "state": thesis.get("composite_state", "NA"),
+            "primary": f"bull {_belief_num(thesis.get('bull_thesis_score')):.1f} / bear {_belief_num(thesis.get('bear_thesis_score')):.1f}",
+            "secondary": f"danger {_belief_num(thesis.get('no_trade_score')):.1f} held {thesis.get('held_direction', 0)}",
+            "health": "bad" if thesis.get("composite_state") == "NO_TRADE_DANGER" else "ok",
+        },
+        {
+            "phase": "Phase 7",
+            "title": "Winding + State Machines",
+            "state": winding.get("zone", "NA"),
+            "primary": f"winding conf {_belief_num(winding.get('confidence')):.0%}",
+            "secondary": f"bull {bull.get('state_index', 'NA')} / bear {bear.get('state_index', 'NA')} / sweep {sweep.get('state_index', 'NA')}",
+            "health": "ok",
+        },
+        {
+            "phase": "Phase 8",
+            "title": "Decision Layer",
+            "state": decision.get("action", row.get("signal", "NA")),
+            "primary": f"allowed {decision.get('trade_allowed')} conf {_belief_num(decision.get('confidence')):.0%}",
+            "secondary": f"dir {decision.get('direction', 0)} strike {strike.get('label') or 'NA'}",
+            "health": "ok" if decision.get("trade_allowed") else "warn",
+        },
+    ]
+
+
+@app.get("/api/premium_belief", dependencies=[Depends(auth)])
+def premium_belief(limit: int = 80) -> JSONResponse:
+    """Dedicated Premium Belief cockpit payload.
+
+    This is intentionally separate from /api/live/signals. The generic bus
+    still carries rows, but this endpoint understands the belief engine's
+    8-phase shape and returns chart-friendly projections.
+    """
+    rows = _belief_signal_rows(limit=max(1, min(limit, 200)))
+    if not rows:
+        return JSONResponse({
+            "status": "no_signal",
+            "message": "No Premium Belief Engine rows have reached Sentinel yet.",
+            "latest": None,
+            "history": [],
+            "phases": [],
+            "series": [],
+            "contracts": [],
+            "raw_snapshot": {},
+        })
+
+    latest = rows[0]
+    snap = _belief_snapshot(latest)
+    extras = latest.get("extras") or {}
+    chronological = list(reversed(rows))
+    series = []
+    for row in chronological:
+        s = _belief_snapshot(row)
+        d = s.get("decision") or {}
+        t = s.get("thesis") or {}
+        series.append({
+            "ts_ist": row.get("ts_ist"),
+            "spot": _belief_num(s.get("spot") or (row.get("extras") or {}).get("spot")),
+            "confidence": _belief_num(d.get("confidence") or row.get("confidence")),
+            "bull": _belief_num(t.get("bull_thesis_score")),
+            "bear": _belief_num(t.get("bear_thesis_score")),
+            "danger": _belief_num(t.get("no_trade_score")),
+            "action": d.get("action") or row.get("signal"),
+        })
+
+    return JSONResponse({
+        "status": "ok",
+        "latest": latest,
+        "history": rows,
+        "phases": _belief_phase_cards(latest),
+        "series": series,
+        "contracts": extras.get("contracts") or [],
+        "stream": extras.get("streaming_divergence") or {},
+        "raw_snapshot": snap,
+    })
+
+
 @app.get("/api/whatif", dependencies=[Depends(auth)])
 def whatif(move_points: float = 0.0) -> JSONResponse:
     return JSONResponse({"move_points": move_points,

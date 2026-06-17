@@ -39,6 +39,7 @@
   <div class="tab" data-v="stress" onclick="tab('stress')">Crisis Stress</div>
   <div class="tab" data-v="risk" onclick="tab('risk')">Risk · VaR &amp; Vol Cone</div>
   <div class="tab" data-v="equity" onclick="tab('equity')">Equity Context</div>
+  <div class="tab" data-v="belief" onclick="tab('belief')">Premium Belief</div>
 </div>
 
 <main class="shell">
@@ -195,6 +196,76 @@
       <div class="note">Heavyweights carry ~50% of the index. A flat NIFTY with RELIANCE +2% is a HIDDEN_BULL — index masks dispersion.</div>
     </div>
   </section>
+
+  <!-- ───────────── PREMIUM BELIEF ENGINE ───────────── -->
+  <section class="view" id="v_belief">
+    <div class="grid" style="grid-template-columns:1.05fr .95fr">
+      <div class="col">
+        <div class="panel">
+          <div class="head">
+            <span class="title">Premium Belief Engine</span>
+            <div class="right row-flex">
+              <span class="hint" id="be_status">waiting for live rows</span>
+              <button class="btn sm primary" onclick="refreshBelief()">Refresh</button>
+            </div>
+          </div>
+          <div class="body" id="be_top">
+            <div class="dim-text">Start <span class="mono">scripts/run_belief_live.py</span> with the same <span class="mono">SENTINEL_JOURNAL_DIR</span>. The full 8-phase engine will render here once rows arrive.</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="title">8-phase engine map</span><span class="right hint">live snapshot</span></div>
+          <div class="body">
+            <div id="be_phases" class="phase-grid">
+              <div class="dim-text">No Premium Belief snapshot received yet.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="title">Battlefield rails</span><span class="right hint">CE / PE residual structure</span></div>
+          <div class="body" id="be_rails">
+            <div class="dim-text">Rail summaries will appear after the next belief tick.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel">
+          <div class="head"><span class="title">Thesis memory</span><span class="right hint">hysteresis scores</span></div>
+          <div class="body" id="be_thesis">
+            <div class="dim-text">Waiting for thesis memory.</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="title">Live trace</span><span class="right hint">spot + confidence</span></div>
+          <div class="body">
+            <div class="chart-wrap" id="be_trace_wrap">
+              <svg id="be_trace" width="100%" height="180" viewBox="0 0 700 180" preserveAspectRatio="none"></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="title">Selected contracts</span><span class="right hint" id="be_contract_count">0</span></div>
+          <div class="body flush">
+            <table class="dense" id="be_contracts"><thead><tr>
+              <th>Symbol</th><th>Side</th><th>Strike</th><th>Expiry</th>
+            </tr></thead><tbody><tr class="empty"><td colspan="4">no contracts</td></tr></tbody></table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="head"><span class="title">Raw snapshot</span><span class="right hint">debug contract</span></div>
+          <div class="body">
+            <pre id="be_raw" class="json-box">{}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <!-- ───────────── STATUS BAR ───────────── -->
@@ -205,7 +276,7 @@
   <span class="sep"></span>
   <span>tab <span id="sb_tab" class="mono">audit</span></span>
   <div class="right">
-    <kbd>⌘</kbd><kbd>K</kbd> command · <kbd>1</kbd>—<kbd>5</kbd> tabs
+    <kbd>⌘</kbd><kbd>K</kbd> command · <kbd>1</kbd>—<kbd>6</kbd> tabs
   </div>
 </div>
 
@@ -256,6 +327,7 @@ function tab(v){
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on", t.dataset.v===v));
   document.querySelectorAll(".view").forEach(s=>s.classList.toggle("on", s.id==="v_"+v));
   document.getElementById("sb_tab").textContent = v;
+  if(v === "belief") refreshBelief();
 }
 async function setPlan(v){
   plan=v; localStorage.setItem("sentinel_plan", v);
@@ -746,6 +818,169 @@ async function runEquity(){
   }catch(e){ err(out, e); }
 }
 
+/* ─────────── PREMIUM BELIEF ENGINE ─────────── */
+let BE_LAST = null;
+const pct = v => `${Math.round((Number(v)||0)*100)}%`;
+const signed = v => {
+  const n = Number(v)||0;
+  return `${n>=0?"+":""}${n.toFixed(2)}`;
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c=>({
+  "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+}[c]));
+function beHealthClass(h){
+  if(h === "bad") return "neg";
+  if(h === "warn") return "warn";
+  return "pos";
+}
+function beMeter(label, value, color="var(--amber)"){
+  const n = Math.max(0, Math.min(100, Number(value)||0));
+  return `<div class="belief-meter">
+    <div class="belief-meter-head"><span>${esc(label)}</span><span class="mono">${n.toFixed(1)}</span></div>
+    <div class="belief-meter-track"><span style="width:${n}%;background:${color}"></span></div>
+  </div>`;
+}
+function beRail(name, rail){
+  rail = rail || {};
+  const state = rail.state || "NA";
+  const disp = Number(rail.dispersion_score)||0;
+  const absz = Number(rail.weighted_mean_abs_z)||0;
+  const signedz = Number(rail.weighted_mean_signed_z)||0;
+  return `<div class="rail-card">
+    <div class="rail-head"><span>${esc(name)} rail</span><span class="mono ${cls(signedz)}">${signed(signedz)}</span></div>
+    <div class="rail-state">${esc(state)}</div>
+    <div class="cells" style="grid-template-columns:repeat(3,1fr);margin-top:10px">
+      <div class="cell"><div class="l">abs z</div><div class="v">${absz.toFixed(2)}</div></div>
+      <div class="cell"><div class="l">abnormal</div><div class="v">${pct(rail.fraction_abnormal)}</div></div>
+      <div class="cell"><div class="l">dispersion</div><div class="v ${disp>0.65?'neg':''}">${disp.toFixed(2)}</div></div>
+    </div>
+    <div class="hint" style="margin-top:8px">epicenter <span class="mono">${esc(rail.epicenter_label || "NA")}</span> · level <span class="mono">${esc(rail.epicenter_level ?? "NA")}</span></div>
+  </div>`;
+}
+function renderBelief(payload){
+  BE_LAST = payload;
+  const status = document.getElementById("be_status");
+  if(!payload || payload.status !== "ok"){
+    status.textContent = payload?.message || "no Premium Belief rows";
+    document.getElementById("be_top").innerHTML =
+      `<div class="lock"><span class="icon">!</span><span class="msg">${esc(payload?.message || "No Premium Belief Engine rows have reached Sentinel yet.")}</span></div>
+       <div class="note">Start the belief runner with <span class="mono">--out-jsonl $SENTINEL_JOURNAL_DIR/liqpool_live_signals.jsonl</span>.</div>`;
+    return;
+  }
+  const latest = payload.latest || {};
+  const snap = payload.raw_snapshot || {};
+  const d = snap.decision || {};
+  const t = snap.thesis || {};
+  const iv = snap.iv_state || {};
+  const b = snap.battlefield || {};
+  const w = snap.winding || {};
+  const strike = d.strike || {};
+  const action = d.action || latest.signal || "NA";
+  const conf = Number(d.confidence ?? latest.confidence ?? 0);
+  const spot = Number(snap.spot || latest?.extras?.spot || 0);
+
+  status.textContent = `${latest.asset || "NIFTY"} · ${latest.ts_ist || snap.ts || "live"}`;
+  document.getElementById("be_top").innerHTML = `
+    <div class="belief-hero">
+      <div>
+        <div class="hint">ACTION</div>
+        <div class="belief-action ${action.includes("NO") || action.includes("WAIT") ? "warn" : cls(d.direction)}">${esc(action)}</div>
+        <div class="hint" style="margin-top:6px">${esc(d.no_trade_reason || d.thesis_state || "shadow decision")}</div>
+      </div>
+      <div class="belief-kpis">
+        <div class="cell"><div class="l">Spot</div><div class="v">₹${spot.toFixed(2)}</div></div>
+        <div class="cell"><div class="l">Confidence</div><div class="v">${pct(conf)}</div></div>
+        <div class="cell"><div class="l">Warm</div><div class="v">${snap.is_warm ? "YES" : "NO"}</div></div>
+        <div class="cell"><div class="l">Bars</div><div class="v">${snap.bars_seen ?? "—"}</div></div>
+      </div>
+    </div>
+    <div class="cells" style="grid-template-columns:repeat(4,1fr);margin-top:12px">
+      <div class="cell"><div class="l">Direction</div><div class="v ${cls(d.direction)}">${d.direction ?? 0}</div></div>
+      <div class="cell"><div class="l">Strike</div><div class="v">${esc(strike.label || "NA")}</div></div>
+      <div class="cell"><div class="l">Battlefield</div><div class="v">${esc(b.verdict || "NA")}</div></div>
+      <div class="cell"><div class="l">IV state</div><div class="v">${esc(iv.state || "NA")}</div></div>
+    </div>`;
+
+  document.getElementById("be_phases").innerHTML = (payload.phases || []).map(p=>`
+    <div class="phase-card ${p.health || "ok"}">
+      <div class="phase-line"><span>${esc(p.phase)}</span><span class="${beHealthClass(p.health)}">${esc(p.health || "ok")}</span></div>
+      <div class="phase-title">${esc(p.title)}</div>
+      <div class="phase-state">${esc(p.state)}</div>
+      <div class="hint">${esc(p.primary)}</div>
+      <div class="hint">${esc(p.secondary)}</div>
+    </div>`).join("");
+
+  document.getElementById("be_rails").innerHTML = `
+    <div class="rail-grid">
+      ${beRail("CE", b.ce_rail)}
+      ${beRail("PE", b.pe_rail)}
+    </div>
+    <div class="note">${esc(b.note || "No battlefield note.")}</div>`;
+
+  document.getElementById("be_thesis").innerHTML = `
+    <div class="row-flex" style="justify-content:space-between;margin-bottom:10px">
+      <div><div class="hint">Composite</div><div class="mono" style="font-size:var(--t-xl);color:var(--amber)">${esc(t.composite_state || "NA")}</div></div>
+      <div><div class="hint">Winding</div><div class="mono">${esc(w.zone || "NA")}</div></div>
+    </div>
+    ${beMeter("Bull thesis", t.bull_thesis_score, "var(--green)")}
+    ${beMeter("Bear thesis", t.bear_thesis_score, "var(--red)")}
+    ${beMeter("Vol expansion", t.vol_expansion_score, "var(--steel)")}
+    ${beMeter("Liquidity danger", t.liquidity_danger_score, "var(--copper)")}
+    ${beMeter("No-trade danger", t.no_trade_score, "var(--red)")}`;
+
+  const contracts = payload.contracts || [];
+  document.getElementById("be_contract_count").textContent = `${contracts.length} contracts`;
+  document.querySelector("#be_contracts tbody").innerHTML = contracts.length
+    ? contracts.map(c=>`<tr>
+        <td class="mono">${esc(c.tradingsymbol)}</td>
+        <td>${esc(c.option_type)}</td>
+        <td class="mono">${Number(c.strike||0).toFixed(0)}</td>
+        <td class="mono">${esc(c.expiry)}</td>
+      </tr>`).join("")
+    : `<tr class="empty"><td colspan="4">no contracts</td></tr>`;
+  document.getElementById("be_raw").textContent = JSON.stringify(snap, null, 2);
+  drawBeliefTrace(payload.series || []);
+}
+function drawBeliefTrace(series){
+  const svg = document.getElementById("be_trace");
+  if(!svg || !series.length){ if(svg) svg.innerHTML=""; return; }
+  const W=700,H=180,L=46,R=14,T=14,B=24;
+  const spots = series.map(x=>Number(x.spot)||0).filter(Boolean);
+  const smin = Math.min(...spots), smax = Math.max(...spots);
+  const ymin = smin === smax ? smin - 1 : smin;
+  const ymax = smin === smax ? smax + 1 : smax;
+  const X = i => L + i / Math.max(1, series.length-1) * (W-L-R);
+  const Ys = v => T + (1 - (v-ymin)/Math.max(1e-9, ymax-ymin))*(H-T-B);
+  const Yc = v => T + (1 - Math.max(0, Math.min(1, v)))*(H-T-B);
+  const spotPath = series.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Ys(Number(p.spot)||0).toFixed(1)}`).join(" ");
+  const confPath = series.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Yc(Number(p.confidence)||0).toFixed(1)}`).join(" ");
+  let grid="";
+  for(let i=0;i<=4;i++){
+    const y=T+i/4*(H-T-B);
+    grid += `<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line-soft)" stroke-dasharray="2 3"/>`;
+  }
+  svg.innerHTML = `
+    ${grid}
+    <path d="${spotPath}" fill="none" stroke="var(--steel)" stroke-width="1.8"/>
+    <path d="${confPath}" fill="none" stroke="var(--amber)" stroke-width="1.8"/>
+    <text x="${L}" y="${H-6}" fill="var(--dim)" font-family="JetBrains Mono">${esc(series[0]?.ts_ist || "")}</text>
+    <text x="${W-R}" y="${H-6}" text-anchor="end" fill="var(--dim)" font-family="JetBrains Mono">${esc(series[series.length-1]?.ts_ist || "")}</text>
+    <text x="${L}" y="${T+8}" fill="var(--steel)" font-family="JetBrains Mono">spot</text>
+    <text x="${L+52}" y="${T+8}" fill="var(--amber)" font-family="JetBrains Mono">confidence</text>`;
+}
+async function refreshBelief(){
+  try{
+    const r = await api("/api/premium_belief?limit=80");
+    renderBelief(r);
+  }catch(e){
+    document.getElementById("be_status").textContent = e.msg || "belief request failed";
+    document.getElementById("be_top").innerHTML = `<div class="lock" style="border-color:rgba(184,94,82,.5);color:var(--red);background:var(--red-soft)"><span class="icon">!</span><span class="msg">${esc(e.msg || "Premium Belief request failed")}</span></div>`;
+  }
+}
+setInterval(()=> {
+  if(document.getElementById("v_belief").classList.contains("on")) refreshBelief();
+}, 2000);
+
 /* ─────────── command palette ─────────── */
 const COMMANDS = [
   {grp:"Tab", name:"Strategy Auditor",  do:()=>tab("audit"),  sub:"1"},
@@ -753,6 +988,7 @@ const COMMANDS = [
   {grp:"Tab", name:"Crisis Stress",     do:()=>tab("stress"), sub:"3"},
   {grp:"Tab", name:"Risk · VaR & Vol Cone", do:()=>tab("risk"), sub:"4"},
   {grp:"Tab", name:"Equity Context",    do:()=>tab("equity"), sub:"5"},
+  {grp:"Tab", name:"Premium Belief",     do:()=>tab("belief"), sub:"6"},
   {grp:"Plan", name:"RETAIL plan", do:()=>setPlan("RETAIL")},
   {grp:"Plan", name:"PRO plan", do:()=>setPlan("PRO")},
   {grp:"Plan", name:"QUANT plan", do:()=>setPlan("QUANT")},
@@ -799,7 +1035,7 @@ document.addEventListener("keydown", e=>{
   const meta = e.metaKey || e.ctrlKey;
   if(meta && e.key.toLowerCase()==="k"){ e.preventDefault(); openCmdk(); return; }
   if(["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName)) return;
-  const map = {"1":"audit","2":"build","3":"stress","4":"risk","5":"equity"};
+  const map = {"1":"audit","2":"build","3":"stress","4":"risk","5":"equity","6":"belief"};
   if(map[e.key]) tab(map[e.key]);
 });
 

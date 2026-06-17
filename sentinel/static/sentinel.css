@@ -401,12 +401,137 @@ kbd{
 .view.on{ display: block; }
 
 /* ─────────────────────────────────────────────────────────────────
+   Premium Belief Engine — live cockpit tab
+   ───────────────────────────────────────────────────────────────── */
+.belief-hero{
+  display: grid;
+  grid-template-columns: minmax(180px,.8fr) minmax(0,1.6fr);
+  gap: var(--s-3);
+  align-items: stretch;
+}
+.belief-action{
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: .03em;
+  margin-top: 4px;
+  color: var(--fg);
+}
+.belief-action.pos{ color: var(--green); }
+.belief-action.neg{ color: var(--red); }
+.belief-action.warn{ color: var(--amber); }
+.belief-kpis{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: var(--s-2);
+}
+.phase-grid{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: var(--s-2);
+}
+.phase-card{
+  min-height: 118px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: linear-gradient(180deg, rgba(255,255,255,.018), rgba(0,0,0,0));
+}
+.phase-card.ok{ border-color: rgba(106,153,113,.30); }
+.phase-card.warn{ border-color: rgba(212,162,89,.42); background: rgba(212,162,89,.045); }
+.phase-card.bad{ border-color: rgba(184,94,82,.48); background: rgba(184,94,82,.06); }
+.phase-line{
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  color: var(--dim);
+  font-size: var(--t-xxs);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.phase-title{
+  margin-top: 7px;
+  color: var(--fg);
+  font-weight: 600;
+  font-size: var(--t-md);
+}
+.phase-state{
+  margin: 6px 0;
+  color: var(--amber);
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--t-sm);
+  min-height: 18px;
+}
+.rail-grid{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: var(--s-2);
+}
+.rail-card{
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-0);
+}
+.rail-head{
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  color: var(--muted);
+  font-size: var(--t-xs);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.rail-state{
+  margin-top: 6px;
+  color: var(--fg);
+  font-size: var(--t-xl);
+  font-weight: 600;
+}
+.belief-meter{ margin: 9px 0; }
+.belief-meter-head{
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: var(--t-xs);
+  margin-bottom: 4px;
+}
+.belief-meter-track{
+  height: 7px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.belief-meter-track span{
+  display: block;
+  height: 100%;
+  min-width: 1px;
+}
+.json-box{
+  max-height: 300px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--fg-soft);
+  font: 11px/1.45 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  white-space: pre-wrap;
+}
+
+/* ─────────────────────────────────────────────────────────────────
    Mobile responsive — phone monitoring (Wave 19)
    The cockpit is desk-density first; on phones we stack the grid,
    collapse some panels into <details>, hide hover-only crosshairs.
    ───────────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .grid { grid-template-columns: 1fr !important; }
+  .belief-hero { grid-template-columns: 1fr !important; }
+  .belief-kpis { grid-template-columns: repeat(2, 1fr) !important; }
+  .phase-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .rail-grid { grid-template-columns: 1fr !important; }
   .shell { padding: var(--s-2); }
   .cells { grid-template-columns: repeat(2, 1fr) !important; }
   .topbar { height: auto; padding: var(--s-2) var(--s-3); flex-wrap: wrap; gap: var(--s-2); }
