@@ -1452,6 +1452,40 @@ def _belief_signal_rows(limit: int = 80) -> List[Dict[str, Any]]:
     return rows[:limit]
 
 
+def _poll_belief_tail_now() -> int:
+    """Pull fresh Premium Belief rows from the JSONL sink on demand.
+
+    The Sentinel background loop tails the same file, but the cockpit is a
+    latency-sensitive view. Letting the API request force a cheap tail read
+    keeps the browser pinned to the runner's newest row instead of waiting for
+    the generic server loop cadence.
+    """
+    try:
+        return int(CORE.liqpool_tail.poll())
+    except Exception as exc:
+        LOG.exception("premium belief tail refresh failed: %s", exc)
+        return 0
+
+
+def _belief_row_age_seconds(row: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Best-effort age for HH:MM:SS IST rows emitted by the live runner."""
+    if not row:
+        return None
+    raw = str(row.get("ts_ist") or "")
+    try:
+        hh, mm, ss = [int(part) for part in raw.split(":")[:3]]
+    except (TypeError, ValueError):
+        return None
+    now = datetime.now(IST)
+    seen = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+    age = (now - seen).total_seconds()
+    if age < -43200:
+        age += 86400
+    elif age > 43200:
+        age -= 86400
+    return max(0.0, age)
+
+
 def _belief_num(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1653,7 +1687,9 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
     still carries rows, but this endpoint understands the belief engine's
     8-phase shape and returns chart-friendly projections.
     """
+    tail_rows_polled = _poll_belief_tail_now()
     rows = _belief_signal_rows(limit=max(1, min(limit, 7200)))
+    server_now_ist = datetime.now(IST).strftime("%H:%M:%S")
     if not rows:
         return JSONResponse({
             "status": "no_signal",
@@ -1665,6 +1701,9 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
             "series": [],
             "contracts": [],
             "raw_snapshot": {},
+            "server_now_ist": server_now_ist,
+            "latest_age_seconds": None,
+            "tail_rows_polled": tail_rows_polled,
             "refresh_seconds": 1,
             "data_contract": {
                 "mode": "quote_polling",
@@ -1674,6 +1713,7 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
         })
 
     latest = rows[0]
+    latest_age_seconds = _belief_row_age_seconds(latest)
     snap = _belief_snapshot(latest)
     extras = latest.get("extras") or {}
     slot_readings = snap.get("slot_readings") or []
@@ -1737,7 +1777,10 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
         "slot_reading_count": len(slot_readings),
         "stream": extras.get("streaming_divergence") or {},
         "raw_snapshot": snap,
-        "refresh_seconds": 0.5,
+        "server_now_ist": server_now_ist,
+        "latest_age_seconds": latest_age_seconds,
+        "tail_rows_polled": tail_rows_polled,
+        "refresh_seconds": 1.0,
         "data_contract": {
             "mode": "quote_polling",
             "truth_source": "Kite quote depth microprice when clean, mid fallback, fresh LTP fallback",

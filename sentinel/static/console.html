@@ -932,13 +932,13 @@ let BE_FETCHING = false;
 let BE_LAST_FULL_REFRESH_AT = 0;
 let BE_LAST_RENDER_SERIES_KEY = "";
 let BE_POLL_LOOP_STARTED = false;
-const BE_LIVE_REFRESH_MS = 350;
+const BE_LIVE_REFRESH_MS = 1000;
 const BE_REFRESH_MS = BE_LIVE_REFRESH_MS;
-const BE_STALE_AFTER_MS = 2500;
+const BE_STALE_AFTER_MS = 3000;
 const BE_HISTORY_LIMIT = 7200;       // 30m at 250ms, 60m at 500ms.
-const BE_FAST_HISTORY_LIMIT = 28;     // Incremental refreshes pull only the latest rows.
+const BE_FAST_HISTORY_LIMIT = 12;     // Incremental refreshes pull only the latest rows.
 const BE_LOCAL_SERIES_LIMIT = 14400;  // Keep enough local tape for sliding back without server churn.
-const BE_FULL_HISTORY_REFRESH_MS = 10000;
+const BE_FULL_HISTORY_REFRESH_MS = 30000;
 const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v4";
 const BE_WINDOW_KEY = "sentinel_premium_belief_window_v1";
 const BE_VIEW_KEY = "sentinel_premium_belief_view_v1";
@@ -1489,11 +1489,15 @@ function renderBelief(payload){
     BE_LAST_ROW_KEY = rowKey;
     BE_LAST_ROW_SEEN_AT = nowMs;
   }
-  const staleMs = BE_LAST_ROW_SEEN_AT ? nowMs - BE_LAST_ROW_SEEN_AT : 0;
-  const stale = staleMs > BE_STALE_AFTER_MS;
+  const localStaleMs = BE_LAST_ROW_SEEN_AT ? nowMs - BE_LAST_ROW_SEEN_AT : 0;
+  const upstreamAge = Number(payload.latest_age_seconds);
+  const hasUpstreamAge = Number.isFinite(upstreamAge);
+  const staleSeconds = hasUpstreamAge ? upstreamAge : localStaleMs / 1000;
+  const stale = (staleSeconds * 1000) > BE_STALE_AFTER_MS;
+  const freshnessText = stale ? `STALE ${staleSeconds.toFixed(1)}s` : `LIVE ${staleSeconds.toFixed(1)}s`;
 
   status.className = stale ? "hint warn" : "hint";
-  status.textContent = `${latest.asset || "NIFTY"} · ${latest.ts_ist || snap.ts || "live"} · ${stale ? `STALE ${(staleMs/1000).toFixed(1)}s` : "LIVE"}`;
+  status.textContent = `${latest.asset || "NIFTY"} · ${latest.ts_ist || snap.ts || "live"} · ${freshnessText}`;
   document.getElementById("be_top").innerHTML = `
     <div class="belief-hero">
       <div>
@@ -1506,7 +1510,7 @@ function renderBelief(payload){
         <div class="cell"><div class="l">Confidence</div><div class="v">${pct(conf)}</div></div>
         <div class="cell"><div class="l">Warm</div><div class="v">${snap.is_warm ? "YES" : "NO"}</div></div>
         <div class="cell"><div class="l">Bars</div><div class="v">${snap.bars_seen ?? "—"}</div></div>
-        <div class="cell"><div class="l">Feed</div><div class="v ${stale ? "warn" : "pos"}">${stale ? "STALE" : "LIVE"}</div></div>
+        <div class="cell"><div class="l">Feed</div><div class="v ${stale ? "warn" : "pos"}">${freshnessText}</div></div>
       </div>
     </div>
     <div class="cells" style="grid-template-columns:repeat(4,1fr);margin-top:12px">
@@ -1756,8 +1760,8 @@ async function refreshBelief(forceFull=false){
       r.series = mergeBeliefSeries(r.series || [], needsFull);
       if(needsFull) BE_LAST_FULL_REFRESH_AT = now;
       const latestKey = beliefSeriesKey(r.series[r.series.length - 1] || {});
-      shouldRender = forceFull || needsFull || !latestKey || latestKey !== BE_LAST_RENDER_SERIES_KEY;
       if(latestKey) BE_LAST_RENDER_SERIES_KEY = latestKey;
+      shouldRender = true;
     }
     if(shouldRender) renderBelief(r);
   }catch(e){

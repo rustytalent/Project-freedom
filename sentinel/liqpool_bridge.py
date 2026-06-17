@@ -22,6 +22,7 @@ Sentinel.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -229,45 +230,47 @@ class LiveSignalsTail:
         self._offset = 0
         # remember the inode so a log-rotated file resets the offset
         self._inode: Optional[int] = None
+        self._lock = threading.Lock()
 
     def poll(self) -> int:
         """Read new lines since the last poll; publish each. Returns
         the number of signals published this call."""
-        if not self.path.exists():
-            return 0
-        from .live_publisher import ModelSignal as _LiveModelSignal
-        try:
-            stat = self.path.stat()
-        except OSError:
-            return 0
-        if self._inode is not None and stat.st_ino != self._inode:
-            # log rotated — reset.
-            self._offset = 0
-        self._inode = stat.st_ino
-        n = 0
-        try:
-            with self.path.open() as f:
-                f.seek(self._offset)
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    sig = _signal_from_row(row, _LiveModelSignal)
-                    if sig is None:
-                        continue
-                    try:
-                        self.publisher.publish(sig)
-                        n += 1
-                    except Exception:
-                        continue
-                self._offset = f.tell()
-        except Exception:
+        with self._lock:
+            if not self.path.exists():
+                return 0
+            from .live_publisher import ModelSignal as _LiveModelSignal
+            try:
+                stat = self.path.stat()
+            except OSError:
+                return 0
+            if self._inode is not None and stat.st_ino != self._inode:
+                # log rotated — reset.
+                self._offset = 0
+            self._inode = stat.st_ino
+            n = 0
+            try:
+                with self.path.open() as f:
+                    f.seek(self._offset)
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except Exception:
+                            continue
+                        sig = _signal_from_row(row, _LiveModelSignal)
+                        if sig is None:
+                            continue
+                        try:
+                            self.publisher.publish(sig)
+                            n += 1
+                        except Exception:
+                            continue
+                    self._offset = f.tell()
+            except Exception:
+                return n
             return n
-        return n
 
 
 def _signal_from_row(row: Dict[str, Any], cls):

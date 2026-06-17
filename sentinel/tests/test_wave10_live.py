@@ -18,6 +18,7 @@ These tests pin the contract end-to-end:
 from __future__ import annotations
 
 import importlib
+import json
 import time
 
 import pytest
@@ -248,6 +249,50 @@ def test_live_signals_endpoint_filters_by_asset(srv):
         assert "NIFTY|reaction_model" in all_["current"]
         only = c.get("/api/live/signals?asset=NIFTY").json()
         assert all(k.startswith("NIFTY") for k in only["current"])
+
+
+def test_premium_belief_endpoint_tails_jsonl_on_request(srv):
+    """The Premium Belief cockpit must not wait for the background loop.
+
+    The live runner writes JSONL faster than the generic Sentinel loop. The
+    endpoint force-polls the tail on each request so the trader sees the newest
+    row on the next browser refresh.
+    """
+    path = srv.CORE.cfg.journal_dir / "liqpool_live_signals.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "ts_ist": now_ist_hms(),
+        "asset": "NIFTY_DEMO",
+        "model": "premium_belief_engine",
+        "signal": "WAIT",
+        "confidence": 0.42,
+        "trust_tier": "SHADOW",
+        "reason_codes": ["test_row"],
+        "extras": {
+            "spot": 25000.0,
+            "belief_snapshot": {
+                "spot": 25000.0,
+                "bars_seen": 101,
+                "is_warm": True,
+                "decision": {
+                    "action": "WAIT",
+                    "confidence": 0.42,
+                    "direction": 0,
+                    "trade_allowed": False,
+                },
+                "slot_readings": [],
+            },
+        },
+    }) + "\n")
+
+    with TestClient(srv.app) as c:
+        payload = c.get("/api/premium_belief?limit=1").json()
+
+    assert payload["status"] == "ok"
+    assert payload["tail_rows_polled"] == 1
+    assert payload["latest"]["asset"] == "NIFTY_DEMO"
+    assert payload["latest"]["extras"]["spot"] == 25000.0
+    assert payload["latest_age_seconds"] is not None
 
 
 def test_cockpit_renders_live_panels(srv):
