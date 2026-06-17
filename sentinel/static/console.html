@@ -847,7 +847,10 @@ async function runEquity(){
 
 /* ─────────── PREMIUM BELIEF ENGINE ─────────── */
 let BE_LAST = null;
-const BE_REFRESH_MS = 1000;
+let BE_LAST_ROW_KEY = "";
+let BE_LAST_ROW_SEEN_AT = 0;
+const BE_REFRESH_MS = 500;
+const BE_STALE_AFTER_MS = 2500;
 const pct = v => `${Math.round((Number(v)||0)*100)}%`;
 const pct1 = v => `${((Number(v)||0)*100).toFixed(1)}%`;
 const signed = v => {
@@ -915,8 +918,17 @@ function renderBelief(payload){
   const conf = Number(d.confidence ?? latest.confidence ?? 0);
   const spot = Number(snap.spot || latest?.extras?.spot || 0);
   const dataContract = payload.data_contract || {};
+  const rowKey = `${latest.ts_ist || snap.ts || ""}|${snap.bars_seen ?? ""}|${spot.toFixed(2)}`;
+  const nowMs = Date.now();
+  if(rowKey !== BE_LAST_ROW_KEY){
+    BE_LAST_ROW_KEY = rowKey;
+    BE_LAST_ROW_SEEN_AT = nowMs;
+  }
+  const staleMs = BE_LAST_ROW_SEEN_AT ? nowMs - BE_LAST_ROW_SEEN_AT : 0;
+  const stale = staleMs > BE_STALE_AFTER_MS;
 
-  status.textContent = `${latest.asset || "NIFTY"} · ${latest.ts_ist || snap.ts || "live"}`;
+  status.className = stale ? "hint warn" : "hint";
+  status.textContent = `${latest.asset || "NIFTY"} · ${latest.ts_ist || snap.ts || "live"} · ${stale ? `STALE ${(staleMs/1000).toFixed(1)}s` : "LIVE"}`;
   document.getElementById("be_top").innerHTML = `
     <div class="belief-hero">
       <div>
@@ -929,6 +941,7 @@ function renderBelief(payload){
         <div class="cell"><div class="l">Confidence</div><div class="v">${pct(conf)}</div></div>
         <div class="cell"><div class="l">Warm</div><div class="v">${snap.is_warm ? "YES" : "NO"}</div></div>
         <div class="cell"><div class="l">Bars</div><div class="v">${snap.bars_seen ?? "—"}</div></div>
+        <div class="cell"><div class="l">Feed</div><div class="v ${stale ? "warn" : "pos"}">${stale ? "STALE" : "LIVE"}</div></div>
       </div>
     </div>
     <div class="cells" style="grid-template-columns:repeat(4,1fr);margin-top:12px">
@@ -938,7 +951,7 @@ function renderBelief(payload){
       <div class="cell"><div class="l">IV state</div><div class="v">${esc(iv.state || "NA")}</div></div>
     </div>
     <div class="belief-source">
-      <b>Data path:</b> ${esc(dataContract.mode || "quote_polling")} · ${esc(dataContract.truth_source || "microprice when clean, mid fallback, fresh LTP fallback")} · UI refresh ${BE_REFRESH_MS/1000}s · ${esc(dataContract.orders || "shadow_only")}
+      <b>Data path:</b> ${esc(dataContract.mode || "quote_polling")} · ${esc(dataContract.truth_source || "microprice when clean, mid fallback, fresh LTP fallback")} · UI refresh ${(BE_REFRESH_MS/1000).toFixed(1)}s · ${esc(dataContract.orders || "shadow_only")}
     </div>`;
 
   document.getElementById("be_phases").innerHTML = (payload.phases || []).map(p=>`
