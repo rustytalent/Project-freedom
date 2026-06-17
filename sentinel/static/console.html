@@ -226,11 +226,23 @@
         <div class="panel belief-chart-stack-panel">
           <div class="head">
             <span class="title">Live behaviour tapes</span>
-            <span class="right hint" id="be_chart_window">30-60m rolling context</span>
+            <div class="right row-flex belief-canvas-controls">
+              <span class="hint" id="be_chart_window">30-60m rolling context</span>
+              <label class="mini-label" for="be_tape_window">Window</label>
+              <select id="be_tape_window" class="mini-select" onchange="setBeliefTapeWindow(this.value)">
+                <option value="1800">15m</option>
+                <option value="3600">30m</option>
+                <option value="7200">60m</option>
+                <option value="all">All</option>
+              </select>
+              <button class="btn sm" onclick="resetBeliefCanvas()">Reset canvas</button>
+            </div>
           </div>
           <div class="body">
-            <div class="belief-chart-stack">
-              <section class="belief-tape-card">
+            <div id="be_hidden_cards" class="belief-hidden-cards"></div>
+            <div class="belief-canvas-help">Drag any chart by its header. Use resize to stretch the tape, hide to clear space, or restore hidden charts from this toolbar.</div>
+            <div id="be_chart_stack" class="belief-chart-stack">
+              <section class="belief-tape-card" data-chart-card="price">
                 <div class="belief-tape-head">
                   <div>
                     <div class="belief-tape-title">Price + decision pressure</div>
@@ -239,7 +251,7 @@
                   <div class="belief-tape-scale">normalized 0-100%</div>
                 </div>
                 <div class="chart-wrap belief-chart">
-                  <svg id="be_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                  <svg id="be_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
                 <div class="chart-explain">
                   <span><b style="color:var(--steel)">steel</b> spot inside the visible range</span>
@@ -248,7 +260,7 @@
                 </div>
               </section>
 
-              <section class="belief-tape-card">
+              <section class="belief-tape-card" data-chart-card="thesis">
                 <div class="belief-tape-head">
                   <div>
                     <div class="belief-tape-title">Thesis memory</div>
@@ -257,7 +269,7 @@
                   <div class="belief-tape-scale">score 0-100</div>
                 </div>
                 <div class="chart-wrap belief-chart">
-                  <svg id="be_thesis_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                  <svg id="be_thesis_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> bull thesis</span>
@@ -267,7 +279,7 @@
                 </div>
               </section>
 
-              <section class="belief-tape-card">
+              <section class="belief-tape-card" data-chart-card="quality">
                 <div class="belief-tape-head">
                   <div>
                     <div class="belief-tape-title">Mark quality + IV cleanliness</div>
@@ -276,7 +288,7 @@
                   <div class="belief-tape-scale">0-100%</div>
                 </div>
                 <div class="chart-wrap belief-chart">
-                  <svg id="be_quality_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                  <svg id="be_quality_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> clean mark fraction</span>
@@ -285,7 +297,7 @@
                 </div>
               </section>
 
-              <section class="belief-tape-card">
+              <section class="belief-tape-card" data-chart-card="rails">
                 <div class="belief-tape-head">
                   <div>
                     <div class="belief-tape-title">CE / PE rail pressure</div>
@@ -294,7 +306,7 @@
                   <div class="belief-tape-scale">z-score + dispersion</div>
                 </div>
                 <div class="chart-wrap belief-chart">
-                  <svg id="be_rail_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                  <svg id="be_rail_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> CE signed residual z</span>
@@ -912,6 +924,18 @@ const BE_REFRESH_MS = 500;
 const BE_STALE_AFTER_MS = 2500;
 const BE_HISTORY_LIMIT = 7200;       // 30m at 250ms, 60m at 500ms.
 const BE_CHART_MAX_POINTS = 900;     // Draw fast; preserve the full tape server-side.
+const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v2";
+const BE_WINDOW_KEY = "sentinel_premium_belief_window_v1";
+const BE_DEFAULT_WINDOW = "7200";
+const BE_CARD_DEFAULTS = [
+  {id:"price", label:"Price + decision", height:300, hidden:false},
+  {id:"thesis", label:"Thesis memory", height:300, hidden:false},
+  {id:"quality", label:"Mark + IV quality", height:300, hidden:false},
+  {id:"rails", label:"Rail pressure", height:300, hidden:false},
+];
+let BE_CANVAS = null;
+let BE_DRAG_ID = "";
+let BE_RESIZE = null;
 const pct = v => `${Math.round((Number(v)||0)*100)}%`;
 const pct1 = v => `${((Number(v)||0)*100).toFixed(1)}%`;
 const signed = v => {
@@ -925,6 +949,249 @@ function beHealthClass(h){
   if(h === "bad") return "neg";
   if(h === "warn") return "warn";
   return "pos";
+}
+function beDefaultCanvas(){
+  return {
+    order: BE_CARD_DEFAULTS.map(c=>c.id),
+    cards: Object.fromEntries(BE_CARD_DEFAULTS.map(c=>[c.id, {height:c.height, hidden:c.hidden}])),
+  };
+}
+function normalizeBeliefCanvas(raw){
+  const base = beDefaultCanvas();
+  const incoming = raw && typeof raw === "object" ? raw : {};
+  const known = new Set(BE_CARD_DEFAULTS.map(c=>c.id));
+  const order = Array.isArray(incoming.order) ? incoming.order.filter(id=>known.has(id)) : [];
+  base.order = [...order, ...BE_CARD_DEFAULTS.map(c=>c.id).filter(id=>!order.includes(id))];
+  const cards = incoming.cards && typeof incoming.cards === "object" ? incoming.cards : {};
+  BE_CARD_DEFAULTS.forEach(c=>{
+    const prev = cards[c.id] || {};
+    const h = Number(prev.height);
+    base.cards[c.id] = {
+      height: Number.isFinite(h) ? Math.max(180, Math.min(760, h)) : c.height,
+      hidden: Boolean(prev.hidden),
+      wide: Boolean(prev.wide),
+    };
+  });
+  return base;
+}
+function loadBeliefCanvas(){
+  if(BE_CANVAS) return BE_CANVAS;
+  try{
+    BE_CANVAS = normalizeBeliefCanvas(JSON.parse(localStorage.getItem(BE_CANVAS_KEY) || "null"));
+  }catch(_){
+    BE_CANVAS = beDefaultCanvas();
+  }
+  return BE_CANVAS;
+}
+function saveBeliefCanvas(){
+  if(BE_CANVAS) localStorage.setItem(BE_CANVAS_KEY, JSON.stringify(BE_CANVAS));
+}
+function beliefCardMeta(id){
+  return BE_CARD_DEFAULTS.find(c=>c.id === id) || {id, label:id};
+}
+function redrawBeliefCharts(){
+  if(BE_LAST?.status === "ok"){
+    const series = BE_LAST.series || [];
+    drawBeliefTrace(series);
+    drawBeliefThesisTrace(series);
+    drawBeliefQualityTrace(series);
+    drawBeliefRailTrace(series);
+  }
+}
+function applyBeliefCanvas(){
+  const state = loadBeliefCanvas();
+  const stack = document.getElementById("be_chart_stack");
+  if(!stack) return;
+  state.order.forEach(id=>{
+    const card = stack.querySelector(`[data-chart-card="${id}"]`) || document.querySelector(`[data-chart-card="${id}"]`);
+    if(card) stack.appendChild(card);
+  });
+  BE_CARD_DEFAULTS.forEach(meta=>{
+    const card = document.querySelector(`[data-chart-card="${meta.id}"]`);
+    if(!card) return;
+    const cfg = state.cards[meta.id] || {};
+    card.style.display = cfg.hidden ? "none" : "";
+    card.style.setProperty("--belief-chart-height", `${cfg.height || meta.height}px`);
+    card.classList.toggle("is-wide", Boolean(cfg.wide));
+    card.classList.remove("drag-over");
+  });
+  renderBeliefHiddenCards();
+  redrawBeliefCharts();
+}
+function renderBeliefHiddenCards(){
+  const el = document.getElementById("be_hidden_cards");
+  if(!el) return;
+  const state = loadBeliefCanvas();
+  const hidden = BE_CARD_DEFAULTS.filter(c=>state.cards[c.id]?.hidden);
+  el.innerHTML = hidden.length
+    ? `<span class="hint">Hidden:</span>${hidden.map(c=>`<button class="btn sm ghost" onclick="restoreBeliefCard('${c.id}')">${esc(c.label)}</button>`).join("")}`
+    : `<span class="hint">Canvas ready: rearrange and resize the tapes for your screen.</span>`;
+}
+function setBeliefCardHidden(id, hidden){
+  const state = loadBeliefCanvas();
+  if(!state.cards[id]) return;
+  state.cards[id].hidden = hidden;
+  saveBeliefCanvas();
+  applyBeliefCanvas();
+}
+function hideBeliefCard(id){ setBeliefCardHidden(id, true); }
+function restoreBeliefCard(id){ setBeliefCardHidden(id, false); }
+function resetBeliefCanvas(){
+  BE_CANVAS = beDefaultCanvas();
+  localStorage.setItem(BE_CANVAS_KEY, JSON.stringify(BE_CANVAS));
+  applyBeliefCanvas();
+}
+function moveBeliefCard(id, delta){
+  const state = loadBeliefCanvas();
+  const i = state.order.indexOf(id);
+  if(i < 0) return;
+  const j = Math.max(0, Math.min(state.order.length - 1, i + delta));
+  state.order.splice(i, 1);
+  state.order.splice(j, 0, id);
+  saveBeliefCanvas();
+  applyBeliefCanvas();
+}
+function resizeBeliefCard(id, delta){
+  const state = loadBeliefCanvas();
+  if(!state.cards[id]) return;
+  state.cards[id].height = Math.max(180, Math.min(760, Number(state.cards[id].height || 300) + delta));
+  saveBeliefCanvas();
+  applyBeliefCanvas();
+}
+function toggleBeliefCardWidth(id){
+  const state = loadBeliefCanvas();
+  if(!state.cards[id]) return;
+  state.cards[id].wide = !state.cards[id].wide;
+  saveBeliefCanvas();
+  applyBeliefCanvas();
+}
+function startBeliefCardResize(ev, id){
+  ev.preventDefault();
+  const state = loadBeliefCanvas();
+  const startY = ev.clientY;
+  const startH = Number(state.cards[id]?.height || 300);
+  BE_RESIZE = {id, startY, startH};
+  document.body.classList.add("is-resizing-belief");
+  window.addEventListener("pointermove", onBeliefCardResize);
+  window.addEventListener("pointerup", endBeliefCardResize, {once:true});
+}
+function onBeliefCardResize(ev){
+  if(!BE_RESIZE) return;
+  const state = loadBeliefCanvas();
+  const h = Math.max(180, Math.min(760, BE_RESIZE.startH + ev.clientY - BE_RESIZE.startY));
+  state.cards[BE_RESIZE.id].height = h;
+  const card = document.querySelector(`[data-chart-card="${BE_RESIZE.id}"]`);
+  if(card) card.style.setProperty("--belief-chart-height", `${h}px`);
+  redrawBeliefCharts();
+}
+function endBeliefCardResize(){
+  saveBeliefCanvas();
+  document.body.classList.remove("is-resizing-belief");
+  BE_RESIZE = null;
+  window.removeEventListener("pointermove", onBeliefCardResize);
+}
+function injectBeliefCardControls(){
+  document.querySelectorAll("[data-chart-card]").forEach(card=>{
+    const id = card.dataset.chartCard;
+    card.draggable = true;
+    const head = card.querySelector(".belief-tape-head");
+    if(head && !head.querySelector(".belief-card-tools")){
+      const tools = document.createElement("div");
+      tools.className = "belief-card-tools";
+      tools.innerHTML = `
+        <span class="drag-chip" title="Drag this chart by the header">drag</span>
+        <button class="mini-btn" data-act="up" title="Move chart up">Up</button>
+        <button class="mini-btn" data-act="down" title="Move chart down">Down</button>
+        <button class="mini-btn" data-act="shorter" title="Make chart shorter">-</button>
+        <button class="mini-btn" data-act="taller" title="Make chart taller">+</button>
+        <button class="mini-btn" data-act="wide" title="Toggle full-row width">Wide</button>
+        <button class="mini-btn" data-act="hide" title="Hide chart">Hide</button>
+        <span class="resize-grip" data-act="resize" title="Drag to resize">resize</span>`;
+      head.appendChild(tools);
+    }
+    card.addEventListener("dragstart", ev=>{
+      if(ev.target.closest("button,select,.resize-grip")){ ev.preventDefault(); return; }
+      if(!ev.target.closest(".belief-tape-head")){ ev.preventDefault(); return; }
+      BE_DRAG_ID = id;
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", id);
+      card.classList.add("is-dragging");
+    });
+    card.addEventListener("dragend", ()=>{
+      BE_DRAG_ID = "";
+      card.classList.remove("is-dragging");
+      document.querySelectorAll(".belief-tape-card").forEach(c=>c.classList.remove("drag-over"));
+    });
+  });
+  document.querySelectorAll(".belief-card-tools").forEach(tools=>{
+    tools.addEventListener("click", ev=>{
+      const btn = ev.target.closest("[data-act]");
+      if(!btn) return;
+      const card = btn.closest("[data-chart-card]");
+      const id = card?.dataset.chartCard;
+      if(!id) return;
+      const act = btn.dataset.act;
+      if(act === "up") moveBeliefCard(id, -1);
+      else if(act === "down") moveBeliefCard(id, 1);
+      else if(act === "shorter") resizeBeliefCard(id, -80);
+      else if(act === "taller") resizeBeliefCard(id, 80);
+      else if(act === "wide") toggleBeliefCardWidth(id);
+      else if(act === "hide") hideBeliefCard(id);
+    });
+    tools.addEventListener("pointerdown", ev=>{
+      const grip = ev.target.closest('[data-act="resize"]');
+      if(!grip) return;
+      const card = grip.closest("[data-chart-card]");
+      if(card) startBeliefCardResize(ev, card.dataset.chartCard);
+    });
+  });
+  const stack = document.getElementById("be_chart_stack");
+  if(stack && !stack.dataset.dragReady){
+    stack.dataset.dragReady = "1";
+    stack.addEventListener("dragover", ev=>{
+      const target = ev.target.closest("[data-chart-card]");
+      if(!target || !BE_DRAG_ID || target.dataset.chartCard === BE_DRAG_ID) return;
+      ev.preventDefault();
+      target.classList.add("drag-over");
+    });
+    stack.addEventListener("dragleave", ev=>{
+      const target = ev.target.closest("[data-chart-card]");
+      if(target) target.classList.remove("drag-over");
+    });
+    stack.addEventListener("drop", ev=>{
+      const target = ev.target.closest("[data-chart-card]");
+      if(!target || !BE_DRAG_ID || target.dataset.chartCard === BE_DRAG_ID) return;
+      ev.preventDefault();
+      const state = loadBeliefCanvas();
+      const from = state.order.indexOf(BE_DRAG_ID);
+      let to = state.order.indexOf(target.dataset.chartCard);
+      if(from < 0 || to < 0) return;
+      const rect = target.getBoundingClientRect();
+      const insertAfter = ev.clientY > rect.top + rect.height / 2;
+      state.order.splice(from, 1);
+      if(from < to) to -= 1;
+      state.order.splice(insertAfter ? to + 1 : to, 0, BE_DRAG_ID);
+      saveBeliefCanvas();
+      applyBeliefCanvas();
+    });
+  }
+}
+function getBeliefWindowLimit(){
+  const raw = localStorage.getItem(BE_WINDOW_KEY) || BE_DEFAULT_WINDOW;
+  return raw === "all" ? "all" : Math.max(60, Number(raw) || Number(BE_DEFAULT_WINDOW));
+}
+function setBeliefTapeWindow(value){
+  localStorage.setItem(BE_WINDOW_KEY, value || BE_DEFAULT_WINDOW);
+  const sel = document.getElementById("be_tape_window");
+  if(sel) sel.value = value || BE_DEFAULT_WINDOW;
+  if(BE_LAST?.status === "ok") renderBelief(BE_LAST);
+}
+function initBeliefCanvas(){
+  injectBeliefCardControls();
+  const value = localStorage.getItem(BE_WINDOW_KEY) || BE_DEFAULT_WINDOW;
+  const sel = document.getElementById("be_tape_window");
+  if(sel) sel.value = value;
+  applyBeliefCanvas();
 }
 function beMeter(label, value, color="var(--amber)"){
   const n = Math.max(0, Math.min(100, Number(value)||0));
@@ -1117,11 +1384,14 @@ function renderBelief(payload){
 
   document.getElementById("be_raw").textContent = JSON.stringify(snap, null, 2);
   const tapeRows = Array.isArray(payload.series) ? payload.series.length : 0;
-  const drawnRows = Math.min(tapeRows, BE_CHART_MAX_POINTS);
+  const windowRows = beliefWindowRows(payload.series || []).length;
+  const drawnRows = Math.min(windowRows, BE_CHART_MAX_POINTS);
+  const windowLimit = getBeliefWindowLimit();
+  const windowLabel = windowLimit === "all" ? "all retained rows" : `${windowLimit} row window`;
   const windowEl = document.getElementById("be_chart_window");
   if(windowEl){
     windowEl.textContent = tapeRows
-      ? `${tapeRows} rows retained · ${drawnRows} drawn · target 30-60m`
+      ? `${tapeRows} retained · ${windowRows} visible · ${drawnRows} drawn · ${windowLabel}`
       : "waiting for chart tape";
   }
   drawBeliefTrace(payload.series || []);
@@ -1129,18 +1399,32 @@ function renderBelief(payload){
   drawBeliefQualityTrace(payload.series || []);
   drawBeliefRailTrace(payload.series || []);
 }
-function visibleChartSeries(series){
+function beliefWindowRows(series){
   const rows = Array.isArray(series) ? series : [];
+  const limit = getBeliefWindowLimit();
+  if(limit === "all" || rows.length <= limit) return rows;
+  return rows.slice(-limit);
+}
+function visibleChartSeries(series){
+  const rows = beliefWindowRows(series);
   if(rows.length <= BE_CHART_MAX_POINTS) return rows;
   const step = Math.max(1, Math.ceil(rows.length / BE_CHART_MAX_POINTS));
   return rows.filter((_, i) => i % step === 0 || i === rows.length - 1);
+}
+function chartHeightForSvg(svgId, fallback=260){
+  const svg = document.getElementById(svgId);
+  const wrap = svg?.closest(".belief-chart");
+  const h = wrap?.clientHeight;
+  return Number.isFinite(h) && h > 0 ? h : fallback;
 }
 function drawSeriesChart(svgId, series, lines, opts={}){
   const svg = document.getElementById(svgId);
   if(!svg || !series.length){ if(svg) svg.innerHTML=""; return; }
   const rawCount = series.length;
   series = visibleChartSeries(series);
-  const W=920,H=Number(opts.height||260),L=62,R=24,T=28,B=36;
+  const W=920,H=chartHeightForSvg(svgId, Number(opts.height||260)),L=62,R=24,T=28,B=36;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("height", String(H));
   const X = i => L + i / Math.max(1, series.length-1) * (W-L-R);
   const allVals = [];
   lines.forEach(line => series.forEach(p => {
@@ -1191,11 +1475,12 @@ function drawSeriesChart(svgId, series, lines, opts={}){
     <text x="${W-R}" y="${T-9}" text-anchor="end" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${esc(meta)}</text>`;
 }
 function drawBeliefTrace(series){
-  const spots = series.map(x=>Number(x.spot)||0).filter(Boolean);
+  const rows = beliefWindowRows(series);
+  const spots = rows.map(x=>Number(x.spot)||0).filter(Boolean);
   const lo = spots.length ? Math.min(...spots) : 0;
   const hi = spots.length ? Math.max(...spots) : 1;
   const span = Math.max(1e-9, hi - lo);
-  const scaled = series.map(x=>({...x, spot_scaled:(Number(x.spot||0)-lo)/span}));
+  const scaled = rows.map(x=>({...x, spot_scaled:(Number(x.spot||0)-lo)/span}));
   drawSeriesChart("be_trace", scaled, [
     {key:"spot_scaled", label:`spot ${lo.toFixed(1)}-${hi.toFixed(1)}`, short:"spot", color:"var(--steel)", width:2.2},
     {key:"confidence", label:"decision confidence", short:"decision", color:"var(--amber)", width:1.9},
@@ -1301,6 +1586,7 @@ addLeg("CE",25000,75,180);
 addLeg("CE",25200,-75,90);
 addStressLeg();
 buildEquityGrid();
+initBeliefCanvas();
 // pre-fill plausible heavyweight moves
 document.querySelector('.er[data-sym="RELIANCE"]').value = 2.0;
 document.querySelector('.er[data-sym="HDFCBANK"]').value = 1.5;
