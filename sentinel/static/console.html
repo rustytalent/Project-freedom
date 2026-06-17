@@ -317,7 +317,7 @@
 
 <script>
 /* ─────────── plan / api ─────────── */
-const token = localStorage.getItem("sentinel_token") || "";
+let token = localStorage.getItem("sentinel_token") || "";
 let plan = localStorage.getItem("sentinel_plan") || "PRO";
 const inr = n => n==null ? "—" : (n<0?"-":"")+"₹"+Math.abs(Math.round(n)).toLocaleString("en-IN");
 const cls = n => n>0?"pos":(n<0?"neg":"");
@@ -326,8 +326,21 @@ function hdrs(){
   if(token) h["X-Sentinel-Token"]=token;
   return h;
 }
-async function api(path, opts={}){
+async function api(path, opts={}, retryAuth=true){
   const r = await fetch(path, {...opts, headers:{...hdrs(), ...(opts.headers||{})}});
+  if(r.status===401){
+    if(retryAuth){
+      const t = prompt("Sentinel token required by the running server. Paste token, or leave blank to clear stored token:");
+      if(t && t.trim()){
+        token = t.trim();
+        localStorage.setItem("sentinel_token", token);
+        return api(path, opts, false);
+      }
+      token = "";
+      localStorage.removeItem("sentinel_token");
+    }
+    throw {auth:true, msg:"authentication failed (401): running Sentinel requires a matching X-Sentinel-Token"};
+  }
   if(r.status===402){
     const d = (await r.json()).detail || {};
     throw {upsell:true, msg:`${d.feature||"this feature"} needs ${d.required_tier}`, your:d.your_tier};
