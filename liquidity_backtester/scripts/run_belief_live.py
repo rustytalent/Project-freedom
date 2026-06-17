@@ -34,6 +34,8 @@ def main() -> int:
     p.add_argument("--refresh-contracts-every", type=int, default=30)
     p.add_argument("--out-jsonl", type=Path,
                    default=Path("/var/lib/sentinel/liqpool_live_signals.jsonl"))
+    p.add_argument("--executor-out-jsonl", type=Path, default=None,
+                   help="optional append-only JSONL with executor intents only")
     p.add_argument("--max-ticks", type=int, default=None,
                    help="test mode: stop after this many polling ticks")
     p.add_argument("--terminal", action="store_true",
@@ -44,6 +46,10 @@ def main() -> int:
                    help="market-closed rehearsal mode with synthetic option quotes")
     p.add_argument("--demo-start-spot", type=float, default=23500.0)
     p.add_argument("--no-streaming-divergence", action="store_true")
+    p.add_argument("--disable-executor", action="store_true",
+                   help="emit raw Premium Belief signals without the shadow execution governor")
+    p.add_argument("--executor-min-entry-confidence", type=float, default=0.66)
+    p.add_argument("--executor-min-scalp-confidence", type=float, default=0.72)
     args = p.parse_args()
 
     logging.basicConfig(
@@ -62,8 +68,12 @@ def main() -> int:
         warmup_bars=args.warmup_bars,
         refresh_contracts_every=args.refresh_contracts_every,
         output_jsonl=args.out_jsonl,
+        executor_output_jsonl=args.executor_out_jsonl,
         max_ticks=args.max_ticks,
         include_streaming_divergence=not args.no_streaming_divergence,
+        enable_executor=not args.disable_executor,
+        executor_min_entry_confidence=args.executor_min_entry_confidence,
+        executor_min_scalp_confidence=args.executor_min_scalp_confidence,
         terminal=args.terminal,
         clear_terminal=not args.no_clear_terminal,
         demo_start_spot=args.demo_start_spot,

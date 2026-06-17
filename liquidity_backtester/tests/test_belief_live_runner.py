@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 
 from liqpool.research.belief.live_runner import (
@@ -98,8 +99,10 @@ def test_make_live_row_is_sentinel_model_signal_compatible():
 
 def test_demo_runner_writes_sentinel_compatible_jsonl(tmp_path):
     out = tmp_path / "liqpool_live_signals.jsonl"
+    executor_out = tmp_path / "belief_executor_intents.jsonl"
     cfg = BeliefLiveConfig(
         output_jsonl=out,
+        executor_output_jsonl=executor_out,
         max_ticks=3,
         poll_seconds=0.0,
         warmup_bars=1,
@@ -111,3 +114,9 @@ def test_demo_runner_writes_sentinel_compatible_jsonl(tmp_path):
     assert "premium_belief_engine" in rows[-1]
     assert "belief_snapshot" in rows[-1]
     assert "slot_readings" in rows[-1]
+    payload = json.loads(rows[-1])
+    assert payload["extras"]["executor"]["executor_name"] == "premium_belief_execution_governor"
+    assert payload["extras"]["executor"]["order_mode"] == "SHADOW_ONLY"
+    executor_rows = executor_out.read_text().strip().splitlines()
+    assert len(executor_rows) == 3
+    assert json.loads(executor_rows[-1])["executor"]["intent"]

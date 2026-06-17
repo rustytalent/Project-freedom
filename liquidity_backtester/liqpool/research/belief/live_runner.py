@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from liqpool.contracts.signals import ModelSignal
 from liqpool.research.belief.engine import BeliefEngine, BeliefEngineConfig, BeliefSnapshot
+from liqpool.research.belief.executor import BeliefExecutionGovernor, ExecutionGovernorConfig
 from liqpool.research.belief.mark_price import Quote
 from liqpool.research.streaming_divergence import StreamingDivergenceEngine, StreamingRead
 
@@ -66,9 +67,13 @@ class BeliefLiveConfig:
     warmup_bars: int = 80
     refresh_contracts_every: int = 30
     output_jsonl: Path = Path("/var/lib/sentinel/liqpool_live_signals.jsonl")
+    executor_output_jsonl: Optional[Path] = None
     shadow_only: bool = True
     max_ticks: Optional[int] = None
     include_streaming_divergence: bool = True
+    enable_executor: bool = True
+    executor_min_entry_confidence: float = 0.66
+    executor_min_scalp_confidence: float = 0.72
     min_quote_gap_seconds: float = 1.05
     terminal: bool = False
     clear_terminal: bool = True
@@ -83,6 +88,7 @@ class LiveBeliefRow:
     snapshot: Dict[str, Any]
     stream: Optional[Dict[str, Any]]
     contracts: List[Dict[str, Any]]
+    executor: Optional[Dict[str, Any]] = None
 
     def to_json_row(self) -> Dict[str, Any]:
         row = self.signal.to_row()
@@ -92,6 +98,8 @@ class LiveBeliefRow:
         if self.stream is not None:
             row["extras"]["streaming_divergence"] = self.stream
         row["extras"]["contracts"] = self.contracts
+        if self.executor is not None:
+            row["extras"]["executor"] = self.executor
         return row
 
 
@@ -250,6 +258,7 @@ def model_signal_from_snapshot(
     *,
     asset: str,
     stream: Optional[StreamingRead] = None,
+    executor: Optional[Mapping[str, Any]] = None,
 ) -> ModelSignal:
     decision = snapshot.decision
     reason_codes = []
@@ -263,6 +272,8 @@ def model_signal_from_snapshot(
         reason_codes.append(f"battlefield={snapshot.battlefield.verdict}")
     if stream is not None and stream.stable_verdict:
         reason_codes.append(f"stream={stream.stable_verdict}")
+    if executor is not None and executor.get("intent"):
+        reason_codes.append(f"executor={executor.get('intent')}")
 
     risk = "shadow_only"
     if decision.action in {"NO_TRADE", "WAIT"}:
@@ -287,6 +298,7 @@ def model_signal_from_snapshot(
             "strike": decision.strike.to_dict(),
             "bars_seen": snapshot.bars_seen,
             "is_warm": snapshot.is_warm,
+            "executor": executor,
         },
         source="liqpool",
     )
@@ -298,9 +310,10 @@ def make_live_row(
     asset: str,
     contracts: Mapping[ContractKey, OptionContract],
     stream: Optional[StreamingRead] = None,
+    executor: Optional[Mapping[str, Any]] = None,
 ) -> LiveBeliefRow:
     return LiveBeliefRow(
-        signal=model_signal_from_snapshot(snapshot, asset=asset, stream=stream),
+        signal=model_signal_from_snapshot(snapshot, asset=asset, stream=stream, executor=executor),
         snapshot=snapshot.to_dict(),
         stream=stream.to_dict() if stream is not None else None,
         contracts=[
@@ -314,7 +327,50 @@ def make_live_row(
             }
             for c in sorted(contracts.values(), key=lambda x: (x.strike, x.option_type))
         ],
+        executor=dict(executor) if executor is not None else None,
     )
+
+
+def _executor_for_config(cfg: BeliefLiveConfig) -> Optional[BeliefExecutionGovernor]:
+    if not cfg.enable_executor:
+        return None
+    return BeliefExecutionGovernor(ExecutionGovernorConfig(
+        min_warm_bars=max(1, int(cfg.warmup_bars)),
+        min_entry_confidence=cfg.executor_min_entry_confidence,
+        min_scalp_confidence=cfg.executor_min_scalp_confidence,
+    ))
+
+
+def _executor_intent(
+    governor: Optional[BeliefExecutionGovernor],
+    snapshot: BeliefSnapshot,
+    stream: Optional[StreamingRead],
+) -> Optional[Dict[str, Any]]:
+    if governor is None:
+        return None
+    stream_payload = stream.to_dict() if stream is not None else None
+    return governor.evaluate(snapshot.to_dict(), stream_payload).to_dict()
+
+
+def _write_executor_row(
+    path: Optional[Path],
+    *,
+    asset: str,
+    snapshot: BeliefSnapshot,
+    executor: Optional[Mapping[str, Any]],
+) -> None:
+    if path is None or executor is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts_ist": now_ist_hms(),
+        "asset": asset,
+        "spot": snapshot.spot,
+        "bars_seen": snapshot.bars_seen,
+        "executor": dict(executor),
+    }
+    with path.open("a", buffering=1) as fh:
+        fh.write(json.dumps(row, default=str, separators=(",", ":")) + "\n")
 
 
 def terminal_view(row: LiveBeliefRow) -> str:
@@ -327,6 +383,7 @@ def terminal_view(row: LiveBeliefRow) -> str:
     battlefield = snap.get("battlefield", {})
     winding = snap.get("winding", {})
     stream = row.stream or {}
+    executor = row.executor or {}
     strike = decision.get("strike", {}) or {}
 
     lines = [
@@ -356,6 +413,11 @@ def terminal_view(row: LiveBeliefRow) -> str:
         f"STREAM: stable={stream.get('stable_verdict', 'NA')}  "
         f"provisional={stream.get('provisional_verdict', 'NA')}  "
         f"action={stream.get('action', 'NA')}  dir={stream.get('direction', 'NA')}",
+        f"EXECUTOR: intent={executor.get('intent', 'DISABLED')}  "
+        f"allowed={executor.get('allowed', False)}  "
+        f"size={float(executor.get('size_fraction') or 0.0):.2f}  "
+        f"profile={executor.get('profile', 'NA') or 'NA'}  "
+        f"mode={executor.get('order_mode', 'SHADOW_ONLY')}",
         "",
         "CONTRACTS:",
     ]
@@ -393,6 +455,7 @@ class KiteBeliefLiveRunner:
             levels=cfg.levels,
             warmup_bars=cfg.warmup_bars,
         ))
+        self.executor = _executor_for_config(cfg)
         self.streaming = StreamingDivergenceEngine() if cfg.include_streaming_divergence else None
         self._kite = None
         self._contracts: Dict[ContractKey, OptionContract] = {}
@@ -491,22 +554,31 @@ class KiteBeliefLiveRunner:
                         hunt_verdict=(stream.stable_verdict if stream is not None else ""),
                         trap_verdict=(stream.stable_verdict if stream is not None else ""),
                     )
+                    executor = _executor_intent(self.executor, snapshot, stream)
                     row = make_live_row(
                         snapshot,
                         asset=self.cfg.underlying,
                         contracts=self._contracts,
                         stream=stream,
+                        executor=executor,
                     )
                     fh.write(json.dumps(row.to_json_row(), default=str, separators=(",", ":")) + "\n")
+                    _write_executor_row(
+                        self.cfg.executor_output_jsonl,
+                        asset=self.cfg.underlying,
+                        snapshot=snapshot,
+                        executor=executor,
+                    )
                     if self.cfg.terminal:
                         print_terminal(row, clear=self.cfg.clear_terminal)
                     LOG.info(
-                        "tick=%s spot=%.2f action=%s confidence=%.2f warm=%s reason=%s",
+                        "tick=%s spot=%.2f action=%s confidence=%.2f warm=%s executor=%s reason=%s",
                         tick_no,
                         spot,
                         snapshot.decision.action,
                         snapshot.decision.confidence,
                         snapshot.is_warm,
+                        (executor or {}).get("intent", "disabled"),
                         snapshot.decision.no_trade_reason or snapshot.decision.thesis_state,
                     )
                 except KeyboardInterrupt:
@@ -535,6 +607,7 @@ class DemoBeliefLiveRunner:
             levels=cfg.levels,
             warmup_bars=cfg.warmup_bars,
         ))
+        self.executor = _executor_for_config(cfg)
         self.streaming = StreamingDivergenceEngine() if cfg.include_streaming_divergence else None
         self.random = random.Random(seed)
         self._contracts: Dict[ContractKey, OptionContract] = {}
@@ -615,22 +688,31 @@ class DemoBeliefLiveRunner:
                     hunt_verdict=(stream.stable_verdict if stream is not None else ""),
                     trap_verdict=(stream.stable_verdict if stream is not None else ""),
                 )
+                executor = _executor_intent(self.executor, snapshot, stream)
                 row = make_live_row(
                     snapshot,
                     asset=f"{self.cfg.underlying}_DEMO",
                     contracts=self._contracts,
                     stream=stream,
+                    executor=executor,
                 )
                 fh.write(json.dumps(row.to_json_row(), default=str, separators=(",", ":")) + "\n")
+                _write_executor_row(
+                    self.cfg.executor_output_jsonl,
+                    asset=f"{self.cfg.underlying}_DEMO",
+                    snapshot=snapshot,
+                    executor=executor,
+                )
                 if self.cfg.terminal:
                     print_terminal(row, clear=self.cfg.clear_terminal)
                 LOG.info(
-                    "demo_tick=%s spot=%.2f action=%s confidence=%.2f warm=%s",
+                    "demo_tick=%s spot=%.2f action=%s confidence=%.2f warm=%s executor=%s",
                     tick_no,
                     spot,
                     snapshot.decision.action,
                     snapshot.decision.confidence,
                     snapshot.is_warm,
+                    (executor or {}).get("intent", "disabled"),
                 )
                 tick_no += 1
                 if self.cfg.poll_seconds > 0:
