@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from liqpool.research.belief.live_runner import (
+    BeliefLiveConfig,
+    DemoBeliefLiveRunner,
     kite_quote_to_belief_quote,
     make_live_row,
     select_belief_contracts,
@@ -77,3 +79,19 @@ def test_make_live_row_is_sentinel_model_signal_compatible():
     assert row["asset"] == "NIFTY"
     assert row["trust_tier"] == "SHADOW"
     assert row["extras"]["belief_snapshot"]["decision"]["action"]
+
+
+def test_demo_runner_writes_sentinel_compatible_jsonl(tmp_path):
+    out = tmp_path / "liqpool_live_signals.jsonl"
+    cfg = BeliefLiveConfig(
+        output_jsonl=out,
+        max_ticks=3,
+        poll_seconds=0.0,
+        warmup_bars=1,
+        levels=1,
+    )
+    DemoBeliefLiveRunner(cfg=cfg).run_forever()
+    rows = out.read_text().strip().splitlines()
+    assert len(rows) == 3
+    assert "premium_belief_engine" in rows[-1]
+    assert "belief_snapshot" in rows[-1]

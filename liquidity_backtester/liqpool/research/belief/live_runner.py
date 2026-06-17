@@ -14,6 +14,8 @@ import json
 import logging
 import math
 import os
+import random
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -68,6 +70,9 @@ class BeliefLiveConfig:
     max_ticks: Optional[int] = None
     include_streaming_divergence: bool = True
     min_quote_gap_seconds: float = 1.05
+    terminal: bool = False
+    clear_terminal: bool = True
+    demo_start_spot: float = 23500.0
 
 
 @dataclass(frozen=True)
@@ -312,6 +317,70 @@ def make_live_row(
     )
 
 
+def terminal_view(row: LiveBeliefRow) -> str:
+    """Compact operator screen for a single belief row."""
+
+    snap = row.snapshot
+    decision = snap.get("decision", {})
+    thesis = snap.get("thesis", {})
+    iv_state = snap.get("iv_state", {})
+    battlefield = snap.get("battlefield", {})
+    winding = snap.get("winding", {})
+    stream = row.stream or {}
+    strike = decision.get("strike", {}) or {}
+
+    lines = [
+        "=" * 78,
+        "PREMIUM BELIEF ENGINE - LIVE SHADOW TERMINAL",
+        "=" * 78,
+        f"ts={snap.get('ts')}  spot={float(snap.get('spot', 0.0)):.2f}  "
+        f"bars={snap.get('bars_seen')}  warm={snap.get('is_warm')}",
+        "",
+        f"ACTION: {decision.get('action')}  allowed={decision.get('trade_allowed')}  "
+        f"direction={decision.get('direction')}  confidence={float(decision.get('confidence', 0.0)):.2f}",
+        f"STRIKE: {strike.get('label', '') or 'NA'}  side={strike.get('side', '') or 'NA'}  "
+        f"level={strike.get('level', 0)}",
+        f"REASON: {decision.get('no_trade_reason') or decision.get('thesis_state') or 'none'}",
+        "",
+        f"THESIS: {thesis.get('composite_state')}  "
+        f"bull={float(thesis.get('bull_thesis_score', 0.0)):.1f}  "
+        f"bear={float(thesis.get('bear_thesis_score', 0.0)):.1f}  "
+        f"danger={float(thesis.get('no_trade_score', 0.0)):.1f}",
+        f"IV: {iv_state.get('state')}  dir={iv_state.get('direction')}  "
+        f"conf={float(iv_state.get('confidence', 0.0)):.2f}  "
+        f"clean_marks={float(iv_state.get('clean_mark_fraction', 0.0)):.2f}",
+        f"BATTLEFIELD: {battlefield.get('verdict')}  dir={battlefield.get('direction')}  "
+        f"conf={float(battlefield.get('confidence', 0.0)):.2f}",
+        f"WINDING: {winding.get('zone')}  conf={float(winding.get('confidence', 0.0)):.2f}",
+        "",
+        f"STREAM: stable={stream.get('stable_verdict', 'NA')}  "
+        f"provisional={stream.get('provisional_verdict', 'NA')}  "
+        f"action={stream.get('action', 'NA')}  dir={stream.get('direction', 'NA')}",
+        "",
+        "CONTRACTS:",
+    ]
+    for contract in row.contracts[:12]:
+        lines.append(
+            f"  {contract['tradingsymbol']:<24} {contract['option_type']} "
+            f"strike={float(contract['strike']):.0f} exp={contract['expiry']}"
+        )
+    if len(row.contracts) > 12:
+        lines.append(f"  ... {len(row.contracts) - 12} more")
+    lines.extend([
+        "",
+        "This is SHADOW output only. No orders are placed.",
+        "=" * 78,
+    ])
+    return "\n".join(lines)
+
+
+def print_terminal(row: LiveBeliefRow, *, clear: bool = True) -> None:
+    if clear:
+        sys.stdout.write("\033[2J\033[H")
+    sys.stdout.write(terminal_view(row) + "\n")
+    sys.stdout.flush()
+
+
 class KiteBeliefLiveRunner:
     """Poll Kite quotes and feed the Premium Belief Engine."""
 
@@ -429,6 +498,8 @@ class KiteBeliefLiveRunner:
                         stream=stream,
                     )
                     fh.write(json.dumps(row.to_json_row(), default=str, separators=(",", ":")) + "\n")
+                    if self.cfg.terminal:
+                        print_terminal(row, clear=self.cfg.clear_terminal)
                     LOG.info(
                         "tick=%s spot=%.2f action=%s confidence=%.2f warm=%s reason=%s",
                         tick_no,
@@ -447,6 +518,123 @@ class KiteBeliefLiveRunner:
                 sleep_for = max(0.0, self.cfg.poll_seconds - elapsed)
                 if sleep_for:
                     time.sleep(sleep_for)
+
+
+class DemoBeliefLiveRunner:
+    """Market-closed rehearsal runner.
+
+    This generates a deterministic-ish option battlefield from a synthetic
+    spot path. It is for terminal/JOSNL plumbing and warmup/decision checks,
+    not for profitability validation.
+    """
+
+    def __init__(self, *, cfg: BeliefLiveConfig, seed: int = 7) -> None:
+        self.cfg = cfg
+        self.engine = BeliefEngine(BeliefEngineConfig(
+            strike_step=cfg.strike_step,
+            levels=cfg.levels,
+            warmup_bars=cfg.warmup_bars,
+        ))
+        self.streaming = StreamingDivergenceEngine() if cfg.include_streaming_divergence else None
+        self.random = random.Random(seed)
+        self._contracts: Dict[ContractKey, OptionContract] = {}
+
+    def _spot(self, tick_no: int) -> float:
+        drift = math.sin(tick_no / 18.0) * 38.0 + math.sin(tick_no / 7.0) * 13.0
+        slow = tick_no * 0.22
+        noise = self.random.uniform(-2.5, 2.5)
+        return float(self.cfg.demo_start_spot + drift + slow + noise)
+
+    def _contracts_for_spot(self, spot: float) -> Dict[ContractKey, OptionContract]:
+        atm = _nearest_atm(spot, self.cfg.strike_step)
+        exp = datetime.now(IST).date() + timedelta(days=3)
+        out: Dict[ContractKey, OptionContract] = {}
+        for level in range(-self.cfg.levels, self.cfg.levels + 1):
+            strike = atm + level * self.cfg.strike_step
+            for typ in ("CE", "PE"):
+                out[(float(strike), typ)] = OptionContract(
+                    tradingsymbol=f"{self.cfg.underlying}DEMO{int(strike)}{typ}",
+                    strike=float(strike),
+                    option_type=typ,
+                    expiry=exp,
+                    exchange=self.cfg.exchange,
+                )
+        return out
+
+    def _quotes(self, spot: float, tick_no: int, ts: datetime) -> Dict[ContractKey, Quote]:
+        self._contracts = self._contracts_for_spot(spot)
+        quotes: Dict[ContractKey, Quote] = {}
+        pressure = math.sin(tick_no / 11.0)
+        iv_wave = 1.0 + 0.18 * math.sin(tick_no / 23.0)
+        for key, _contract in self._contracts.items():
+            strike, typ = key
+            intrinsic = max(0.0, spot - strike) if typ == "CE" else max(0.0, strike - spot)
+            distance = abs(spot - strike) / max(self.cfg.strike_step, 1.0)
+            time_value = max(8.0, 42.0 * math.exp(-0.27 * distance)) * iv_wave
+            directional_bump = pressure * (7.0 if typ == "CE" else -7.0)
+            fair = max(1.0, intrinsic + time_value + directional_bump)
+            spread = max(0.10, fair * (0.006 + 0.002 * distance))
+            bid = max(0.05, fair - spread / 2.0)
+            ask = max(bid + 0.05, fair + spread / 2.0)
+            base_qty = max(50.0, 1600.0 - 135.0 * distance)
+            bid_qty = base_qty * (1.0 + max(0.0, pressure) * (1.0 if typ == "CE" else 0.25))
+            ask_qty = base_qty * (1.0 + max(0.0, -pressure) * (1.0 if typ == "PE" else 0.25))
+            quotes[key] = Quote(
+                bid=bid,
+                ask=ask,
+                bid_qty=bid_qty,
+                ask_qty=ask_qty,
+                ltp=(bid + ask) / 2.0,
+                ltp_age_s=0.0,
+                ts=ts,
+            )
+        return quotes
+
+    def _stream_read(self, ts: datetime, spot: float, quotes: Mapping[ContractKey, Quote]) -> Optional[StreamingRead]:
+        if self.streaming is None:
+            return None
+        ce_mark, pe_mark = _best_atm_marks(quotes, spot, self.cfg.strike_step)
+        if ce_mark is None or pe_mark is None:
+            return None
+        return self.streaming.update(ts, spot, ce_mark, pe_mark)
+
+    def run_forever(self) -> None:
+        self.cfg.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        LOG.info("starting DEMO Premium Belief runner out=%s", self.cfg.output_jsonl)
+        tick_no = 0
+        with self.cfg.output_jsonl.open("a", buffering=1) as fh:
+            while self.cfg.max_ticks is None or tick_no < self.cfg.max_ticks:
+                ts = datetime.now(IST)
+                spot = self._spot(tick_no)
+                quotes = self._quotes(spot, tick_no, ts)
+                stream = self._stream_read(ts, spot, quotes)
+                snapshot = self.engine.observe(
+                    ts=ts.isoformat(),
+                    spot=spot,
+                    quotes=quotes,
+                    hunt_verdict=(stream.stable_verdict if stream is not None else ""),
+                    trap_verdict=(stream.stable_verdict if stream is not None else ""),
+                )
+                row = make_live_row(
+                    snapshot,
+                    asset=f"{self.cfg.underlying}_DEMO",
+                    contracts=self._contracts,
+                    stream=stream,
+                )
+                fh.write(json.dumps(row.to_json_row(), default=str, separators=(",", ":")) + "\n")
+                if self.cfg.terminal:
+                    print_terminal(row, clear=self.cfg.clear_terminal)
+                LOG.info(
+                    "demo_tick=%s spot=%.2f action=%s confidence=%.2f warm=%s",
+                    tick_no,
+                    spot,
+                    snapshot.decision.action,
+                    snapshot.decision.confidence,
+                    snapshot.is_warm,
+                )
+                tick_no += 1
+                if self.cfg.poll_seconds > 0:
+                    time.sleep(self.cfg.poll_seconds)
 
 
 def runner_from_env(cfg: BeliefLiveConfig) -> KiteBeliefLiveRunner:

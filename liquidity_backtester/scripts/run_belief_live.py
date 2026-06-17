@@ -12,7 +12,11 @@ import logging
 import sys
 from pathlib import Path
 
-from liqpool.research.belief.live_runner import BeliefLiveConfig, runner_from_env
+from liqpool.research.belief.live_runner import (
+    BeliefLiveConfig,
+    DemoBeliefLiveRunner,
+    runner_from_env,
+)
 
 
 def main() -> int:
@@ -32,6 +36,13 @@ def main() -> int:
                    default=Path("/var/lib/sentinel/liqpool_live_signals.jsonl"))
     p.add_argument("--max-ticks", type=int, default=None,
                    help="test mode: stop after this many polling ticks")
+    p.add_argument("--terminal", action="store_true",
+                   help="render a live operator screen in this terminal")
+    p.add_argument("--no-clear-terminal", action="store_true",
+                   help="append terminal frames instead of clearing the screen")
+    p.add_argument("--demo", action="store_true",
+                   help="market-closed rehearsal mode with synthetic option quotes")
+    p.add_argument("--demo-start-spot", type=float, default=23500.0)
     p.add_argument("--no-streaming-divergence", action="store_true")
     args = p.parse_args()
 
@@ -53,9 +64,12 @@ def main() -> int:
         output_jsonl=args.out_jsonl,
         max_ticks=args.max_ticks,
         include_streaming_divergence=not args.no_streaming_divergence,
+        terminal=args.terminal,
+        clear_terminal=not args.no_clear_terminal,
+        demo_start_spot=args.demo_start_spot,
     )
     try:
-        runner = runner_from_env(cfg)
+        runner = DemoBeliefLiveRunner(cfg=cfg) if args.demo else runner_from_env(cfg)
         runner.run_forever()
     except KeyboardInterrupt:
         return 130
