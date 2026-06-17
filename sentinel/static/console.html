@@ -206,7 +206,7 @@
             <span class="title">Premium Belief Engine</span>
             <div class="right row-flex">
               <span class="hint" id="be_status">waiting for live rows</span>
-              <button class="btn sm primary" onclick="refreshBelief()">Refresh</button>
+              <button class="btn sm primary" onclick="refreshBelief(true)">Refresh</button>
             </div>
           </div>
           <div class="body" id="be_top">
@@ -235,6 +235,9 @@
                 <option value="7200">60m</option>
                 <option value="all">All</option>
               </select>
+              <button class="btn sm ghost" onclick="beliefTapeZoom(0.78)">Zoom -</button>
+              <button class="btn sm ghost" onclick="beliefTapeZoom(1.28)">Zoom +</button>
+              <button class="btn sm ghost" onclick="beliefTapeGoLive()">Live edge</button>
               <button class="btn sm" onclick="resetBeliefCanvas()">Reset canvas</button>
             </div>
           </div>
@@ -253,6 +256,7 @@
                 <div class="chart-wrap belief-chart">
                   <svg id="be_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
+                <div id="be_trace_values" class="belief-chart-values"></div>
                 <div class="chart-explain">
                   <span><b style="color:var(--steel)">steel</b> spot inside the visible range</span>
                   <span><b style="color:var(--amber)">amber</b> decision confidence</span>
@@ -271,6 +275,7 @@
                 <div class="chart-wrap belief-chart">
                   <svg id="be_thesis_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
+                <div id="be_thesis_values" class="belief-chart-values"></div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> bull thesis</span>
                   <span><b style="color:var(--red)">red</b> bear thesis</span>
@@ -290,6 +295,7 @@
                 <div class="chart-wrap belief-chart">
                   <svg id="be_quality_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
+                <div id="be_quality_values" class="belief-chart-values"></div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> clean mark fraction</span>
                   <span><b style="color:var(--steel)">steel</b> spread friendliness</span>
@@ -308,6 +314,7 @@
                 <div class="chart-wrap belief-chart">
                   <svg id="be_rail_trace" width="100%" height="100%" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
                 </div>
+                <div id="be_rail_values" class="belief-chart-values"></div>
                 <div class="chart-explain">
                   <span><b style="color:var(--green)">green</b> CE signed residual z</span>
                   <span><b style="color:var(--red)">red</b> PE signed residual z</span>
@@ -920,21 +927,37 @@ async function runEquity(){
 let BE_LAST = null;
 let BE_LAST_ROW_KEY = "";
 let BE_LAST_ROW_SEEN_AT = 0;
-const BE_REFRESH_MS = 500;
+let BE_SERIES_CACHE = [];
+let BE_FETCHING = false;
+let BE_LAST_FULL_REFRESH_AT = 0;
+let BE_LAST_RENDER_SERIES_KEY = "";
+let BE_POLL_LOOP_STARTED = false;
+const BE_LIVE_REFRESH_MS = 350;
+const BE_REFRESH_MS = BE_LIVE_REFRESH_MS;
 const BE_STALE_AFTER_MS = 2500;
 const BE_HISTORY_LIMIT = 7200;       // 30m at 250ms, 60m at 500ms.
-const BE_CHART_MAX_POINTS = 900;     // Draw fast; preserve the full tape server-side.
-const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v3";
+const BE_FAST_HISTORY_LIMIT = 28;     // Incremental refreshes pull only the latest rows.
+const BE_LOCAL_SERIES_LIMIT = 14400;  // Keep enough local tape for sliding back without server churn.
+const BE_FULL_HISTORY_REFRESH_MS = 10000;
+const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v4";
 const BE_WINDOW_KEY = "sentinel_premium_belief_window_v1";
+const BE_VIEW_KEY = "sentinel_premium_belief_view_v1";
 const BE_DEFAULT_WINDOW = "7200";
+const BE_MIN_CARD_W = 420;
+const BE_MIN_CARD_H = 260;
+const BE_MAX_CARD_H = 920;
+const BE_POINT_PX_MIN = 2.5;
+const BE_POINT_PX_MAX = 18;
+const BE_POINT_PX_DEFAULT = 6;
 const BE_CARD_DEFAULTS = [
-  {id:"price", label:"Price + decision", height:300, hidden:false},
-  {id:"thesis", label:"Thesis memory", height:300, hidden:false},
-  {id:"quality", label:"Mark + IV quality", height:300, hidden:false},
-  {id:"rails", label:"Rail pressure", height:300, hidden:false},
+  {id:"price", label:"Price + decision", height:340, hidden:false},
+  {id:"thesis", label:"Thesis memory", height:340, hidden:false},
+  {id:"quality", label:"Mark + IV quality", height:340, hidden:false},
+  {id:"rails", label:"Rail pressure", height:340, hidden:false},
 ];
 let BE_CANVAS = null;
-let BE_DRAG_ID = "";
+let BE_VIEW = null;
+let BE_DRAG = null;
 let BE_RESIZE = null;
 const pct = v => `${Math.round((Number(v)||0)*100)}%`;
 const pct1 = v => `${((Number(v)||0)*100).toFixed(1)}%`;
@@ -952,8 +975,11 @@ function beHealthClass(h){
 }
 function beDefaultCanvas(){
   return {
+    version: 4,
     order: BE_CARD_DEFAULTS.map(c=>c.id),
-    cards: Object.fromEntries(BE_CARD_DEFAULTS.map(c=>[c.id, {height:c.height, hidden:c.hidden}])),
+    cards: Object.fromEntries(BE_CARD_DEFAULTS.map((c,i)=>[c.id, {
+      x: null, y: null, w: null, height:c.height, hidden:c.hidden, z:i + 1,
+    }])),
   };
 }
 function normalizeBeliefCanvas(raw){
@@ -966,10 +992,18 @@ function normalizeBeliefCanvas(raw){
   BE_CARD_DEFAULTS.forEach(c=>{
     const prev = cards[c.id] || {};
     const h = Number(prev.height);
+    const x = Number(prev.x);
+    const y = Number(prev.y);
+    const w = Number(prev.w);
+    const z = Number(prev.z);
     base.cards[c.id] = {
-      height: Number.isFinite(h) ? Math.max(180, Math.min(760, h)) : c.height,
+      x: Number.isFinite(x) ? Math.max(0, x) : null,
+      y: Number.isFinite(y) ? Math.max(0, y) : null,
+      w: Number.isFinite(w) ? Math.max(BE_MIN_CARD_W, w) : null,
+      height: Number.isFinite(h) ? Math.max(BE_MIN_CARD_H, Math.min(BE_MAX_CARD_H, h)) : c.height,
       hidden: Boolean(prev.hidden),
       wide: Boolean(prev.wide),
+      z: Number.isFinite(z) ? Math.max(1, z) : base.cards[c.id].z,
     };
   });
   return base;
@@ -986,6 +1020,22 @@ function loadBeliefCanvas(){
 function saveBeliefCanvas(){
   if(BE_CANVAS) localStorage.setItem(BE_CANVAS_KEY, JSON.stringify(BE_CANVAS));
 }
+function loadBeliefView(){
+  if(BE_VIEW) return BE_VIEW;
+  try{
+    const raw = JSON.parse(localStorage.getItem(BE_VIEW_KEY) || "null") || {};
+    BE_VIEW = {
+      live: raw.live !== false,
+      pxPerPoint: Math.max(BE_POINT_PX_MIN, Math.min(BE_POINT_PX_MAX, Number(raw.pxPerPoint) || BE_POINT_PX_DEFAULT)),
+    };
+  }catch(_){
+    BE_VIEW = {live:true, pxPerPoint:BE_POINT_PX_DEFAULT};
+  }
+  return BE_VIEW;
+}
+function saveBeliefView(){
+  if(BE_VIEW) localStorage.setItem(BE_VIEW_KEY, JSON.stringify(BE_VIEW));
+}
 function beliefCardMeta(id){
   return BE_CARD_DEFAULTS.find(c=>c.id === id) || {id, label:id};
 }
@@ -998,10 +1048,49 @@ function redrawBeliefCharts(){
     drawBeliefRailTrace(series);
   }
 }
+function beliefStackWidth(stack){
+  return Math.max(720, Number(stack?.clientWidth || 0) - 2);
+}
+function ensureBeliefCanvasLayout(stack){
+  const state = loadBeliefCanvas();
+  const width = beliefStackWidth(stack);
+  const gap = 16;
+  const colW = Math.max(BE_MIN_CARD_W, Math.floor((width - gap - 32) / 2));
+  const positions = {
+    price: {x:16, y:16, w:colW},
+    thesis: {x:16 + colW + gap, y:16, w:colW},
+    quality: {x:16, y:390, w:colW},
+    rails: {x:16 + colW + gap, y:390, w:colW},
+  };
+  BE_CARD_DEFAULTS.forEach((meta, i)=>{
+    const cfg = state.cards[meta.id];
+    const p = positions[meta.id] || {x:16, y:16 + i * 370, w:colW};
+    if(cfg.x == null || cfg.y == null || cfg.w == null){
+      cfg.x = p.x;
+      cfg.y = p.y;
+      cfg.w = p.w;
+      cfg.height = cfg.height || meta.height;
+    }
+    cfg.w = Math.max(BE_MIN_CARD_W, Math.min(cfg.w, Math.max(BE_MIN_CARD_W, width - 24)));
+    cfg.x = Math.max(0, Math.min(cfg.x, Math.max(0, width - cfg.w - 8)));
+    cfg.y = Math.max(0, cfg.y);
+  });
+}
+function updateBeliefStackHeight(stack){
+  const state = loadBeliefCanvas();
+  let maxY = 760;
+  BE_CARD_DEFAULTS.forEach(meta=>{
+    const cfg = state.cards[meta.id] || {};
+    if(cfg.hidden) return;
+    maxY = Math.max(maxY, Number(cfg.y || 0) + Number(cfg.height || meta.height) + 190);
+  });
+  stack.style.minHeight = `${Math.ceil(maxY)}px`;
+}
 function applyBeliefCanvas(){
   const state = loadBeliefCanvas();
   const stack = document.getElementById("be_chart_stack");
   if(!stack) return;
+  ensureBeliefCanvasLayout(stack);
   state.order.forEach(id=>{
     const card = stack.querySelector(`[data-chart-card="${id}"]`) || document.querySelector(`[data-chart-card="${id}"]`);
     if(card) stack.appendChild(card);
@@ -1011,10 +1100,16 @@ function applyBeliefCanvas(){
     if(!card) return;
     const cfg = state.cards[meta.id] || {};
     card.style.display = cfg.hidden ? "none" : "";
+    card.style.left = `${Number(cfg.x || 0)}px`;
+    card.style.top = `${Number(cfg.y || 0)}px`;
+    card.style.width = `${Number(cfg.w || BE_MIN_CARD_W)}px`;
+    card.style.height = "";
+    card.style.zIndex = String(Number(cfg.z || 1));
     card.style.setProperty("--belief-chart-height", `${cfg.height || meta.height}px`);
     card.classList.toggle("is-wide", Boolean(cfg.wide));
     card.classList.remove("drag-over");
   });
+  updateBeliefStackHeight(stack);
   renderBeliefHiddenCards();
   redrawBeliefCharts();
 }
@@ -1043,34 +1138,46 @@ function resetBeliefCanvas(){
 }
 function moveBeliefCard(id, delta){
   const state = loadBeliefCanvas();
-  const i = state.order.indexOf(id);
-  if(i < 0) return;
-  const j = Math.max(0, Math.min(state.order.length - 1, i + delta));
-  state.order.splice(i, 1);
-  state.order.splice(j, 0, id);
+  if(!state.cards[id]) return;
+  const current = Number(state.cards[id].z || 1);
+  state.cards[id].z = Math.max(1, Math.min(99, current - delta));
   saveBeliefCanvas();
   applyBeliefCanvas();
 }
 function resizeBeliefCard(id, delta){
   const state = loadBeliefCanvas();
   if(!state.cards[id]) return;
-  state.cards[id].height = Math.max(180, Math.min(760, Number(state.cards[id].height || 300) + delta));
+  state.cards[id].height = Math.max(BE_MIN_CARD_H, Math.min(BE_MAX_CARD_H, Number(state.cards[id].height || 300) + delta));
   saveBeliefCanvas();
   applyBeliefCanvas();
 }
 function toggleBeliefCardWidth(id){
   const state = loadBeliefCanvas();
   if(!state.cards[id]) return;
-  state.cards[id].wide = !state.cards[id].wide;
+  const stack = document.getElementById("be_chart_stack");
+  const width = beliefStackWidth(stack);
+  const cfg = state.cards[id];
+  cfg.wide = !cfg.wide;
+  if(cfg.wide){
+    cfg.x = 16;
+    cfg.w = Math.max(BE_MIN_CARD_W, width - 32);
+  }else{
+    cfg.w = Math.max(BE_MIN_CARD_W, Math.floor((width - 48) / 2));
+  }
   saveBeliefCanvas();
   applyBeliefCanvas();
 }
 function startBeliefCardResize(ev, id){
   ev.preventDefault();
   const state = loadBeliefCanvas();
-  const startY = ev.clientY;
-  const startH = Number(state.cards[id]?.height || 300);
-  BE_RESIZE = {id, startY, startH};
+  const cfg = state.cards[id] || {};
+  BE_RESIZE = {
+    id,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    startW: Number(cfg.w || BE_MIN_CARD_W),
+    startH: Number(cfg.height || 300),
+  };
   document.body.classList.add("is-resizing-belief");
   window.addEventListener("pointermove", onBeliefCardResize);
   window.addEventListener("pointerup", endBeliefCardResize, {once:true});
@@ -1078,10 +1185,18 @@ function startBeliefCardResize(ev, id){
 function onBeliefCardResize(ev){
   if(!BE_RESIZE) return;
   const state = loadBeliefCanvas();
-  const h = Math.max(180, Math.min(760, BE_RESIZE.startH + ev.clientY - BE_RESIZE.startY));
+  const stack = document.getElementById("be_chart_stack");
+  const maxW = Math.max(BE_MIN_CARD_W, beliefStackWidth(stack) - Number(state.cards[BE_RESIZE.id].x || 0) - 12);
+  const w = Math.max(BE_MIN_CARD_W, Math.min(maxW, BE_RESIZE.startW + ev.clientX - BE_RESIZE.startX));
+  const h = Math.max(BE_MIN_CARD_H, Math.min(BE_MAX_CARD_H, BE_RESIZE.startH + ev.clientY - BE_RESIZE.startY));
+  state.cards[BE_RESIZE.id].w = w;
   state.cards[BE_RESIZE.id].height = h;
   const card = document.querySelector(`[data-chart-card="${BE_RESIZE.id}"]`);
-  if(card) card.style.setProperty("--belief-chart-height", `${h}px`);
+  if(card){
+    card.style.width = `${w}px`;
+    card.style.setProperty("--belief-chart-height", `${h}px`);
+  }
+  if(stack) updateBeliefStackHeight(stack);
   redrawBeliefCharts();
 }
 function endBeliefCardResize(){
@@ -1092,35 +1207,44 @@ function endBeliefCardResize(){
 }
 function startBeliefPointerDrag(ev, id){
   ev.preventDefault();
+  ev.stopPropagation();
   const card = document.querySelector(`[data-chart-card="${id}"]`);
   if(!card) return;
-  BE_DRAG_ID = id;
+  const state = loadBeliefCanvas();
+  const cfg = state.cards[id];
+  const maxZ = Math.max(...Object.values(state.cards).map(c=>Number(c.z || 1)), 1);
+  cfg.z = maxZ + 1;
+  BE_DRAG = {
+    id,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    originX: Number(cfg.x || 0),
+    originY: Number(cfg.y || 0),
+  };
   card.classList.add("is-dragging");
+  card.style.zIndex = String(cfg.z);
   document.body.classList.add("is-dragging-belief");
   window.addEventListener("pointermove", onBeliefPointerDrag);
   window.addEventListener("pointerup", endBeliefPointerDrag, {once:true});
 }
 function onBeliefPointerDrag(ev){
-  if(!BE_DRAG_ID) return;
-  const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-chart-card]");
-  if(!target || target.dataset.chartCard === BE_DRAG_ID || target.style.display === "none") return;
+  if(!BE_DRAG) return;
   const state = loadBeliefCanvas();
-  const from = state.order.indexOf(BE_DRAG_ID);
-  let to = state.order.indexOf(target.dataset.chartCard);
-  if(from < 0 || to < 0 || from === to) return;
-  const rect = target.getBoundingClientRect();
-  const vertical = Math.abs(ev.clientY - (rect.top + rect.height / 2)) >= Math.abs(ev.clientX - (rect.left + rect.width / 2));
-  const insertAfter = vertical ? ev.clientY > rect.top + rect.height / 2 : ev.clientX > rect.left + rect.width / 2;
-  state.order.splice(from, 1);
-  if(from < to) to -= 1;
-  state.order.splice(insertAfter ? to + 1 : to, 0, BE_DRAG_ID);
-  saveBeliefCanvas();
-  applyBeliefCanvas();
-  document.querySelector(`[data-chart-card="${BE_DRAG_ID}"]`)?.classList.add("is-dragging");
-  target.classList.add("drag-over");
+  const cfg = state.cards[BE_DRAG.id];
+  const stack = document.getElementById("be_chart_stack");
+  const maxX = Math.max(0, beliefStackWidth(stack) - Number(cfg.w || BE_MIN_CARD_W) - 8);
+  cfg.x = Math.max(0, Math.min(maxX, BE_DRAG.originX + ev.clientX - BE_DRAG.startX));
+  cfg.y = Math.max(0, BE_DRAG.originY + ev.clientY - BE_DRAG.startY);
+  const card = document.querySelector(`[data-chart-card="${BE_DRAG.id}"]`);
+  if(card){
+    card.style.left = `${cfg.x}px`;
+    card.style.top = `${cfg.y}px`;
+  }
+  if(stack) updateBeliefStackHeight(stack);
 }
 function endBeliefPointerDrag(){
-  BE_DRAG_ID = "";
+  saveBeliefCanvas();
+  BE_DRAG = null;
   document.body.classList.remove("is-dragging-belief");
   document.querySelectorAll(".belief-tape-card").forEach(c=>c.classList.remove("is-dragging","drag-over"));
   window.removeEventListener("pointermove", onBeliefPointerDrag);
@@ -1134,9 +1258,9 @@ function injectBeliefCardControls(){
       const tools = document.createElement("div");
       tools.className = "belief-card-tools";
       tools.innerHTML = `
-        <span class="drag-chip" title="Drag this chart by the header">drag</span>
-        <button class="mini-btn" data-act="up" title="Move chart up">Up</button>
-        <button class="mini-btn" data-act="down" title="Move chart down">Down</button>
+        <span class="drag-chip" title="Drag this chart freely by the header">drag</span>
+        <button class="mini-btn" data-act="up" title="Bring chart forward">Front</button>
+        <button class="mini-btn" data-act="down" title="Send chart backward">Back</button>
         <button class="mini-btn" data-act="shorter" title="Make chart shorter">-</button>
         <button class="mini-btn" data-act="taller" title="Make chart taller">+</button>
         <button class="mini-btn" data-act="wide" title="Toggle full-row width">Wide</button>
@@ -1190,6 +1314,42 @@ function getBeliefWindowLimit(){
   const raw = localStorage.getItem(BE_WINDOW_KEY) || BE_DEFAULT_WINDOW;
   return raw === "all" ? "all" : Math.max(60, Number(raw) || Number(BE_DEFAULT_WINDOW));
 }
+function beliefTapeZoom(factor){
+  const view = loadBeliefView();
+  view.pxPerPoint = Math.max(BE_POINT_PX_MIN, Math.min(BE_POINT_PX_MAX, view.pxPerPoint * Number(factor || 1)));
+  saveBeliefView();
+  redrawBeliefCharts();
+}
+function beliefTapeGoLive(){
+  const view = loadBeliefView();
+  view.live = true;
+  saveBeliefView();
+  syncBeliefChartScrolls(true);
+}
+function syncBeliefChartScrolls(forceLive=false){
+  const view = loadBeliefView();
+  const charts = Array.from(document.querySelectorAll(".belief-chart"));
+  if(!charts.length) return;
+  if(forceLive || view.live){
+    charts.forEach(chart=>{
+      chart.scrollLeft = Math.max(0, chart.scrollWidth - chart.clientWidth);
+    });
+  }
+}
+function wireBeliefChartScroll(){
+  document.querySelectorAll(".belief-chart").forEach(chart=>{
+    if(chart.dataset.scrollReady) return;
+    chart.dataset.scrollReady = "1";
+    chart.addEventListener("scroll", ()=>{
+      const view = loadBeliefView();
+      const atLive = chart.scrollLeft >= chart.scrollWidth - chart.clientWidth - 12;
+      if(view.live !== atLive){
+        view.live = atLive;
+        saveBeliefView();
+      }
+    }, {passive:true});
+  });
+}
 function setBeliefTapeWindow(value){
   localStorage.setItem(BE_WINDOW_KEY, value || BE_DEFAULT_WINDOW);
   const sel = document.getElementById("be_tape_window");
@@ -1198,6 +1358,8 @@ function setBeliefTapeWindow(value){
 }
 function initBeliefCanvas(){
   injectBeliefCardControls();
+  wireBeliefChartScroll();
+  loadBeliefView();
   const value = localStorage.getItem(BE_WINDOW_KEY) || BE_DEFAULT_WINDOW;
   const sel = document.getElementById("be_tape_window");
   if(sel) sel.value = value;
@@ -1395,13 +1557,12 @@ function renderBelief(payload){
   document.getElementById("be_raw").textContent = JSON.stringify(snap, null, 2);
   const tapeRows = Array.isArray(payload.series) ? payload.series.length : 0;
   const windowRows = beliefWindowRows(payload.series || []).length;
-  const drawnRows = Math.min(windowRows, BE_CHART_MAX_POINTS);
   const windowLimit = getBeliefWindowLimit();
   const windowLabel = windowLimit === "all" ? "all retained rows" : `${windowLimit} row window`;
   const windowEl = document.getElementById("be_chart_window");
   if(windowEl){
     windowEl.textContent = tapeRows
-      ? `${tapeRows} retained · ${windowRows} visible · ${drawnRows} drawn · ${windowLabel}`
+      ? `${tapeRows} retained · ${windowRows} visible · ${loadBeliefView().pxPerPoint.toFixed(1)}px/tick · ${windowLabel}`
       : "waiting for chart tape";
   }
   drawBeliefTrace(payload.series || []);
@@ -1416,31 +1577,7 @@ function beliefWindowRows(series){
   return rows.slice(-limit);
 }
 function visibleChartSeries(series, lines=[]){
-  const rows = beliefWindowRows(series);
-  if(rows.length <= BE_CHART_MAX_POINTS) return rows;
-  const step = Math.max(1, Math.ceil(rows.length / BE_CHART_MAX_POINTS));
-  const compact = [];
-  for(let i=0; i<rows.length; i+=step){
-    const bucket = rows.slice(i, Math.min(rows.length, i + step));
-    const point = {...bucket[bucket.length - 1]};
-    const finalBucket = i + step >= rows.length;
-    if(!finalBucket){
-      lines.forEach(line=>{
-        let sum = 0;
-        let n = 0;
-        bucket.forEach(p=>{
-          const v = Number(p?.[line.key]);
-          if(Number.isFinite(v)){
-            sum += v;
-            n += 1;
-          }
-        });
-        if(n) point[line.key] = sum / n;
-      });
-    }
-    compact.push(point);
-  }
-  return compact;
+  return beliefWindowRows(series);
 }
 function chartHeightForSvg(svgId, fallback=260){
   const svg = document.getElementById(svgId);
@@ -1448,15 +1585,43 @@ function chartHeightForSvg(svgId, fallback=260){
   const h = wrap?.clientHeight;
   return Number.isFinite(h) && h > 0 ? h : fallback;
 }
+function renderSeriesValueTable(valuesId, series, lines, opts={}){
+  const el = valuesId ? document.getElementById(valuesId) : null;
+  if(!el) return;
+  const latest = series[series.length - 1] || {};
+  el.innerHTML = lines.map(line=>{
+    const raw = Number(latest[line.key]);
+    const value = Number.isFinite(raw)
+      ? (opts.percent ? pct1(raw) : raw.toFixed(opts.decimals ?? 2))
+      : "NA";
+    return `<div class="belief-chart-value">
+      <div class="k"><span class="swatch" style="background:${line.color}"></span><span>${esc(line.label)}</span></div>
+      <div class="v" style="color:${line.color}">${esc(value)}</div>
+    </div>`;
+  }).join("");
+}
 function drawSeriesChart(svgId, series, lines, opts={}){
   const svg = document.getElementById(svgId);
-  if(!svg || !series.length){ if(svg) svg.innerHTML=""; return; }
+  if(!svg || !series.length){
+    if(svg) svg.innerHTML="";
+    if(opts.valuesId){
+      const el = document.getElementById(opts.valuesId);
+      if(el) el.innerHTML = "";
+    }
+    return;
+  }
   const rawCount = beliefWindowRows(series).length;
   series = visibleChartSeries(series, lines);
-  const W=920,H=chartHeightForSvg(svgId, Number(opts.height||260)),L=62,R=24,T=28,B=36;
+  renderSeriesValueTable(opts.valuesId, series, lines, opts);
+  const view = loadBeliefView();
+  const H=chartHeightForSvg(svgId, Number(opts.height||260)),L=62,R=38,T=30,B=38;
+  const plotW = Math.max(920 - L - R, Math.ceil(Math.max(1, series.length - 1) * view.pxPerPoint));
+  const W = L + plotW + R;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", String(W));
   svg.setAttribute("height", String(H));
-  const X = i => L + i / Math.max(1, series.length-1) * (W-L-R);
+  svg.style.width = `${W}px`;
+  const X = i => L + i * view.pxPerPoint;
   const allVals = [];
   lines.forEach(line => series.forEach(p => {
     const v = Number(p[line.key]);
@@ -1494,7 +1659,11 @@ function drawSeriesChart(svgId, series, lines, opts={}){
     const lastText = opts.percent ? pct1(last) : last.toFixed(opts.decimals ?? 2);
     const labelOffset = ((lineIndex % 4) - 1.5) * 12;
     const labelY = Math.max(T + 10, Math.min(H - B - 4, Y(last) + 4 + labelOffset));
-    const lastLabel = `<text x="${W-R-4}" y="${labelY}" text-anchor="end" fill="${line.color}" font-size="10" font-family="JetBrains Mono">${esc(line.short || line.label)} ${esc(lastText)}</text>`;
+    const lastX = X(series.length - 1);
+    const bubbleW = Math.max(72, String(line.short || line.label).length * 7 + String(lastText).length * 7 + 18);
+    const lastLabel = `
+      <rect x="${Math.max(L, lastX - bubbleW - 8)}" y="${labelY-13}" width="${bubbleW}" height="18" rx="5" fill="rgba(5,7,9,.82)" stroke="${line.color}" opacity=".92"/>
+      <text x="${Math.max(L + 6, lastX - 14)}" y="${labelY}" text-anchor="end" fill="${line.color}" font-size="12" font-family="JetBrains Mono" font-weight="700">${esc(line.short || line.label)} ${esc(lastText)}</text>`;
     const label = `<text x="${legendX}" y="${T-9}" fill="${line.color}" font-size="11" font-family="JetBrains Mono">${esc(line.label)}</text>`;
     legendX += (line.label.length * 7) + 22;
     return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="${line.width||1.9}" opacity="${line.opacity ?? 0.92}" stroke-linecap="round" stroke-linejoin="round"/>${label}${lastLabel}`;
@@ -1506,6 +1675,7 @@ function drawSeriesChart(svgId, series, lines, opts={}){
   svg.innerHTML = `
     ${grid}${zero}${paths}
     <text x="${W-R}" y="${T-9}" text-anchor="end" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${esc(meta)}</text>`;
+  requestAnimationFrame(()=>syncBeliefChartScrolls(false));
 }
 function drawBeliefTrace(series){
   const rows = beliefWindowRows(series);
@@ -1518,7 +1688,7 @@ function drawBeliefTrace(series){
     {key:"spot_scaled", label:`spot ${lo.toFixed(1)}-${hi.toFixed(1)}`, short:"spot", color:"var(--steel)", width:2.2},
     {key:"confidence", label:"decision confidence", short:"decision", color:"var(--amber)", width:1.9},
     {key:"battlefield_confidence", label:"battlefield confidence", short:"field", color:"var(--green)", width:1.7},
-  ], {height:260, ymin:0, ymax:1, percent:true});
+  ], {height:260, ymin:0, ymax:1, percent:true, valuesId:"be_trace_values"});
 }
 function drawBeliefThesisTrace(series){
   drawSeriesChart("be_thesis_trace", series, [
@@ -1526,14 +1696,14 @@ function drawBeliefThesisTrace(series){
     {key:"bear", label:"bear", color:"var(--red)", width:2},
     {key:"danger", label:"no-trade", color:"var(--copper)", width:1.8},
     {key:"vol_expansion", label:"vol", color:"var(--steel)", width:1.5},
-  ], {height:260, ymin:0, ymax:100, decimals:0});
+  ], {height:260, ymin:0, ymax:100, decimals:0, valuesId:"be_thesis_values"});
 }
 function drawBeliefQualityTrace(series){
   drawSeriesChart("be_quality_trace", series, [
     {key:"clean_mark_fraction", label:"clean marks", color:"var(--green)", width:2},
     {key:"avg_friendliness", label:"friendly spread", color:"var(--steel)", width:1.8},
     {key:"iv_confidence", label:"IV confidence", color:"var(--amber)", width:1.8},
-  ], {height:260, ymin:0, ymax:1, percent:true});
+  ], {height:260, ymin:0, ymax:1, percent:true, valuesId:"be_quality_values"});
 }
 function drawBeliefRailTrace(series){
   drawSeriesChart("be_rail_trace", series, [
@@ -1541,20 +1711,73 @@ function drawBeliefRailTrace(series){
     {key:"pe_signed_z", label:"PE signed z", color:"var(--red)", width:2},
     {key:"ce_dispersion", label:"CE dispersion", color:"var(--amber)", width:1.5},
     {key:"pe_dispersion", label:"PE dispersion", color:"var(--steel)", width:1.5},
-  ], {height:260, decimals:2});
+  ], {height:260, decimals:2, valuesId:"be_rail_values"});
 }
-async function refreshBelief(){
+function beliefSeriesKey(row){
+  return [
+    row?.ts_ist || row?.ts || "",
+    Number(row?.spot || 0).toFixed(3),
+    row?.action || row?.signal || "",
+    Number(row?.confidence || 0).toFixed(4),
+  ].join("|");
+}
+function mergeBeliefSeries(incoming, full=false){
+  const rows = Array.isArray(incoming) ? incoming : [];
+  if(full || !BE_SERIES_CACHE.length){
+    BE_SERIES_CACHE = rows.slice(-BE_LOCAL_SERIES_LIMIT);
+    return BE_SERIES_CACHE;
+  }
+  const seen = new Set(BE_SERIES_CACHE.map(beliefSeriesKey));
+  rows.forEach(row=>{
+    const key = beliefSeriesKey(row);
+    if(seen.has(key)){
+      const idx = BE_SERIES_CACHE.findIndex(prev=>beliefSeriesKey(prev) === key);
+      if(idx >= 0) BE_SERIES_CACHE[idx] = {...BE_SERIES_CACHE[idx], ...row};
+    }else{
+      seen.add(key);
+      BE_SERIES_CACHE.push(row);
+    }
+  });
+  if(BE_SERIES_CACHE.length > BE_LOCAL_SERIES_LIMIT){
+    BE_SERIES_CACHE = BE_SERIES_CACHE.slice(-BE_LOCAL_SERIES_LIMIT);
+  }
+  return BE_SERIES_CACHE;
+}
+async function refreshBelief(forceFull=false){
+  if(BE_FETCHING) return;
+  BE_FETCHING = true;
   try{
-    const r = await api(`/api/premium_belief?limit=${BE_HISTORY_LIMIT}`);
-    renderBelief(r);
+    const now = Date.now();
+    const needsFull = forceFull || !BE_SERIES_CACHE.length || (now - BE_LAST_FULL_REFRESH_AT) > BE_FULL_HISTORY_REFRESH_MS;
+    const limit = needsFull ? BE_HISTORY_LIMIT : BE_FAST_HISTORY_LIMIT;
+    const r = await api(`/api/premium_belief?limit=${limit}`);
+    let shouldRender = true;
+    if(r?.status === "ok"){
+      r.series = mergeBeliefSeries(r.series || [], needsFull);
+      if(needsFull) BE_LAST_FULL_REFRESH_AT = now;
+      const latestKey = beliefSeriesKey(r.series[r.series.length - 1] || {});
+      shouldRender = forceFull || needsFull || !latestKey || latestKey !== BE_LAST_RENDER_SERIES_KEY;
+      if(latestKey) BE_LAST_RENDER_SERIES_KEY = latestKey;
+    }
+    if(shouldRender) renderBelief(r);
   }catch(e){
     document.getElementById("be_status").textContent = e.msg || "belief request failed";
     document.getElementById("be_top").innerHTML = `<div class="lock" style="border-color:rgba(184,94,82,.5);color:var(--red);background:var(--red-soft)"><span class="icon">!</span><span class="msg">${esc(e.msg || "Premium Belief request failed")}</span></div>`;
+  }finally{
+    BE_FETCHING = false;
   }
 }
-setInterval(()=> {
-  if(document.getElementById("v_belief").classList.contains("on")) refreshBelief();
-}, BE_REFRESH_MS);
+function startBeliefPollLoop(){
+  if(BE_POLL_LOOP_STARTED) return;
+  BE_POLL_LOOP_STARTED = true;
+  const loop = async ()=>{
+    if(document.getElementById("v_belief").classList.contains("on")){
+      await refreshBelief(false);
+    }
+    setTimeout(loop, BE_LIVE_REFRESH_MS);
+  };
+  loop();
+}
 
 /* ─────────── command palette ─────────── */
 const COMMANDS = [
@@ -1620,6 +1843,7 @@ addLeg("CE",25200,-75,90);
 addStressLeg();
 buildEquityGrid();
 initBeliefCanvas();
+startBeliefPollLoop();
 // pre-fill plausible heavyweight moves
 document.querySelector('.er[data-sym="RELIANCE"]').value = 2.0;
 document.querySelector('.er[data-sym="HDFCBANK"]').value = 1.5;

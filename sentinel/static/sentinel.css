@@ -632,10 +632,17 @@ kbd{
   color: var(--fg);
 }
 .belief-chart-stack{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
-  gap: var(--s-3);
-  align-items: start;
+  position: relative;
+  min-height: 760px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background:
+    linear-gradient(90deg, rgba(255,255,255,.012) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255,255,255,.010) 1px, transparent 1px),
+    rgba(255,255,255,.006);
+  background-size: 48px 48px;
+  touch-action: none;
 }
 #v_belief .belief-workspace{
   align-items: start;
@@ -705,19 +712,24 @@ kbd{
 }
 .belief-tape-card{
   --belief-chart-height: 300px;
+  position: absolute;
+  min-width: 360px;
+  min-height: 260px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background:
     linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.006)),
     var(--bg-0);
   padding: var(--s-3);
-  transition: border-color .15s ease, background-color .15s ease, opacity .15s ease, transform .15s ease;
+  box-shadow: 0 18px 55px rgba(0,0,0,.18);
+  transition: border-color .15s ease, background-color .15s ease, opacity .15s ease, box-shadow .15s ease;
 }
 .belief-tape-card.is-dragging{
-  opacity: .55;
-  transform: scale(.997);
+  opacity: .86;
   outline: 1px solid rgba(207,158,84,.65);
   outline-offset: 2px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.35);
+  z-index: 20 !important;
 }
 .belief-tape-card.drag-over{
   border-color: rgba(207,158,84,.9);
@@ -726,7 +738,7 @@ kbd{
     var(--bg-0);
 }
 .belief-tape-card.is-wide{
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 .belief-tape-head{
   display: flex;
@@ -767,6 +779,13 @@ kbd{
   max-width: 240px;
   pointer-events: auto;
 }
+.belief-tape-actions{
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
 .drag-chip,
 .resize-grip,
 .mini-btn{
@@ -793,11 +812,11 @@ kbd{
   color: var(--fg);
 }
 .resize-grip{
-  cursor: ns-resize;
+  cursor: nwse-resize;
   user-select: none;
 }
 .is-resizing-belief{
-  cursor: ns-resize;
+  cursor: nwse-resize;
   user-select: none;
 }
 .is-dragging-belief{
@@ -826,13 +845,71 @@ kbd{
     linear-gradient(180deg, rgba(255,255,255,.012) 1px, transparent 1px),
     #080a0c;
   background-size: 64px 100%, 100% 48px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-color: rgba(207,158,84,.55) rgba(255,255,255,.04);
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
 }
 .belief-chart svg{
   display: block;
-  width: 100%;
+  width: auto;
+  min-width: 100%;
   height: 100%;
   min-height: 180px;
+}
+.belief-chart::-webkit-scrollbar{
+  height: 9px;
+}
+.belief-chart::-webkit-scrollbar-track{
+  background: rgba(255,255,255,.04);
+  border-radius: 999px;
+}
+.belief-chart::-webkit-scrollbar-thumb{
+  background: rgba(207,158,84,.55);
+  border-radius: 999px;
+}
+.belief-chart-values{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 7px;
+  margin: 9px 0 6px;
+}
+.belief-chart-value{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255,255,255,.025);
+}
+.belief-chart-value .k{
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+.belief-chart-value .swatch{
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(255,255,255,.04);
+}
+.belief-chart-value .k span:last-child{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.belief-chart-value .v{
+  color: var(--fg);
+  font: 750 var(--t-sm)/1.1 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  white-space: nowrap;
 }
 .belief-meter{ margin: 9px 0; }
 .belief-meter-head{
