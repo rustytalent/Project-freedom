@@ -63,7 +63,7 @@ class BeliefLiveConfig:
     poll_seconds: float = 1.0
     warmup_bars: int = 80
     refresh_contracts_every: int = 30
-    output_jsonl: Path = Path("/var/lib/sentinel/belief_live_signals.jsonl")
+    output_jsonl: Path = Path("/var/lib/sentinel/liqpool_live_signals.jsonl")
     shadow_only: bool = True
     max_ticks: Optional[int] = None
     include_streaming_divergence: bool = True

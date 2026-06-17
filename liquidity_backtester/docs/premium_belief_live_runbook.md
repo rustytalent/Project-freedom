@@ -46,10 +46,13 @@ The runner writes append-only JSONL rows. Each row is a shared
 Default path:
 
 ```bash
-/var/lib/sentinel/belief_live_signals.jsonl
+/var/lib/sentinel/liqpool_live_signals.jsonl
 ```
 
-Sentinel can tail this file with `sentinel.liqpool_bridge.LiveSignalsTail`.
+Sentinel already tails `<SENTINEL_JOURNAL_DIR>/liqpool_live_signals.jsonl`
+through `sentinel.liqpool_bridge.LiveSignalsTail`. If your Sentinel service
+uses `SENTINEL_JOURNAL_DIR=/root/.sentinel`, pass
+`--out-jsonl /root/.sentinel/liqpool_live_signals.jsonl`.
 
 ## Run Standalone
 
@@ -70,7 +73,7 @@ nohup env PYTHONPATH=. \
   --poll-seconds 1 \
   --min-quote-gap-seconds 1.05 \
   --warmup-bars 80 \
-  --out-jsonl /var/lib/sentinel/belief_live_signals.jsonl \
+  --out-jsonl /var/lib/sentinel/liqpool_live_signals.jsonl \
   > logs/belief_live.log 2>&1 &
 
 echo $! > logs/belief_live.pid
@@ -90,7 +93,7 @@ echo
 tail -40 logs/belief_live.log 2>/dev/null
 echo
 echo "LATEST SIGNALS"
-tail -5 /var/lib/sentinel/belief_live_signals.jsonl 2>/dev/null
+tail -5 /var/lib/sentinel/liqpool_live_signals.jsonl 2>/dev/null
 '
 ```
 
@@ -112,7 +115,7 @@ from pathlib import Path
 from sentinel.liqpool_bridge import LiveSignalsTail
 
 tail = LiveSignalsTail(
-    Path("/var/lib/sentinel/belief_live_signals.jsonl"),
+    Path("/var/lib/sentinel/liqpool_live_signals.jsonl"),
     publisher=sentinel.publisher,
 )
 sentinel.add_tick_hook(tail.poll)

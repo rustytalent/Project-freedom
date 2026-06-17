@@ -29,7 +29,7 @@ def main() -> int:
     p.add_argument("--warmup-bars", type=int, default=80)
     p.add_argument("--refresh-contracts-every", type=int, default=30)
     p.add_argument("--out-jsonl", type=Path,
-                   default=Path("/var/lib/sentinel/belief_live_signals.jsonl"))
+                   default=Path("/var/lib/sentinel/liqpool_live_signals.jsonl"))
     p.add_argument("--max-ticks", type=int, default=None,
                    help="test mode: stop after this many polling ticks")
     p.add_argument("--no-streaming-divergence", action="store_true")
