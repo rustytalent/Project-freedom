@@ -147,8 +147,11 @@ class Sentinel:
         # The Live Model Publisher — the founder's missing live brain.
         # Every research signal flows through here; the cockpit reads from
         # here; TRUSTED+ signals mirror to ShadowLedger.
-        self.publisher = LivePublisher(shadow_ledger=self.shadow_ledger,
-                                       session=self.session)
+        self.publisher = LivePublisher(
+            shadow_ledger=self.shadow_ledger,
+            session=self.session,
+            history=7200,  # Premium Belief cockpit needs a 30-60m tape.
+        )
         self.live_models = LiveModelPool(DEFAULT_MODELS)
         self._tick_hist: List[Tick] = []
         # NIFTY constituent board (Wave 11). In demo mode we feed a
@@ -1512,7 +1515,7 @@ def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "health": "ok",
             "metrics": [
                 _belief_metric("bars", str(snap.get("bars_seen", "NA"))),
-                _belief_metric("contracts", str(len(contracts))),
+                _belief_metric("slots", str(len(contracts))),
                 _belief_metric("asset", str(row.get("asset", "NIFTY"))),
             ],
         },
@@ -1542,7 +1545,7 @@ def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "gamma ATM, convex OTM, or lottery OTM. The decision layer "
                 "uses this to choose the right contract personality."
             ),
-            "primary": f"{len(contracts)} selected contracts",
+            "primary": f"{len(contracts)} battlefield slots",
             "secondary": f"side {strike.get('side') or 'NA'} level {strike.get('level', 'NA')}",
             "health": "ok" if contracts else "warn",
             "metrics": [
@@ -1643,20 +1646,21 @@ def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 @app.get("/api/premium_belief", dependencies=[Depends(auth)])
-def premium_belief(limit: int = 80) -> JSONResponse:
+def premium_belief(limit: int = 7200) -> JSONResponse:
     """Dedicated Premium Belief cockpit payload.
 
     This is intentionally separate from /api/live/signals. The generic bus
     still carries rows, but this endpoint understands the belief engine's
     8-phase shape and returns chart-friendly projections.
     """
-    rows = _belief_signal_rows(limit=max(1, min(limit, 200)))
+    rows = _belief_signal_rows(limit=max(1, min(limit, 7200)))
     if not rows:
         return JSONResponse({
             "status": "no_signal",
             "message": "No Premium Belief Engine rows have reached Sentinel yet.",
             "latest": None,
             "history": [],
+            "history_count": 0,
             "phases": [],
             "series": [],
             "contracts": [],
@@ -1721,7 +1725,11 @@ def premium_belief(limit: int = 80) -> JSONResponse:
     return JSONResponse({
         "status": "ok",
         "latest": latest,
-        "history": rows,
+        # Do not echo the full heavy raw history back to the browser. The
+        # chart-friendly `series` carries the long tape; `history` remains a
+        # small debug tail for manual inspection.
+        "history": rows[:120],
+        "history_count": len(rows),
         "phases": _belief_phase_cards(latest),
         "series": series,
         "contracts": extras.get("contracts") or [],
@@ -1729,7 +1737,7 @@ def premium_belief(limit: int = 80) -> JSONResponse:
         "slot_reading_count": len(slot_readings),
         "stream": extras.get("streaming_divergence") or {},
         "raw_snapshot": snap,
-        "refresh_seconds": 1,
+        "refresh_seconds": 0.5,
         "data_contract": {
             "mode": "quote_polling",
             "truth_source": "Kite quote depth microprice when clean, mid fallback, fresh LTP fallback",

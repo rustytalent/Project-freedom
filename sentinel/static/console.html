@@ -223,30 +223,87 @@
           </div>
         </div>
 
-        <div class="panel">
-          <div class="head"><span class="title">Live trace</span><span class="right hint">spot + decision confidence</span></div>
-          <div class="body">
-            <div class="chart-wrap belief-chart" id="be_trace_wrap">
-              <svg id="be_trace" width="100%" height="210" viewBox="0 0 760 210" preserveAspectRatio="none"></svg>
-            </div>
+        <div class="panel belief-chart-stack-panel">
+          <div class="head">
+            <span class="title">Live behaviour tapes</span>
+            <span class="right hint" id="be_chart_window">30-60m rolling context</span>
           </div>
-        </div>
-
-        <div class="panel">
-          <div class="head"><span class="title">Thesis memory trace</span><span class="right hint">bull / bear / danger</span></div>
           <div class="body">
-            <div class="chart-wrap belief-chart">
-              <svg id="be_thesis_trace" width="100%" height="210" viewBox="0 0 760 210" preserveAspectRatio="none"></svg>
-            </div>
-          </div>
-        </div>
+            <div class="belief-chart-stack">
+              <section class="belief-tape-card">
+                <div class="belief-tape-head">
+                  <div>
+                    <div class="belief-tape-title">Price + decision pressure</div>
+                    <div class="belief-tape-note">Shows whether spot movement is being confirmed by decision confidence and battlefield agreement.</div>
+                  </div>
+                  <div class="belief-tape-scale">normalized 0-100%</div>
+                </div>
+                <div class="chart-wrap belief-chart">
+                  <svg id="be_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-explain">
+                  <span><b style="color:var(--steel)">steel</b> spot inside the visible range</span>
+                  <span><b style="color:var(--amber)">amber</b> decision confidence</span>
+                  <span><b style="color:var(--green)">green</b> battlefield confidence</span>
+                </div>
+              </section>
 
-        <div class="panel">
-          <div class="head"><span class="title">Selected contracts</span><span class="right hint" id="be_contract_count">0</span></div>
-          <div class="body flush">
-            <table class="dense" id="be_contracts"><thead><tr>
-              <th>Symbol</th><th>Side</th><th>Strike</th><th>Expiry</th>
-            </tr></thead><tbody><tr class="empty"><td colspan="4">no contracts</td></tr></tbody></table>
+              <section class="belief-tape-card">
+                <div class="belief-tape-head">
+                  <div>
+                    <div class="belief-tape-title">Thesis memory</div>
+                    <div class="belief-tape-note">Shows whether bull, bear, volatility, and no-trade stories are accumulating or fading.</div>
+                  </div>
+                  <div class="belief-tape-scale">score 0-100</div>
+                </div>
+                <div class="chart-wrap belief-chart">
+                  <svg id="be_thesis_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-explain">
+                  <span><b style="color:var(--green)">green</b> bull thesis</span>
+                  <span><b style="color:var(--red)">red</b> bear thesis</span>
+                  <span><b style="color:var(--copper)">copper</b> no-trade danger</span>
+                  <span><b style="color:var(--steel)">steel</b> volatility expansion</span>
+                </div>
+              </section>
+
+              <section class="belief-tape-card">
+                <div class="belief-tape-head">
+                  <div>
+                    <div class="belief-tape-title">Mark quality + IV cleanliness</div>
+                    <div class="belief-tape-note">Shows whether quotes are clean enough to trust and whether spreads are friendly enough to act.</div>
+                  </div>
+                  <div class="belief-tape-scale">0-100%</div>
+                </div>
+                <div class="chart-wrap belief-chart">
+                  <svg id="be_quality_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-explain">
+                  <span><b style="color:var(--green)">green</b> clean mark fraction</span>
+                  <span><b style="color:var(--steel)">steel</b> spread friendliness</span>
+                  <span><b style="color:var(--amber)">amber</b> IV-state confidence</span>
+                </div>
+              </section>
+
+              <section class="belief-tape-card">
+                <div class="belief-tape-head">
+                  <div>
+                    <div class="belief-tape-title">CE / PE rail pressure</div>
+                    <div class="belief-tape-note">Shows where option premium is being defended or rejected across the call and put rails.</div>
+                  </div>
+                  <div class="belief-tape-scale">z-score + dispersion</div>
+                </div>
+                <div class="chart-wrap belief-chart">
+                  <svg id="be_rail_trace" width="100%" height="260" viewBox="0 0 920 260" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-explain">
+                  <span><b style="color:var(--green)">green</b> CE signed residual z</span>
+                  <span><b style="color:var(--red)">red</b> PE signed residual z</span>
+                  <span><b style="color:var(--amber)">amber</b> CE dispersion</span>
+                  <span><b style="color:var(--steel)">steel</b> PE dispersion</span>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       </div>
@@ -270,24 +327,6 @@
           <div class="head"><span class="title">Thesis memory</span><span class="right hint">hysteresis scores</span></div>
           <div class="body" id="be_thesis">
             <div class="dim-text">Waiting for thesis memory.</div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="head"><span class="title">Mark quality + IV</span><span class="right hint">clean marks / friendliness</span></div>
-          <div class="body">
-            <div class="chart-wrap belief-chart">
-              <svg id="be_quality_trace" width="100%" height="190" viewBox="0 0 760 190" preserveAspectRatio="none"></svg>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="head"><span class="title">Rail pressure</span><span class="right hint">CE / PE z + dispersion</span></div>
-          <div class="body">
-            <div class="chart-wrap belief-chart">
-              <svg id="be_rail_trace" width="100%" height="190" viewBox="0 0 760 190" preserveAspectRatio="none"></svg>
-            </div>
           </div>
         </div>
 
@@ -871,6 +910,8 @@ let BE_LAST_ROW_KEY = "";
 let BE_LAST_ROW_SEEN_AT = 0;
 const BE_REFRESH_MS = 500;
 const BE_STALE_AFTER_MS = 2500;
+const BE_HISTORY_LIMIT = 7200;       // 30m at 250ms, 60m at 500ms.
+const BE_CHART_MAX_POINTS = 900;     // Draw fast; preserve the full tape server-side.
 const pct = v => `${Math.round((Number(v)||0)*100)}%`;
 const pct1 = v => `${((Number(v)||0)*100).toFixed(1)}%`;
 const signed = v => {
@@ -1074,26 +1115,32 @@ function renderBelief(payload){
       ${beMetricPill({label:"sweep machine", value:`${sweepState.state_index ?? "NA"} ${sweepState.state_label || ""}`})}
     </div>`;
 
-  const contracts = payload.contracts || [];
-  document.getElementById("be_contract_count").textContent = `${contracts.length} contracts`;
-  document.querySelector("#be_contracts tbody").innerHTML = contracts.length
-    ? contracts.map(c=>`<tr>
-        <td class="mono">${esc(c.tradingsymbol)}</td>
-        <td>${esc(c.option_type)}</td>
-        <td class="mono">${Number(c.strike||0).toFixed(0)}</td>
-        <td class="mono">${esc(c.expiry)}</td>
-      </tr>`).join("")
-    : `<tr class="empty"><td colspan="4">no contracts</td></tr>`;
   document.getElementById("be_raw").textContent = JSON.stringify(snap, null, 2);
+  const tapeRows = Array.isArray(payload.series) ? payload.series.length : 0;
+  const drawnRows = Math.min(tapeRows, BE_CHART_MAX_POINTS);
+  const windowEl = document.getElementById("be_chart_window");
+  if(windowEl){
+    windowEl.textContent = tapeRows
+      ? `${tapeRows} rows retained · ${drawnRows} drawn · target 30-60m`
+      : "waiting for chart tape";
+  }
   drawBeliefTrace(payload.series || []);
   drawBeliefThesisTrace(payload.series || []);
   drawBeliefQualityTrace(payload.series || []);
   drawBeliefRailTrace(payload.series || []);
 }
+function visibleChartSeries(series){
+  const rows = Array.isArray(series) ? series : [];
+  if(rows.length <= BE_CHART_MAX_POINTS) return rows;
+  const step = Math.max(1, Math.ceil(rows.length / BE_CHART_MAX_POINTS));
+  return rows.filter((_, i) => i % step === 0 || i === rows.length - 1);
+}
 function drawSeriesChart(svgId, series, lines, opts={}){
   const svg = document.getElementById(svgId);
   if(!svg || !series.length){ if(svg) svg.innerHTML=""; return; }
-  const W=760,H=Number(opts.height||210),L=54,R=18,T=18,B=28;
+  const rawCount = series.length;
+  series = visibleChartSeries(series);
+  const W=920,H=Number(opts.height||260),L=62,R=24,T=28,B=36;
   const X = i => L + i / Math.max(1, series.length-1) * (W-L-R);
   const allVals = [];
   lines.forEach(line => series.forEach(p => {
@@ -1110,26 +1157,38 @@ function drawSeriesChart(svgId, series, lines, opts={}){
   }
   const Y = v => T + (1 - (Number(v)-ymin)/Math.max(1e-9, ymax-ymin))*(H-T-B);
   let grid = "";
+  grid += `<rect x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" rx="4" fill="rgba(255,255,255,.012)" stroke="var(--line-soft)"/>`;
   for(let i=0;i<=4;i++){
     const y = T+i/4*(H-T-B);
     const v = ymax - i/4*(ymax-ymin);
     grid += `<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line-soft)" stroke-dasharray="2 3"/>`;
-    grid += `<text x="${L-8}" y="${y+3}" text-anchor="end" fill="var(--dim)" font-family="JetBrains Mono">${opts.percent ? pct1(v) : v.toFixed(opts.decimals ?? 1)}</text>`;
+    grid += `<text x="${L-9}" y="${y+4}" text-anchor="end" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${opts.percent ? pct1(v) : v.toFixed(opts.decimals ?? 1)}</text>`;
+  }
+  const xTicks = Math.min(6, series.length);
+  for(let i=0;i<xTicks;i++){
+    const idx = Math.round(i / Math.max(1, xTicks - 1) * (series.length - 1));
+    const x = X(idx);
+    const label = series[idx]?.ts_ist || "";
+    grid += `<line x1="${x}" y1="${T}" x2="${x}" y2="${H-B}" stroke="var(--line-soft)" stroke-dasharray="2 4"/>`;
+    grid += `<text x="${x}" y="${H-10}" text-anchor="${i===0?"start":i===xTicks-1?"end":"middle"}" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${esc(label)}</text>`;
   }
   let legendX = L;
   const paths = lines.map(line => {
     const path = series.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(Number(p[line.key])||0).toFixed(1)}`).join(" ");
-    const label = `<text x="${legendX}" y="${T+8}" fill="${line.color}" font-family="JetBrains Mono">${esc(line.label)}</text>`;
+    const last = Number(series[series.length-1]?.[line.key] ?? 0);
+    const lastText = opts.percent ? pct1(last) : last.toFixed(opts.decimals ?? 2);
+    const lastLabel = `<text x="${W-R-4}" y="${Y(last)+4}" text-anchor="end" fill="${line.color}" font-size="10" font-family="JetBrains Mono">${esc(line.short || line.label)} ${esc(lastText)}</text>`;
+    const label = `<text x="${legendX}" y="${T-9}" fill="${line.color}" font-size="11" font-family="JetBrains Mono">${esc(line.label)}</text>`;
     legendX += (line.label.length * 7) + 22;
-    return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="${line.width||1.9}"/>${label}`;
+    return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="${line.width||1.9}" stroke-linecap="round" stroke-linejoin="round"/>${label}${lastLabel}`;
   }).join("");
   const zero = ymin < 0 && ymax > 0
     ? `<line x1="${L}" y1="${Y(0)}" x2="${W-R}" y2="${Y(0)}" stroke="var(--line-hard)"/>`
     : "";
+  const meta = rawCount > series.length ? `${series.length}/${rawCount} pts drawn` : `${series.length} pts`;
   svg.innerHTML = `
     ${grid}${zero}${paths}
-    <text x="${L}" y="${H-7}" fill="var(--dim)" font-family="JetBrains Mono">${esc(series[0]?.ts_ist || "")}</text>
-    <text x="${W-R}" y="${H-7}" text-anchor="end" fill="var(--dim)" font-family="JetBrains Mono">${esc(series[series.length-1]?.ts_ist || "")}</text>`;
+    <text x="${W-R}" y="${T-9}" text-anchor="end" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${esc(meta)}</text>`;
 }
 function drawBeliefTrace(series){
   const spots = series.map(x=>Number(x.spot)||0).filter(Boolean);
@@ -1138,10 +1197,10 @@ function drawBeliefTrace(series){
   const span = Math.max(1e-9, hi - lo);
   const scaled = series.map(x=>({...x, spot_scaled:(Number(x.spot||0)-lo)/span}));
   drawSeriesChart("be_trace", scaled, [
-    {key:"spot_scaled", label:`spot range ${lo.toFixed(1)}-${hi.toFixed(1)}`, color:"var(--steel)", width:2.1},
-    {key:"confidence", label:"decision confidence", color:"var(--amber)", width:1.8},
-    {key:"battlefield_confidence", label:"battlefield", color:"var(--green)", width:1.5},
-  ], {height:210, ymin:0, ymax:1, percent:true});
+    {key:"spot_scaled", label:`spot ${lo.toFixed(1)}-${hi.toFixed(1)}`, short:"spot", color:"var(--steel)", width:2.2},
+    {key:"confidence", label:"decision confidence", short:"decision", color:"var(--amber)", width:1.9},
+    {key:"battlefield_confidence", label:"battlefield confidence", short:"field", color:"var(--green)", width:1.7},
+  ], {height:260, ymin:0, ymax:1, percent:true});
 }
 function drawBeliefThesisTrace(series){
   drawSeriesChart("be_thesis_trace", series, [
@@ -1149,14 +1208,14 @@ function drawBeliefThesisTrace(series){
     {key:"bear", label:"bear", color:"var(--red)", width:2},
     {key:"danger", label:"no-trade", color:"var(--copper)", width:1.8},
     {key:"vol_expansion", label:"vol", color:"var(--steel)", width:1.5},
-  ], {height:210, ymin:0, ymax:100, decimals:0});
+  ], {height:260, ymin:0, ymax:100, decimals:0});
 }
 function drawBeliefQualityTrace(series){
   drawSeriesChart("be_quality_trace", series, [
     {key:"clean_mark_fraction", label:"clean marks", color:"var(--green)", width:2},
     {key:"avg_friendliness", label:"friendly spread", color:"var(--steel)", width:1.8},
     {key:"iv_confidence", label:"IV confidence", color:"var(--amber)", width:1.8},
-  ], {height:190, ymin:0, ymax:1, percent:true});
+  ], {height:260, ymin:0, ymax:1, percent:true});
 }
 function drawBeliefRailTrace(series){
   drawSeriesChart("be_rail_trace", series, [
@@ -1164,11 +1223,11 @@ function drawBeliefRailTrace(series){
     {key:"pe_signed_z", label:"PE signed z", color:"var(--red)", width:2},
     {key:"ce_dispersion", label:"CE dispersion", color:"var(--amber)", width:1.5},
     {key:"pe_dispersion", label:"PE dispersion", color:"var(--steel)", width:1.5},
-  ], {height:190, decimals:2});
+  ], {height:260, decimals:2});
 }
 async function refreshBelief(){
   try{
-    const r = await api("/api/premium_belief?limit=80");
+    const r = await api(`/api/premium_belief?limit=${BE_HISTORY_LIMIT}`);
     renderBelief(r);
   }catch(e){
     document.getElementById("be_status").textContent = e.msg || "belief request failed";

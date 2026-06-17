@@ -631,11 +631,72 @@ kbd{
   font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
   color: var(--fg);
 }
+.belief-chart-stack{
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--s-3);
+}
+.belief-tape-card{
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.006)),
+    var(--bg-0);
+  padding: var(--s-3);
+}
+.belief-tape-head{
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  align-items: flex-start;
+  margin-bottom: var(--s-2);
+}
+.belief-tape-title{
+  color: var(--fg);
+  font-size: var(--t-md);
+  font-weight: 650;
+}
+.belief-tape-note{
+  margin-top: 4px;
+  max-width: 70ch;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: 1.35;
+}
+.belief-tape-scale{
+  white-space: nowrap;
+  color: var(--dim);
+  font: 600 var(--t-xs)/1.2 "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.chart-explain{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+.chart-explain b{
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 700;
+}
 .belief-chart{
-  min-height: 190px;
+  min-height: 260px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r);
+  background:
+    linear-gradient(90deg, rgba(255,255,255,.015) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255,255,255,.012) 1px, transparent 1px),
+    #080a0c;
+  background-size: 64px 100%, 100% 48px;
+  overflow: hidden;
 }
 .belief-chart svg{
-  min-height: 190px;
+  display: block;
+  width: 100%;
+  min-height: 260px;
 }
 .belief-meter{ margin: 9px 0; }
 .belief-meter-head{
