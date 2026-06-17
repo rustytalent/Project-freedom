@@ -637,6 +637,38 @@ kbd{
   gap: var(--s-3);
   align-items: start;
 }
+#v_belief .belief-workspace{
+  align-items: start;
+}
+#v_belief .belief-main-col{
+  display: contents;
+}
+#v_belief .belief-top-panel{
+  grid-column: 1;
+  grid-row: 1;
+}
+#v_belief .belief-phase-panel{
+  grid-column: 1;
+  grid-row: 2;
+}
+#v_belief .belief-side-col{
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+#v_belief .belief-chart-stack-panel{
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+@media (max-width: 1180px){
+  #v_belief .belief-main-col{ display: flex; }
+  #v_belief .belief-top-panel,
+  #v_belief .belief-phase-panel,
+  #v_belief .belief-side-col,
+  #v_belief .belief-chart-stack-panel{
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
 .belief-canvas-controls{
   gap: 8px;
   align-items: center;
@@ -684,6 +716,8 @@ kbd{
 .belief-tape-card.is-dragging{
   opacity: .55;
   transform: scale(.997);
+  outline: 1px solid rgba(207,158,84,.65);
+  outline-offset: 2px;
 }
 .belief-tape-card.drag-over{
   border-color: rgba(207,158,84,.9);
@@ -731,6 +765,7 @@ kbd{
   align-items: center;
   flex-wrap: wrap;
   max-width: 240px;
+  pointer-events: auto;
 }
 .drag-chip,
 .resize-grip,
@@ -763,6 +798,10 @@ kbd{
 }
 .is-resizing-belief{
   cursor: ns-resize;
+  user-select: none;
+}
+.is-dragging-belief{
+  cursor: grabbing;
   user-select: none;
 }
 .chart-explain{

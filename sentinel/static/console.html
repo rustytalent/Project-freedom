@@ -199,9 +199,9 @@
 
   <!-- ───────────── PREMIUM BELIEF ENGINE ───────────── -->
   <section class="view" id="v_belief">
-    <div class="grid" style="grid-template-columns:1.05fr .95fr">
-      <div class="col">
-        <div class="panel">
+    <div class="grid belief-workspace" style="grid-template-columns:1.05fr .95fr">
+      <div class="col belief-main-col">
+        <div class="panel belief-top-panel">
           <div class="head">
             <span class="title">Premium Belief Engine</span>
             <div class="right row-flex">
@@ -214,7 +214,7 @@
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel belief-phase-panel">
           <div class="head"><span class="title">8-phase engine map</span><span class="right hint">observable live spine</span></div>
           <div class="body">
             <div id="be_phases" class="phase-grid">
@@ -320,7 +320,7 @@
         </div>
       </div>
 
-      <div class="col">
+      <div class="col belief-side-col">
         <div class="panel">
           <div class="head"><span class="title">Battlefield rails</span><span class="right hint">CE / PE residual structure</span></div>
           <div class="body" id="be_rails">
@@ -924,7 +924,7 @@ const BE_REFRESH_MS = 500;
 const BE_STALE_AFTER_MS = 2500;
 const BE_HISTORY_LIMIT = 7200;       // 30m at 250ms, 60m at 500ms.
 const BE_CHART_MAX_POINTS = 900;     // Draw fast; preserve the full tape server-side.
-const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v2";
+const BE_CANVAS_KEY = "sentinel_premium_belief_canvas_v3";
 const BE_WINDOW_KEY = "sentinel_premium_belief_window_v1";
 const BE_DEFAULT_WINDOW = "7200";
 const BE_CARD_DEFAULTS = [
@@ -1090,10 +1090,45 @@ function endBeliefCardResize(){
   BE_RESIZE = null;
   window.removeEventListener("pointermove", onBeliefCardResize);
 }
+function startBeliefPointerDrag(ev, id){
+  ev.preventDefault();
+  const card = document.querySelector(`[data-chart-card="${id}"]`);
+  if(!card) return;
+  BE_DRAG_ID = id;
+  card.classList.add("is-dragging");
+  document.body.classList.add("is-dragging-belief");
+  window.addEventListener("pointermove", onBeliefPointerDrag);
+  window.addEventListener("pointerup", endBeliefPointerDrag, {once:true});
+}
+function onBeliefPointerDrag(ev){
+  if(!BE_DRAG_ID) return;
+  const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-chart-card]");
+  if(!target || target.dataset.chartCard === BE_DRAG_ID || target.style.display === "none") return;
+  const state = loadBeliefCanvas();
+  const from = state.order.indexOf(BE_DRAG_ID);
+  let to = state.order.indexOf(target.dataset.chartCard);
+  if(from < 0 || to < 0 || from === to) return;
+  const rect = target.getBoundingClientRect();
+  const vertical = Math.abs(ev.clientY - (rect.top + rect.height / 2)) >= Math.abs(ev.clientX - (rect.left + rect.width / 2));
+  const insertAfter = vertical ? ev.clientY > rect.top + rect.height / 2 : ev.clientX > rect.left + rect.width / 2;
+  state.order.splice(from, 1);
+  if(from < to) to -= 1;
+  state.order.splice(insertAfter ? to + 1 : to, 0, BE_DRAG_ID);
+  saveBeliefCanvas();
+  applyBeliefCanvas();
+  document.querySelector(`[data-chart-card="${BE_DRAG_ID}"]`)?.classList.add("is-dragging");
+  target.classList.add("drag-over");
+}
+function endBeliefPointerDrag(){
+  BE_DRAG_ID = "";
+  document.body.classList.remove("is-dragging-belief");
+  document.querySelectorAll(".belief-tape-card").forEach(c=>c.classList.remove("is-dragging","drag-over"));
+  window.removeEventListener("pointermove", onBeliefPointerDrag);
+}
 function injectBeliefCardControls(){
   document.querySelectorAll("[data-chart-card]").forEach(card=>{
     const id = card.dataset.chartCard;
-    card.draggable = true;
+    card.draggable = false;
     const head = card.querySelector(".belief-tape-head");
     if(head && !head.querySelector(".belief-card-tools")){
       const tools = document.createElement("div");
@@ -1109,19 +1144,24 @@ function injectBeliefCardControls(){
         <span class="resize-grip" data-act="resize" title="Drag to resize">resize</span>`;
       head.appendChild(tools);
     }
-    card.addEventListener("dragstart", ev=>{
-      if(ev.target.closest("button,select,.resize-grip")){ ev.preventDefault(); return; }
-      if(!ev.target.closest(".belief-tape-head")){ ev.preventDefault(); return; }
-      BE_DRAG_ID = id;
-      ev.dataTransfer.effectAllowed = "move";
-      ev.dataTransfer.setData("text/plain", id);
-      card.classList.add("is-dragging");
-    });
-    card.addEventListener("dragend", ()=>{
-      BE_DRAG_ID = "";
-      card.classList.remove("is-dragging");
-      document.querySelectorAll(".belief-tape-card").forEach(c=>c.classList.remove("drag-over"));
-    });
+    if(!card.dataset.pointerDragReady){
+      card.dataset.pointerDragReady = "1";
+      card.addEventListener("pointerdown", ev=>{
+        if(ev.target.closest("button,select,.resize-grip")) return;
+        if(!ev.target.closest(".belief-tape-head")) return;
+        startBeliefPointerDrag(ev, id);
+      });
+      card.addEventListener("click", ev=>{
+        if(document.body.classList.contains("is-dragging-belief")) ev.preventDefault();
+      });
+    }
+    const dragChip = head?.querySelector(".drag-chip");
+    if(dragChip && !dragChip.dataset.pointerDragReady){
+      dragChip.dataset.pointerDragReady = "1";
+      dragChip.addEventListener("pointerdown", ev=>{
+        startBeliefPointerDrag(ev, id);
+      });
+    }
   });
   document.querySelectorAll(".belief-card-tools").forEach(tools=>{
     tools.addEventListener("click", ev=>{
@@ -1145,36 +1185,6 @@ function injectBeliefCardControls(){
       if(card) startBeliefCardResize(ev, card.dataset.chartCard);
     });
   });
-  const stack = document.getElementById("be_chart_stack");
-  if(stack && !stack.dataset.dragReady){
-    stack.dataset.dragReady = "1";
-    stack.addEventListener("dragover", ev=>{
-      const target = ev.target.closest("[data-chart-card]");
-      if(!target || !BE_DRAG_ID || target.dataset.chartCard === BE_DRAG_ID) return;
-      ev.preventDefault();
-      target.classList.add("drag-over");
-    });
-    stack.addEventListener("dragleave", ev=>{
-      const target = ev.target.closest("[data-chart-card]");
-      if(target) target.classList.remove("drag-over");
-    });
-    stack.addEventListener("drop", ev=>{
-      const target = ev.target.closest("[data-chart-card]");
-      if(!target || !BE_DRAG_ID || target.dataset.chartCard === BE_DRAG_ID) return;
-      ev.preventDefault();
-      const state = loadBeliefCanvas();
-      const from = state.order.indexOf(BE_DRAG_ID);
-      let to = state.order.indexOf(target.dataset.chartCard);
-      if(from < 0 || to < 0) return;
-      const rect = target.getBoundingClientRect();
-      const insertAfter = ev.clientY > rect.top + rect.height / 2;
-      state.order.splice(from, 1);
-      if(from < to) to -= 1;
-      state.order.splice(insertAfter ? to + 1 : to, 0, BE_DRAG_ID);
-      saveBeliefCanvas();
-      applyBeliefCanvas();
-    });
-  }
 }
 function getBeliefWindowLimit(){
   const raw = localStorage.getItem(BE_WINDOW_KEY) || BE_DEFAULT_WINDOW;
@@ -1405,11 +1415,32 @@ function beliefWindowRows(series){
   if(limit === "all" || rows.length <= limit) return rows;
   return rows.slice(-limit);
 }
-function visibleChartSeries(series){
+function visibleChartSeries(series, lines=[]){
   const rows = beliefWindowRows(series);
   if(rows.length <= BE_CHART_MAX_POINTS) return rows;
   const step = Math.max(1, Math.ceil(rows.length / BE_CHART_MAX_POINTS));
-  return rows.filter((_, i) => i % step === 0 || i === rows.length - 1);
+  const compact = [];
+  for(let i=0; i<rows.length; i+=step){
+    const bucket = rows.slice(i, Math.min(rows.length, i + step));
+    const point = {...bucket[bucket.length - 1]};
+    const finalBucket = i + step >= rows.length;
+    if(!finalBucket){
+      lines.forEach(line=>{
+        let sum = 0;
+        let n = 0;
+        bucket.forEach(p=>{
+          const v = Number(p?.[line.key]);
+          if(Number.isFinite(v)){
+            sum += v;
+            n += 1;
+          }
+        });
+        if(n) point[line.key] = sum / n;
+      });
+    }
+    compact.push(point);
+  }
+  return compact;
 }
 function chartHeightForSvg(svgId, fallback=260){
   const svg = document.getElementById(svgId);
@@ -1420,8 +1451,8 @@ function chartHeightForSvg(svgId, fallback=260){
 function drawSeriesChart(svgId, series, lines, opts={}){
   const svg = document.getElementById(svgId);
   if(!svg || !series.length){ if(svg) svg.innerHTML=""; return; }
-  const rawCount = series.length;
-  series = visibleChartSeries(series);
+  const rawCount = beliefWindowRows(series).length;
+  series = visibleChartSeries(series, lines);
   const W=920,H=chartHeightForSvg(svgId, Number(opts.height||260)),L=62,R=24,T=28,B=36;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("height", String(H));
@@ -1457,14 +1488,16 @@ function drawSeriesChart(svgId, series, lines, opts={}){
     grid += `<text x="${x}" y="${H-10}" text-anchor="${i===0?"start":i===xTicks-1?"end":"middle"}" fill="var(--dim)" font-size="10" font-family="JetBrains Mono">${esc(label)}</text>`;
   }
   let legendX = L;
-  const paths = lines.map(line => {
+  const paths = lines.map((line, lineIndex) => {
     const path = series.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(Number(p[line.key])||0).toFixed(1)}`).join(" ");
     const last = Number(series[series.length-1]?.[line.key] ?? 0);
     const lastText = opts.percent ? pct1(last) : last.toFixed(opts.decimals ?? 2);
-    const lastLabel = `<text x="${W-R-4}" y="${Y(last)+4}" text-anchor="end" fill="${line.color}" font-size="10" font-family="JetBrains Mono">${esc(line.short || line.label)} ${esc(lastText)}</text>`;
+    const labelOffset = ((lineIndex % 4) - 1.5) * 12;
+    const labelY = Math.max(T + 10, Math.min(H - B - 4, Y(last) + 4 + labelOffset));
+    const lastLabel = `<text x="${W-R-4}" y="${labelY}" text-anchor="end" fill="${line.color}" font-size="10" font-family="JetBrains Mono">${esc(line.short || line.label)} ${esc(lastText)}</text>`;
     const label = `<text x="${legendX}" y="${T-9}" fill="${line.color}" font-size="11" font-family="JetBrains Mono">${esc(line.label)}</text>`;
     legendX += (line.label.length * 7) + 22;
-    return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="${line.width||1.9}" stroke-linecap="round" stroke-linejoin="round"/>${label}${lastLabel}`;
+    return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="${line.width||1.9}" opacity="${line.opacity ?? 0.92}" stroke-linecap="round" stroke-linejoin="round"/>${label}${lastLabel}`;
   }).join("");
   const zero = ymin < 0 && ymax > 0
     ? `<line x1="${L}" y1="${Y(0)}" x2="${W-R}" y2="${Y(0)}" stroke="var(--line-hard)"/>`
