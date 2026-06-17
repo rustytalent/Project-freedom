@@ -1462,9 +1462,14 @@ def _belief_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
     return snap if isinstance(snap, dict) else {}
 
 
+def _belief_metric(label: str, value: str, tone: str = "") -> Dict[str, str]:
+    return {"label": label, "value": value, "tone": tone}
+
+
 def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     snap = _belief_snapshot(row)
     extras = row.get("extras") or {}
+    stream = extras.get("streaming_divergence") or {}
     decision = snap.get("decision") or {}
     thesis = snap.get("thesis") or {}
     iv = snap.get("iv_state") or {}
@@ -1477,71 +1482,162 @@ def _belief_phase_cards(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     sweep = snap.get("sweep_state") or {}
     contracts = extras.get("contracts") or []
     strike = decision.get("strike") or {}
+    warm = bool(snap.get("is_warm"))
+    clean = _belief_num(iv.get("clean_mark_fraction"))
+    friendly = _belief_num(decision.get("spread_friendliness")
+                           or iv.get("avg_friendliness"))
+    field_conf = _belief_num(battlefield.get("confidence"))
+    iv_conf = _belief_num(iv.get("confidence"))
+    ce_signed = _belief_num(ce.get("weighted_mean_signed_z"))
+    pe_signed = _belief_num(pe.get("weighted_mean_signed_z"))
+    ce_disp = _belief_num(ce.get("dispersion_score"))
+    pe_disp = _belief_num(pe.get("dispersion_score"))
+    no_trade = _belief_num(thesis.get("no_trade_score"))
+    liq_danger = _belief_num(thesis.get("liquidity_danger_score"))
+    winding_conf = _belief_num(winding.get("confidence"))
+    allowed = bool(decision.get("trade_allowed"))
 
     return [
         {
             "phase": "Phase 1",
             "title": "Logging + Live Bus",
             "state": "row received",
+            "description": (
+                "Ingests one Premium Belief row from the JSONL stream and "
+                "keeps Sentinel's cockpit, shadow ledger, and raw debug view "
+                "on the same live bus."
+            ),
             "primary": f"{row.get('asset', 'NIFTY')} @ {row.get('ts_ist') or snap.get('ts') or 'NA'}",
-            "secondary": f"model {row.get('model', 'premium_belief_engine')}",
+            "secondary": f"stream {stream.get('stable_verdict', 'NA')} / warm {warm}",
             "health": "ok",
+            "metrics": [
+                _belief_metric("bars", str(snap.get("bars_seen", "NA"))),
+                _belief_metric("contracts", str(len(contracts))),
+                _belief_metric("asset", str(row.get("asset", "NIFTY"))),
+            ],
         },
         {
             "phase": "Phase 2",
             "title": "Mark Price + Data Quality",
             "state": iv.get("state", "NA"),
+            "description": (
+                "Builds a tradable mark from microprice first, mid second, "
+                "and LTP only as a fresh fallback. Dirty quotes fail closed."
+            ),
             "primary": f"clean marks {_belief_num(iv.get('clean_mark_fraction')):.0%}",
-            "secondary": f"spread friendliness {_belief_num(decision.get('spread_friendliness')):.0%}",
+            "secondary": f"spread friendliness {friendly:.0%}",
             "health": "bad" if iv.get("state") in {"dirty_data", "liquidity_distortion"} else "ok",
+            "metrics": [
+                _belief_metric("clean", f"{clean:.0%}", "pos" if clean >= 0.65 else "neg"),
+                _belief_metric("friendly", f"{friendly:.0%}", "pos" if friendly >= 0.45 else "neg"),
+                _belief_metric("IV conf", f"{iv_conf:.0%}"),
+            ],
         },
         {
             "phase": "Phase 3",
             "title": "Moneyness Identity",
             "state": strike.get("label") or "NA",
+            "description": (
+                "Labels every option slot by behavior: future-like ITM, "
+                "gamma ATM, convex OTM, or lottery OTM. The decision layer "
+                "uses this to choose the right contract personality."
+            ),
             "primary": f"{len(contracts)} selected contracts",
             "secondary": f"side {strike.get('side') or 'NA'} level {strike.get('level', 'NA')}",
             "health": "ok" if contracts else "warn",
+            "metrics": [
+                _belief_metric("strike", strike.get("label") or "NA"),
+                _belief_metric("side", strike.get("side") or "NA"),
+                _belief_metric("level", str(strike.get("level", "NA"))),
+            ],
         },
         {
             "phase": "Phase 4",
             "title": "Residual + Spread Read",
             "state": "slot response",
+            "description": (
+                "Checks whether option premium moved more or less than fair "
+                "delta response. The deviation-of-deviation tells whether "
+                "premium is being defended, rejected, or distorted."
+            ),
             "primary": f"CE z {_belief_num(ce.get('weighted_mean_signed_z')):+.2f} / PE z {_belief_num(pe.get('weighted_mean_signed_z')):+.2f}",
             "secondary": f"CE disp {_belief_num(ce.get('dispersion_score')):.2f} / PE disp {_belief_num(pe.get('dispersion_score')):.2f}",
-            "health": "warn" if max(_belief_num(ce.get("dispersion_score")), _belief_num(pe.get("dispersion_score"))) > 0.65 else "ok",
+            "health": "warn" if max(ce_disp, pe_disp) > 0.65 else "ok",
+            "metrics": [
+                _belief_metric("CE z", f"{ce_signed:+.2f}", "pos" if ce_signed > 0 else "neg" if ce_signed < 0 else ""),
+                _belief_metric("PE z", f"{pe_signed:+.2f}", "pos" if pe_signed > 0 else "neg" if pe_signed < 0 else ""),
+                _belief_metric("disp", f"{max(ce_disp, pe_disp):.2f}", "warn" if max(ce_disp, pe_disp) > 0.65 else ""),
+            ],
         },
         {
             "phase": "Phase 5",
             "title": "Battlefield + IV State",
             "state": battlefield.get("verdict", "NA"),
+            "description": (
+                "Aggregates the CE and PE rails across strikes. Direction is "
+                "trusted only when both rails agree and IV state is clean."
+            ),
             "primary": f"field conf {_belief_num(battlefield.get('confidence')):.0%}",
             "secondary": f"IV {iv.get('state', 'NA')} dir {iv.get('direction', 'NA')} conf {_belief_num(iv.get('confidence')):.0%}",
             "health": "bad" if battlefield.get("verdict") == "single_distortion" else "ok",
+            "metrics": [
+                _belief_metric("field", f"{field_conf:.0%}"),
+                _belief_metric("IV", f"{iv_conf:.0%}"),
+                _belief_metric("dir", str(battlefield.get("direction", 0))),
+            ],
         },
         {
             "phase": "Phase 6",
             "title": "Thesis Memory",
             "state": thesis.get("composite_state", "NA"),
+            "description": (
+                "Keeps conviction with hysteresis so the engine does not flip "
+                "on every tick. Bull, bear, vol, and danger scores decay and "
+                "accumulate over time."
+            ),
             "primary": f"bull {_belief_num(thesis.get('bull_thesis_score')):.1f} / bear {_belief_num(thesis.get('bear_thesis_score')):.1f}",
             "secondary": f"danger {_belief_num(thesis.get('no_trade_score')):.1f} held {thesis.get('held_direction', 0)}",
             "health": "bad" if thesis.get("composite_state") == "NO_TRADE_DANGER" else "ok",
+            "metrics": [
+                _belief_metric("bull", f"{_belief_num(thesis.get('bull_thesis_score')):.1f}", "pos"),
+                _belief_metric("bear", f"{_belief_num(thesis.get('bear_thesis_score')):.1f}", "neg"),
+                _belief_metric("danger", f"{no_trade:.1f}", "neg" if no_trade >= 65 else ""),
+            ],
         },
         {
             "phase": "Phase 7",
             "title": "Winding + State Machines",
             "state": winding.get("zone", "NA"),
+            "description": (
+                "Tracks continuation, trap, and liquidity-sweep stories as "
+                "state machines. This tells the trader where the current "
+                "narrative is, not just what the last tick said."
+            ),
             "primary": f"winding conf {_belief_num(winding.get('confidence')):.0%}",
             "secondary": f"bull {bull.get('state_index', 'NA')} / bear {bear.get('state_index', 'NA')} / sweep {sweep.get('state_index', 'NA')}",
             "health": "ok",
+            "metrics": [
+                _belief_metric("winding", f"{winding_conf:.0%}"),
+                _belief_metric("bull state", str(bull.get("state_index", "NA"))),
+                _belief_metric("sweep", str(sweep.get("state_index", "NA"))),
+            ],
         },
         {
             "phase": "Phase 8",
             "title": "Decision Layer",
             "state": decision.get("action", row.get("signal", "NA")),
+            "description": (
+                "Applies fail-closed rules first, then exit, scalp, entry, "
+                "hold, and wait logic. This is still shadow output only."
+            ),
             "primary": f"allowed {decision.get('trade_allowed')} conf {_belief_num(decision.get('confidence')):.0%}",
             "secondary": f"dir {decision.get('direction', 0)} strike {strike.get('label') or 'NA'}",
-            "health": "ok" if decision.get("trade_allowed") else "warn",
+            "health": "ok" if allowed else "warn",
+            "metrics": [
+                _belief_metric("allowed", str(allowed), "pos" if allowed else "warn"),
+                _belief_metric("conf", f"{_belief_num(decision.get('confidence')):.0%}"),
+                _belief_metric("liq", f"{liq_danger:.1f}", "neg" if liq_danger >= 65 else ""),
+            ],
         },
     ]
 
@@ -1565,6 +1661,12 @@ def premium_belief(limit: int = 80) -> JSONResponse:
             "series": [],
             "contracts": [],
             "raw_snapshot": {},
+            "refresh_seconds": 1,
+            "data_contract": {
+                "mode": "quote_polling",
+                "truth_source": "Kite quote depth microprice when clean, mid fallback, fresh LTP fallback",
+                "orders": "shadow_only",
+            },
         })
 
     latest = rows[0]
@@ -1576,6 +1678,14 @@ def premium_belief(limit: int = 80) -> JSONResponse:
         s = _belief_snapshot(row)
         d = s.get("decision") or {}
         t = s.get("thesis") or {}
+        iv = s.get("iv_state") or {}
+        battlefield = s.get("battlefield") or {}
+        ce = (battlefield.get("ce_rail") or {})
+        pe = (battlefield.get("pe_rail") or {})
+        winding = s.get("winding") or {}
+        bull = s.get("bull_state") or {}
+        bear = s.get("bear_state") or {}
+        sweep = s.get("sweep_state") or {}
         series.append({
             "ts_ist": row.get("ts_ist"),
             "spot": _belief_num(s.get("spot") or (row.get("extras") or {}).get("spot")),
@@ -1583,6 +1693,27 @@ def premium_belief(limit: int = 80) -> JSONResponse:
             "bull": _belief_num(t.get("bull_thesis_score")),
             "bear": _belief_num(t.get("bear_thesis_score")),
             "danger": _belief_num(t.get("no_trade_score")),
+            "vol_expansion": _belief_num(t.get("vol_expansion_score")),
+            "liquidity_danger": _belief_num(t.get("liquidity_danger_score")),
+            "clean_mark_fraction": _belief_num(iv.get("clean_mark_fraction")),
+            "avg_friendliness": _belief_num(iv.get("avg_friendliness")
+                                            or d.get("spread_friendliness")),
+            "iv_confidence": _belief_num(iv.get("confidence")),
+            "battlefield_confidence": _belief_num(battlefield.get("confidence")),
+            "ce_signed_z": _belief_num(ce.get("weighted_mean_signed_z")),
+            "pe_signed_z": _belief_num(pe.get("weighted_mean_signed_z")),
+            "ce_abs_z": _belief_num(ce.get("weighted_mean_abs_z")),
+            "pe_abs_z": _belief_num(pe.get("weighted_mean_abs_z")),
+            "ce_dispersion": _belief_num(ce.get("dispersion_score")),
+            "pe_dispersion": _belief_num(pe.get("dispersion_score")),
+            "winding_confidence": _belief_num(winding.get("confidence")),
+            "upper_proximity": _belief_num(winding.get("upper_proximity")),
+            "lower_proximity": _belief_num(winding.get("lower_proximity")),
+            "bull_state": _belief_num(bull.get("state_index")),
+            "bear_state": _belief_num(bear.get("state_index")),
+            "sweep_state": _belief_num(sweep.get("state_index")),
+            "direction": _belief_num(d.get("direction")),
+            "trade_allowed": bool(d.get("trade_allowed")),
             "action": d.get("action") or row.get("signal"),
         })
 
@@ -1595,6 +1726,12 @@ def premium_belief(limit: int = 80) -> JSONResponse:
         "contracts": extras.get("contracts") or [],
         "stream": extras.get("streaming_divergence") or {},
         "raw_snapshot": snap,
+        "refresh_seconds": 1,
+        "data_contract": {
+            "mode": "quote_polling",
+            "truth_source": "Kite quote depth microprice when clean, mid fallback, fresh LTP fallback",
+            "orders": "shadow_only",
+        },
     })
 
 

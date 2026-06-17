@@ -193,7 +193,7 @@ label{ font-size: var(--t-xs); color: var(--muted); letter-spacing: .04em; }
 .kpi .v.lg{ font-size: var(--t-xl); }
 .kpi .delta{ font-size: var(--t-xs); margin-left: 4px; }
 
-.pos{ color: var(--green); } .neg{ color: var(--red); }
+.pos{ color: var(--green); } .neg{ color: var(--red); } .warn{ color: var(--amber); }
 
 /* ─────────────────────────────────────────────────────────────────
    Tables — institutional-density
@@ -425,14 +425,24 @@ kbd{
   grid-template-columns: repeat(4, minmax(0,1fr));
   gap: var(--s-2);
 }
+.belief-source{
+  margin-top: var(--s-3);
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--fg-soft);
+  font-size: var(--t-sm);
+}
+.belief-source b{ color: var(--amber); }
 .phase-grid{
   display: grid;
-  grid-template-columns: repeat(4, minmax(0,1fr));
+  grid-template-columns: repeat(2, minmax(0,1fr));
   gap: var(--s-2);
 }
 .phase-card{
-  min-height: 118px;
-  padding: 10px;
+  min-height: 182px;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: linear-gradient(180deg, rgba(255,255,255,.018), rgba(0,0,0,0));
@@ -453,15 +463,50 @@ kbd{
   margin-top: 7px;
   color: var(--fg);
   font-weight: 600;
-  font-size: var(--t-md);
+  font-size: var(--t-lg);
 }
 .phase-state{
   margin: 6px 0;
   color: var(--amber);
   font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
-  font-size: var(--t-sm);
+  font-size: var(--t-md);
   min-height: 18px;
 }
+.phase-desc{
+  min-height: 52px;
+  color: var(--fg-soft);
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+.belief-pill-row,
+.belief-state-strip{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.belief-pill{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--line-hard);
+  border-radius: var(--r-sm);
+  background: var(--bg-0);
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+.belief-pill b{
+  color: var(--fg);
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.belief-pill.pos{ border-color: rgba(106,153,113,.40); color: var(--green); background: var(--green-soft); }
+.belief-pill.neg{ border-color: rgba(184,94,82,.42); color: var(--red); background: var(--red-soft); }
+.belief-pill.warn{ border-color: rgba(212,162,89,.45); color: var(--amber); background: var(--amber-soft); }
 .rail-grid{
   display: grid;
   grid-template-columns: repeat(2, minmax(0,1fr));
@@ -487,6 +532,12 @@ kbd{
   color: var(--fg);
   font-size: var(--t-xl);
   font-weight: 600;
+}
+.belief-chart{
+  min-height: 190px;
+}
+.belief-chart svg{
+  min-height: 190px;
 }
 .belief-meter{ margin: 9px 0; }
 .belief-meter-head{
