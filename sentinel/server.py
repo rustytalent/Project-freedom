@@ -54,6 +54,7 @@ from .india_tax import (
 )
 from .notify import GLOBAL_NOTIFIER
 from .paper import PaperAccount
+from .belief_paper import BeliefPaperLedger
 from .rate_limit import allow as _rate_allow
 from .replay import ReplayController
 from .journey_audit import (
@@ -184,6 +185,10 @@ class Sentinel:
         liqpool_signals_path = cfg.journal_dir / "liqpool_live_signals.jsonl"
         self.liqpool_tail = LiveSignalsTail(
             liqpool_signals_path, publisher=self.publisher)
+        # Premium Belief has its own shadow paper book. The old PaperAccount
+        # wraps Kite orders; this one marks the belief stream to spot so the
+        # cockpit can show live virtual P&L even in demo/market-replay mode.
+        self.belief_paper = BeliefPaperLedger.from_env(cfg.journal_dir)
         # Launch-ready preflight: track whether the operator has
         # acknowledged the pre-market brief for this session. The cockpit
         # gates Crux verdicts on this so a fresh-login operator can't
@@ -338,6 +343,18 @@ class Sentinel:
         ))
         return resp or {}
 
+    def _tick_belief_paper(self) -> None:
+        """Mark Premium Belief signals into the one-lot shadow ledger."""
+        ledger = getattr(self, "belief_paper", None)
+        if ledger is None or not ledger.enabled:
+            return
+        try:
+            for sig in self.publisher.current().values():
+                if sig.model == "premium_belief_engine":
+                    ledger.ingest(sig)
+        except Exception as exc:
+            LOG.exception("belief paper ingest failed: %s", exc)
+
     def _tick_psychology(self) -> None:
         """Run the behavioral engine once per cycle: record spot, fire
         detectors, update tilt."""
@@ -378,6 +395,7 @@ class Sentinel:
                 self._tick_board()
                 self._tick_models()
                 self.liqpool_tail.poll()
+                self._tick_belief_paper()
                 self._tick_psychology()
                 self._tick_crux()
                 if now - last_pf > self.cfg.poll_portfolio_seconds:
@@ -1009,18 +1027,38 @@ def replay_state() -> JSONResponse:
 
 @app.get("/api/paper/status", dependencies=[Depends(auth)])
 def paper_status() -> JSONResponse:
-    """Surface paper-mode state for the cockpit: enabled, realized
-    P&L, open book of simulated positions."""
+    """Surface paper-mode state for the cockpit.
+
+    ``account_paper`` is the classic Kite-order wrapper. ``belief_paper``
+    is the Premium Belief shadow book that works in demo/replay too.
+    """
+    CORE._tick_belief_paper()
+    belief = CORE.belief_paper.snapshot()
     if not CORE.paper_enabled:
-        return JSONResponse({"enabled": False})
+        return JSONResponse({
+            "enabled": bool(belief.get("enabled")),
+            "account_paper_enabled": False,
+            "belief_paper_enabled": bool(belief.get("enabled")),
+            "belief_paper": belief,
+        })
     pa = CORE.account                          # PaperAccount
     return JSONResponse({
         "enabled": True,
+        "account_paper_enabled": True,
+        "belief_paper_enabled": bool(belief.get("enabled")),
         "starting_balance": pa._starting_balance,
         "realized_pnl": pa.realized_pnl(),
         "open_book": pa.open_book(),
         "n_orders": len(pa.orders_log),
+        "belief_paper": belief,
     })
+
+
+@app.get("/api/belief/paper/status", dependencies=[Depends(auth)])
+def belief_paper_status() -> JSONResponse:
+    """Dedicated Premium Belief virtual portfolio endpoint."""
+    CORE._tick_belief_paper()
+    return JSONResponse(CORE.belief_paper.snapshot())
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1157,6 +1195,7 @@ def state() -> JSONResponse:
         "routed_signals": CORE.routed_signals[:20],
         "promotions": CORE.promotions[:20],
         "live_signals": {k: v.to_row() for k, v in CORE.publisher.current().items()},
+        "belief_paper": CORE.belief_paper.snapshot(),
         "live_feed": [s.to_row() for s in CORE.publisher.history(limit=18)],
         "spot_history": [{"t": round(t.ts, 1), "spot": t.spot}
                           for t in CORE._tick_hist[-180:]],
@@ -1405,6 +1444,7 @@ def live_signals(asset: Optional[str] = None) -> JSONResponse:
     """The live model bus, exposed. Returns the latest signal per
     (asset, model) plus a recent history ring for the brief feed.
     Optional ``asset`` filters to one symbol."""
+    CORE._tick_belief_paper()
     current = CORE.publisher.current()
     hist = CORE.publisher.history(limit=40)
     if asset:
@@ -1413,6 +1453,7 @@ def live_signals(asset: Optional[str] = None) -> JSONResponse:
     return JSONResponse({
         "current": {k: v.to_row() for k, v in current.items()},
         "history": [s.to_row() for s in hist],
+        "belief_paper": CORE.belief_paper.snapshot(),
     })
 
 
