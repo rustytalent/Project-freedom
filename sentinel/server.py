@@ -1729,6 +1729,8 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
     8-phase shape and returns chart-friendly projections.
     """
     tail_rows_polled = _poll_belief_tail_now()
+    CORE._tick_belief_paper()
+    belief_paper = CORE.belief_paper.snapshot()
     rows = _belief_signal_rows(limit=max(1, min(limit, 7200)))
     server_now_ist = datetime.now(IST).strftime("%H:%M:%S")
     if not rows:
@@ -1745,6 +1747,7 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
             "server_now_ist": server_now_ist,
             "latest_age_seconds": None,
             "tail_rows_polled": tail_rows_polled,
+            "belief_paper": belief_paper,
             "refresh_seconds": 1,
             "data_contract": {
                 "mode": "quote_polling",
@@ -1821,6 +1824,7 @@ def premium_belief(limit: int = 7200) -> JSONResponse:
         "server_now_ist": server_now_ist,
         "latest_age_seconds": latest_age_seconds,
         "tail_rows_polled": tail_rows_polled,
+        "belief_paper": belief_paper,
         "refresh_seconds": 1.0,
         "data_contract": {
             "mode": "quote_polling",

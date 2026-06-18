@@ -1491,6 +1491,30 @@ function renderBelief(payload){
     ? executor.reject_reasons
     : (Array.isArray(executor.reason_codes) ? executor.reason_codes : []);
   const executorTelemetry = executor.telemetry || {};
+  const paper = payload.belief_paper || {};
+  const paperEnabled = paper.enabled === true;
+  const paperOpen = paper.position_open === true;
+  const paperSide = paper.side || (paperOpen ? "OPEN" : "FLAT");
+  const paperLots = Number(paper.quantity_lots ?? 0);
+  const paperLotSize = Number(paper.lot_size ?? 0);
+  const paperTotal = Number(paper.total_pnl ?? 0);
+  const paperUnrealized = Number(paper.unrealized_pnl ?? 0);
+  const paperRealized = Number(paper.realized_pnl ?? 0);
+  const paperEquity = Number(paper.equity ?? 0);
+  const paperTrades = Number(paper.n_trades ?? 0);
+  const paperWinRate = Number(paper.win_rate ?? 0);
+  const paperSizeText = paperEnabled
+    ? (paperOpen ? `${paperLots} lot × ${paperLotSize}` : "FLAT")
+    : "OFF";
+  const paperPnlClass = !paperEnabled ? "warn" : paperTotal > 0 ? "pos" : paperTotal < 0 ? "neg" : "";
+  const paperEvent = paper.last_event || (paperEnabled ? "MARK" : "OFF");
+  const paperReason = paper.last_reason || executorReasons[0] || "";
+  const inr = (value)=>{
+    const n = Number(value);
+    if(!Number.isFinite(n)) return "₹0";
+    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+    return `${sign}₹${Math.abs(Math.round(n)).toLocaleString("en-IN")}`;
+  };
   const rowKey = `${latest.ts_ist || snap.ts || ""}|${snap.bars_seen ?? ""}|${spot.toFixed(2)}`;
   const nowMs = Date.now();
   if(rowKey !== BE_LAST_ROW_KEY){
@@ -1521,15 +1545,28 @@ function renderBelief(payload){
         <div class="cell"><div class="l">Feed</div><div class="v ${stale ? "warn" : "pos"}">${freshnessText}</div></div>
       </div>
     </div>
+    <div class="belief-paper-strip ${paperEnabled ? "" : "off"}">
+      <div class="paper-kpi paper-main"><div class="l">Paper P&L</div><div class="v ${paperPnlClass}">${paperEnabled ? inr(paperTotal) : "OFF"}</div></div>
+      <div class="paper-kpi"><div class="l">Unrealized</div><div class="v ${paperUnrealized > 0 ? "pos" : paperUnrealized < 0 ? "neg" : ""}">${paperEnabled ? inr(paperUnrealized) : "—"}</div></div>
+      <div class="paper-kpi"><div class="l">Realized</div><div class="v ${paperRealized > 0 ? "pos" : paperRealized < 0 ? "neg" : ""}">${paperEnabled ? inr(paperRealized) : "—"}</div></div>
+      <div class="paper-kpi"><div class="l">Book</div><div class="v ${paperOpen ? cls(paperSide === "LONG" ? 1 : paperSide === "SHORT" ? -1 : 0) : ""}">${esc(paperSide)}</div></div>
+      <div class="paper-kpi"><div class="l">Paper size</div><div class="v">${esc(paperSizeText)}</div></div>
+      <div class="paper-kpi"><div class="l">Equity</div><div class="v">${paperEnabled ? inr(paperEquity) : "—"}</div></div>
+      <div class="paper-kpi"><div class="l">Trades</div><div class="v">${paperEnabled ? paperTrades : "—"}</div></div>
+      <div class="paper-kpi"><div class="l">Win rate</div><div class="v">${paperEnabled ? pct(paperWinRate) : "—"}</div></div>
+    </div>
     <div class="cells" style="grid-template-columns:repeat(4,1fr);margin-top:12px">
       <div class="cell"><div class="l">Direction</div><div class="v ${cls(d.direction)}">${d.direction ?? 0}</div></div>
       <div class="cell"><div class="l">Strike</div><div class="v">${esc(strike.label || "NA")}</div></div>
       <div class="cell"><div class="l">Battlefield</div><div class="v">${esc(b.verdict || "NA")}</div></div>
       <div class="cell"><div class="l">IV state</div><div class="v">${esc(iv.state || "NA")}</div></div>
       <div class="cell"><div class="l">Executor</div><div class="v ${executorAllowed ? "pos" : "warn"}">${esc(executorIntent)}</div></div>
-      <div class="cell"><div class="l">Size</div><div class="v">${pct(executorSize)}</div></div>
+      <div class="cell"><div class="l">Gov size</div><div class="v">${pct(executorSize)}</div></div>
       <div class="cell"><div class="l">Profile</div><div class="v">${esc(executor.profile || "NA")}</div></div>
       <div class="cell"><div class="l">Stop / target</div><div class="v">${Number(executor.stop_r || 0).toFixed(2)}R / ${Number(executor.target_r || 0).toFixed(2)}R</div></div>
+    </div>
+    <div class="belief-source ${paperEnabled ? "" : "warn"}">
+      <b>Paper ledger:</b> ${paperEnabled ? `${esc(paperEvent)} · ${esc(paperSide)} · ${esc(paperSizeText)} · total ${inr(paperTotal)} · U ${inr(paperUnrealized)} · R ${inr(paperRealized)}${paperReason ? ` · ${esc(paperReason).slice(0, 180)}` : ""}` : "OFF. Restart Sentinel with SENTINEL_BELIEF_PAPER=1 to see virtual one-lot P&L here."}
     </div>
     ${executorReasons.length ? `<div class="belief-source warn"><b>Executor reason:</b> ${esc(executorReasons.slice(0, 4).join(" · "))}</div>` : ""}
     <div class="belief-source">
