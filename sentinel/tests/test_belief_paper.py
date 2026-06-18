@@ -79,3 +79,13 @@ def test_disabled_ledger_does_not_trade(tmp_path):
     snap = ledger.snapshot()
     assert snap["enabled"] is False
     assert snap["position_open"] is False
+
+
+def test_env_default_uses_current_nifty_lot_size(tmp_path, monkeypatch):
+    monkeypatch.setenv("SENTINEL_PAPER", "1")
+    monkeypatch.delenv("SENTINEL_BELIEF_LOT_SIZE", raising=False)
+
+    ledger = BeliefPaperLedger.from_env(tmp_path)
+
+    assert ledger.enabled is True
+    assert ledger.lot_size == 65

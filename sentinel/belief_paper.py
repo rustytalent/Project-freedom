@@ -112,7 +112,7 @@ class BeliefPaperLedger:
 
     enabled: bool = False
     starting_balance: float = 100000.0
-    lot_size: int = 75
+    lot_size: int = 65
     lots: int = 1
     min_confidence: float = 0.55
     require_allowed: bool = False
@@ -150,7 +150,7 @@ class BeliefPaperLedger:
         return cls(
             enabled=enabled,
             starting_balance=balance,
-            lot_size=max(1, _as_int(os.environ.get("SENTINEL_BELIEF_LOT_SIZE"), 75)),
+            lot_size=max(1, _as_int(os.environ.get("SENTINEL_BELIEF_LOT_SIZE"), 65)),
             lots=max(1, _as_int(os.environ.get("SENTINEL_BELIEF_LOTS"), 1)),
             min_confidence=max(0.0, min(1.0, _as_float(
                 os.environ.get("SENTINEL_BELIEF_MIN_CONFIDENCE"), 0.55))),
@@ -229,6 +229,8 @@ class BeliefPaperLedger:
         entry_spot = self.position.entry_spot if self.position else None
         entry_ts = self.position.entry_ts_ist if self.position else None
         age = self.position.age_ticks if self.position else 0
+        executor_size = _as_float(executor.get("size_fraction"), 1.0)
+        paper_size = executor_size if executor_size > 0 else 1.0
         return {
             "enabled": self.enabled,
             "mode": "INDEX_POINT_SHADOW",
@@ -260,7 +262,7 @@ class BeliefPaperLedger:
             "executor_intent": executor.get("intent") or executor.get("action") or "",
             "executor_allowed": bool(executor.get("allowed", False)),
             "executor_size_fraction": _as_float(executor.get("size_fraction"), 0.0),
-            "paper_size_fraction": 1.0 if self.position else 0.0,
+            "paper_size_fraction": paper_size if self.position else 0.0,
             "stale_seconds": _stale_seconds(self.last_ts_ist),
             "updated_at_ist": _now_ist_hms(),
             "recent_trades": list(self.trades[-12:]),

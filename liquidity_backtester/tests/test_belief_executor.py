@@ -3,6 +3,7 @@ from __future__ import annotations
 from liqpool.research.belief.executor import (
     INTENT_BLOCKED,
     INTENT_EXIT_POSITION,
+    INTENT_HOLD_POSITION,
     INTENT_OPEN_LONG,
     BeliefExecutionGovernor,
     ExecutionGovernorConfig,
@@ -89,6 +90,49 @@ def test_executor_opens_when_belief_rails_and_quality_align():
     assert intent.order_mode == "SHADOW_ONLY"
     assert intent.live_orders_enabled is False
     assert intent.telemetry["directional_votes"] >= 2
+
+
+def test_executor_defaults_have_positive_reward_to_risk():
+    cfg = ExecutionGovernorConfig()
+
+    assert cfg.scalp_target_r > cfg.stop_r
+    assert cfg.intraday_target_r > cfg.stop_r
+
+
+def test_executor_hold_carries_size_and_serialized_entry_context():
+    governor = BeliefExecutionGovernor(ExecutionGovernorConfig(min_warm_bars=20))
+    opened = governor.evaluate(_snapshot(action="ENTER_LONG", direction=1, bars=100, spot=25000.0))
+    assert opened.intent == INTENT_OPEN_LONG
+
+    held = governor.evaluate(_snapshot(action="HOLD", direction=1, confidence=0.80, bars=101, spot=25010.0))
+
+    assert held.intent == INTENT_HOLD_POSITION
+    assert held.size_fraction == opened.size_fraction
+    assert held.size_fraction > 0
+    assert held.state["entry_context"]["thesis_state"] == "BULL_ENTRY"
+    assert held.state["entry_context"]["directional_votes"] >= 2
+    assert held.telemetry["position_current_r"] > 0
+
+
+def test_executor_profit_lock_exits_after_giveback():
+    cfg = ExecutionGovernorConfig(
+        min_warm_bars=20,
+        min_hold_bars=1,
+        cooldown_bars_after_entry=0,
+    )
+    governor = BeliefExecutionGovernor(cfg)
+    opened = governor.evaluate(_snapshot(action="ENTER_LONG", direction=1, bars=100, spot=25000.0))
+    assert opened.intent == INTENT_OPEN_LONG
+
+    peak_spot = 25000.0 * (1.0 + cfg.adverse_spot_stop_pct * 1.20)
+    held = governor.evaluate(_snapshot(action="HOLD", direction=1, confidence=0.90, bars=101, spot=peak_spot))
+    assert held.intent == INTENT_HOLD_POSITION
+
+    giveback_spot = 25000.0 * (1.0 + cfg.adverse_spot_stop_pct * 0.70)
+    exit_intent = governor.evaluate(_snapshot(action="HOLD", direction=1, confidence=0.82, bars=102, spot=giveback_spot))
+
+    assert exit_intent.intent == INTENT_EXIT_POSITION
+    assert any("profit lock giveback" in reason for reason in exit_intent.reason_codes)
 
 
 def test_executor_blocks_dirty_marks_before_entry():

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 
 EXECUTOR_NAME = "premium_belief_execution_governor"
-EXECUTOR_VERSION = "v1"
+EXECUTOR_VERSION = "v2"
 ORDER_MODE_SHADOW = "SHADOW_ONLY"
 
 INTENT_OPEN_LONG = "OPEN_LONG"
@@ -50,12 +50,16 @@ class ExecutionGovernorConfig:
     max_no_trade_score: float = 18.0
     cooldown_bars_after_entry: int = 8
     cooldown_bars_after_exit: int = 6
+    min_hold_bars: int = 2
     scalp_max_bars: int = 24
     intraday_max_bars: int = 90
-    stop_r: float = 1.00
-    scalp_target_r: float = 0.70
-    intraday_target_r: float = 1.25
-    trail_after_r: float = 0.55
+    stop_r: float = 0.70
+    scalp_target_r: float = 1.10
+    intraday_target_r: float = 1.60
+    trail_after_r: float = 0.65
+    profit_lock_start_r: float = 0.70
+    profit_lock_giveback_r: float = 0.35
+    confidence_giveback: float = 0.30
     max_unit_fraction: float = 1.00
     adverse_spot_stop_pct: float = 0.0025
 
@@ -73,6 +77,19 @@ class ExecutorPosition:
     entry_bar: int
     entry_confidence: float
     profile: str
+    size_fraction: float
+    entry_action: str
+    entry_thesis_state: str
+    entry_iv_state: str
+    entry_battlefield: str
+    entry_stream_stable: str
+    entry_rail_alignment: float
+    entry_directional_votes: int
+    entry_reason_codes: List[str] = field(default_factory=list)
+    high_water_confidence: float = 0.0
+    low_water_confidence: float = 1.0
+    best_r: float = 0.0
+    worst_r: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -263,6 +280,12 @@ class BeliefExecutionGovernor:
         contract_level = int(_number(strike.get("level"), 0))
         target = self.cfg.scalp_target_r if profile == PROFILE_SCALP else self.cfg.intraday_target_r
         max_hold = self.cfg.scalp_max_bars if profile == PROFILE_SCALP else self.cfg.intraday_max_bars
+        entry_reason_codes = [
+            f"votes={votes}",
+            f"rail={rail:.2f}",
+            f"size={size_fraction:.2f}",
+            f"profile={profile}",
+        ]
         self.position = ExecutorPosition(
             side="LONG" if desired_direction > 0 else "SHORT",
             intent=intent,
@@ -273,6 +296,19 @@ class BeliefExecutionGovernor:
             entry_bar=bars,
             entry_confidence=confidence,
             profile=profile,
+            size_fraction=size_fraction,
+            entry_action=action,
+            entry_thesis_state=str(telemetry.get("thesis_state") or ""),
+            entry_iv_state=str(telemetry.get("iv_state") or ""),
+            entry_battlefield=str(telemetry.get("battlefield") or ""),
+            entry_stream_stable=str(telemetry.get("stream_stable") or ""),
+            entry_rail_alignment=rail,
+            entry_directional_votes=votes,
+            entry_reason_codes=entry_reason_codes,
+            high_water_confidence=confidence,
+            low_water_confidence=confidence,
+            best_r=0.0,
+            worst_r=0.0,
         )
         self.cooldown_until_bar = bars + self.cfg.cooldown_bars_after_entry
         return self._intent(
@@ -291,12 +327,7 @@ class BeliefExecutionGovernor:
             trail_after_r=self.cfg.trail_after_r,
             max_hold_bars=max_hold,
             invalidation=str(decision.get("invalidation_rule") or "belief state flips or data guard trips"),
-            reason_codes=[
-                f"votes={votes}",
-                f"rail={rail:.2f}",
-                f"size={size_fraction:.2f}",
-                f"profile={profile}",
-            ],
+            reason_codes=entry_reason_codes,
             telemetry={**telemetry, "directional_votes": votes, "rail_alignment": rail},
         )
 
@@ -385,24 +416,71 @@ class BeliefExecutionGovernor:
         spot = _number(snapshot.get("spot"), pos.entry_spot)
         age = max(0, bars - pos.entry_bar)
         direction = 1 if pos.side == "LONG" else -1
-        spot_move = direction * ((spot - pos.entry_spot) / max(1e-9, pos.entry_spot))
-        reasons: List[str] = []
-        if str(decision.get("action") or "") == "EXIT":
-            reasons.append("belief engine emitted EXIT")
+        current_r = self._position_r(pos, spot)
+        pos.best_r = max(pos.best_r, current_r)
+        pos.worst_r = min(pos.worst_r, current_r)
+        current_confidence = _clamp(_number(decision.get("confidence"), telemetry.get("iv_confidence", 0.0)))
+        pos.high_water_confidence = max(pos.high_water_confidence, current_confidence)
+        pos.low_water_confidence = min(pos.low_water_confidence, current_confidence)
+
+        same_votes = self._directional_votes(snapshot, stream, direction)
+        opposite_votes = self._directional_votes(snapshot, stream, -direction)
+        rail = self._directional_rail(snapshot, direction)
+        thesis_state = str(telemetry.get("thesis_state") or "").upper()
+        stream_direction = int(_number(telemetry.get("stream_direction"), 0))
+        target = self.cfg.scalp_target_r if pos.profile == PROFILE_SCALP else self.cfg.intraday_target_r
+        hard_reasons: List[str] = []
+        soft_reasons: List[str] = []
+
+        decision_action = str(decision.get("action") or "")
+        if decision_action == "EXIT" or decision_action.startswith("EXIT_"):
+            hard_reasons.append("belief engine emitted EXIT")
         if telemetry["iv_state"] in DIRTY_IV_STATES:
-            reasons.append(f"unsafe IV state {telemetry['iv_state']}")
+            hard_reasons.append(f"unsafe IV state {telemetry['iv_state']}")
         if telemetry["battlefield"] in DANGEROUS_BATTLEFIELD:
-            reasons.append(f"unsafe battlefield {telemetry['battlefield']}")
+            hard_reasons.append(f"unsafe battlefield {telemetry['battlefield']}")
         if telemetry["no_trade_score"] > self.cfg.max_no_trade_score:
-            reasons.append("no-trade danger rose while holding")
-        if self._directional_votes(snapshot, stream, -direction) >= 2:
-            reasons.append("opposite directional vote cluster")
+            hard_reasons.append("no-trade danger rose while holding")
+        if current_r <= -self.cfg.stop_r:
+            hard_reasons.append(f"hard stop current_r={current_r:.2f}R stop={self.cfg.stop_r:.2f}R")
+
+        if hard_reasons:
+            return hard_reasons
+
+        if age < self.cfg.min_hold_bars:
+            return []
+
+        if opposite_votes >= self.cfg.min_directional_votes:
+            soft_reasons.append(f"opposite directional vote cluster votes={opposite_votes}")
+        if same_votes < max(1, self.cfg.min_directional_votes - 1) and rail < self.cfg.min_directional_rail_abs:
+            soft_reasons.append(f"context alignment faded votes={same_votes} rail={rail:.2f}")
+        if direction > 0 and "BEAR" in thesis_state:
+            soft_reasons.append(f"thesis flipped against long: {thesis_state}")
+        if direction < 0 and "BULL" in thesis_state:
+            soft_reasons.append(f"thesis flipped against short: {thesis_state}")
+        if stream_direction == -direction:
+            soft_reasons.append("stream turned against position")
+        if (
+            pos.high_water_confidence - current_confidence >= self.cfg.confidence_giveback
+            and same_votes < pos.entry_directional_votes
+        ):
+            soft_reasons.append(
+                f"confidence giveback {pos.high_water_confidence - current_confidence:.2f}"
+            )
+        if (
+            pos.best_r >= self.cfg.profit_lock_start_r
+            and pos.best_r - current_r >= self.cfg.profit_lock_giveback_r
+        ):
+            soft_reasons.append(
+                f"profit lock giveback best={pos.best_r:.2f}R current={current_r:.2f}R"
+            )
+        if current_r >= target and (same_votes < pos.entry_directional_votes or rail < pos.entry_rail_alignment * 0.70):
+            soft_reasons.append(f"target reached with context fade current={current_r:.2f}R target={target:.2f}R")
+
         max_age = self.cfg.scalp_max_bars if pos.profile == PROFILE_SCALP else self.cfg.intraday_max_bars
         if age >= max_age:
-            reasons.append(f"max hold bars reached age={age}")
-        if spot_move <= -self.cfg.adverse_spot_stop_pct:
-            reasons.append(f"adverse spot move {spot_move:.4f}")
-        return reasons
+            soft_reasons.append(f"max hold bars reached age={age}")
+        return soft_reasons
 
     def _hold_intent(
         self,
@@ -416,13 +494,28 @@ class BeliefExecutionGovernor:
         bars = int(_number(telemetry.get("bars_seen"), 0))
         age = max(0, bars - pos.entry_bar)
         max_hold = self.cfg.scalp_max_bars if pos.profile == PROFILE_SCALP else self.cfg.intraday_max_bars
+        spot = _number(telemetry.get("spot"), pos.entry_spot)
+        direction = 1 if pos.side == "LONG" else -1
+        current_r = self._position_r(pos, spot)
+        hold_telemetry = {
+            **telemetry,
+            "position_age": age,
+            "position_current_r": round(current_r, 4),
+            "position_best_r": round(pos.best_r, 4),
+            "position_worst_r": round(pos.worst_r, 4),
+            "position_high_water_confidence": round(pos.high_water_confidence, 4),
+            "position_low_water_confidence": round(pos.low_water_confidence, 4),
+            "entry_directional_votes": pos.entry_directional_votes,
+            "entry_rail_alignment": round(pos.entry_rail_alignment, 4),
+            "position_direction": direction,
+        }
         return self._intent(
             intent=INTENT_HOLD_POSITION,
             action=action,
             allowed=True,
             direction=1 if pos.side == "LONG" else -1,
             confidence=max(confidence, pos.entry_confidence),
-            size_fraction=0.0,
+            size_fraction=pos.size_fraction,
             contract_side=pos.contract_side,
             contract_label=pos.contract_label,
             contract_level=pos.contract_level,
@@ -432,9 +525,15 @@ class BeliefExecutionGovernor:
             trail_after_r=self.cfg.trail_after_r,
             max_hold_bars=max_hold,
             invalidation="active position; exit if guards flip or age expires",
-            reason_codes=[f"position_age={age}", f"max_hold={max_hold}"],
+            reason_codes=[
+                f"position_age={age}",
+                f"max_hold={max_hold}",
+                f"current_r={current_r:.2f}",
+                f"best_r={pos.best_r:.2f}",
+                f"worst_r={pos.worst_r:.2f}",
+            ],
             reject_reasons=reject_reasons,
-            telemetry=telemetry,
+            telemetry=hold_telemetry,
         )
 
     def _intent(self, **kwargs: Any) -> ExecutionIntent:
@@ -444,9 +543,29 @@ class BeliefExecutionGovernor:
             state.update({
                 "position_open": True,
                 "position_side": pos.side,
+                "position_intent": pos.intent,
+                "contract_side": pos.contract_side,
+                "contract_label": pos.contract_label,
+                "contract_level": pos.contract_level,
+                "profile": pos.profile,
+                "size_fraction": pos.size_fraction,
                 "entry_bar": pos.entry_bar,
                 "entry_spot": pos.entry_spot,
                 "entry_confidence": pos.entry_confidence,
+                "entry_action": pos.entry_action,
+                "entry_context": {
+                    "thesis_state": pos.entry_thesis_state,
+                    "iv_state": pos.entry_iv_state,
+                    "battlefield": pos.entry_battlefield,
+                    "stream_stable": pos.entry_stream_stable,
+                    "directional_votes": pos.entry_directional_votes,
+                    "rail_alignment": pos.entry_rail_alignment,
+                    "reason_codes": list(pos.entry_reason_codes),
+                },
+                "high_water_confidence": pos.high_water_confidence,
+                "low_water_confidence": pos.low_water_confidence,
+                "best_r": pos.best_r,
+                "worst_r": pos.worst_r,
             })
         else:
             state.setdefault("position_open", False)
@@ -528,6 +647,11 @@ class BeliefExecutionGovernor:
         else:
             size = 0.25
         return min(self.cfg.max_unit_fraction, size)
+
+    def _position_r(self, pos: ExecutorPosition, spot: float) -> float:
+        direction = 1 if pos.side == "LONG" else -1
+        spot_move = direction * ((spot - pos.entry_spot) / max(1e-9, pos.entry_spot))
+        return spot_move / max(1e-9, self.cfg.adverse_spot_stop_pct)
 
 
 def _map(value: Any) -> Mapping[str, Any]:

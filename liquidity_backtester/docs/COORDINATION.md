@@ -25,6 +25,17 @@ Append-only log of decisions. One line each.
 Format: `YYYY-MM-DD [agent] commit_sha — decision`
 
 ```
+2026-06-19 [codex] (this) — BELIEF-EXEC-LIFECYCLE:
+                            Premium Belief executor upgraded from one-row
+                            intent translation to context-aware shadow
+                            position lifecycle. Defaults now use positive
+                            reward/risk, hold intents carry non-zero size,
+                            entry context is serialized into executor state,
+                            profit-lock/confidence/context-fade exits are
+                            explicit, and Sentinel Premium Belief paper
+                            ledger defaults to current NIFTY lot size 65.
+                            This is still shadow/paper infrastructure, not
+                            broker auto-fire.
 2026-06-12 [codex] (this) — EQUITY-VERTICAL-ACTIVE:
                             historical options Gate-1 failed because
                             the warehouse has Greeks and current active
