@@ -120,11 +120,42 @@ from .projection import (
     ProjectionDistribution,
     ProjectionRecord,
 )
+from .broker import (
+    BrokerAdapter,
+    BrokerOrder,
+    BrokerOrderResult,
+    KiteBrokerAdapter,
+    KiteBrokerConfig,
+    PaperBrokerAdapter,
+)
 from .cockpit import (
     CockpitSnapshot,
     build_cockpit_snapshot,
 )
 from .explainer import explain_tick
+from .persistence import (
+    ManagerPersistence,
+    ManagerStateSnapshot,
+    PersistenceConfig,
+)
+from .pricing import (
+    IVSurface,
+    IVSurfaceConfig,
+    IVSurfaceFitter,
+    OptionGreeks,
+    StrategyGreeksProfile,
+    bs_call_price,
+    bs_put_price,
+    call_greeks,
+    compute_strategy_greeks,
+    implied_volatility,
+    put_greeks,
+)
+from .v4_runner import (
+    TickResult,
+    V4Runner,
+    V4RunnerConfig,
+)
 from .hedge import (
     HedgeLeg,
     HedgeProposal,
