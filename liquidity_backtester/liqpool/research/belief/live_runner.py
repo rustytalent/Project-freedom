@@ -24,7 +24,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from liqpool.contracts.signals import ModelSignal
 from liqpool.research.belief.engine import BeliefEngine, BeliefEngineConfig, BeliefSnapshot
-from liqpool.research.belief.executor import BeliefExecutionGovernor, ExecutionGovernorConfig
+from liqpool.research.belief.executor import (
+    BeliefExecutionGovernor,
+    ExecutionGovernorConfig,
+    HeldContractRead,
+)
 from liqpool.research.belief.mark_price import Quote
 from liqpool.research.streaming_divergence import StreamingDivergenceEngine, StreamingRead
 
@@ -341,6 +345,46 @@ def _executor_for_config(cfg: BeliefLiveConfig) -> Optional[BeliefExecutionGover
     ))
 
 
+def _held_quote_from_snapshot(
+    snapshot: BeliefSnapshot,
+    *,
+    governor: BeliefExecutionGovernor,
+) -> Optional[HeldContractRead]:
+    """Extract the live read of the *held* contract (or the entry-target
+    contract) from the snapshot's slot_readings.
+
+    The executor needs the held leg's bid/ask/mark/spread_state/acceptance/
+    dod_z to compute premium R and enforce held-leg guards. The snapshot's
+    slot_readings already carries every slot's mark + acceptance — we just
+    pick the row for the contract the governor would act on.
+    """
+    pos = governor.position
+    if pos is not None:
+        want_side, want_level = pos.contract_side, pos.contract_level
+    else:
+        # Pre-entry: use the contract the decision is targeting.
+        strike = snapshot.decision.strike
+        if not strike or not strike.side:
+            return None
+        want_side, want_level = strike.side, strike.level
+    for raw in snapshot.slot_readings:
+        if (raw.get("option_type") == want_side
+                and int(raw.get("level", 999)) == want_level):
+            mark = float(raw.get("mark_price") or 0.0) or None
+            dod_z = raw.get("dod_z")
+            dod_z = float(dod_z) if isinstance(dod_z, (int, float)) else None
+            return HeldContractRead(
+                bid=None, ask=None, mid=mark,
+                spread_state=str(raw.get("spread_state") or ""),
+                friendliness=float(raw.get("friendliness") or 0.0) or None,
+                acceptance=str(raw.get("acceptance") or "normal"),
+                dod_z=dod_z,
+                mark_source=str(raw.get("mark_source") or ""),
+                mark_quality_label=str(raw.get("mark_quality_label") or ""),
+            )
+    return None
+
+
 def _executor_intent(
     governor: Optional[BeliefExecutionGovernor],
     snapshot: BeliefSnapshot,
@@ -349,7 +393,10 @@ def _executor_intent(
     if governor is None:
         return None
     stream_payload = stream.to_dict() if stream is not None else None
-    return governor.evaluate(snapshot.to_dict(), stream_payload).to_dict()
+    held = _held_quote_from_snapshot(snapshot, governor=governor)
+    return governor.evaluate(
+        snapshot.to_dict(), stream_payload, held_quote=held,
+    ).to_dict()
 
 
 def _write_executor_row(
