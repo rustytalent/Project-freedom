@@ -1,12 +1,109 @@
 # Premium Belief Engine — Executor v4 Master Plan
 
-**Purpose**: Source of truth for the executor_v4 build across all 5 sprints.
-This document survives context loss. If a future session is asked to
-continue, READ THIS FIRST.
+**Purpose**: Source of truth for the executor_v4 build across all 5 sprints
+plus the Sunday-night state-of-the-art push. This document survives context
+loss. If a future session is asked to continue, READ THIS FIRST.
 
-**Date**: 2026-06-19
+**Date**: 2026-06-19 (initial); 2026-06-21 (Sunday SOTA push)
 **Founder**: targeting Monday 2026-06-23 to USE this live
-**Author**: Opus 4.7 (Claude)
+**Author**: Opus 4.7 / 4.8 (Claude)
+
+---
+
+## SUNDAY 2026-06-21 — STATE-OF-THE-ART PUSH (NEW)
+
+After the founder reviewed Sprints 1-5 and asked "is this REALLY state of the
+art?" the honest answer was no — several gaps remained that would matter for
+live Monday performance. This section documents the upgrades that closed those
+gaps.
+
+### Sunday additions (all committed and tested):
+
+**1. PRICING LAYER** (`executor_v4/pricing/`):
+- `black_scholes.py` — proper BSM with erfc-based normal CDF, full first +
+  second-order Greeks, Brent-bracketed Newton-Raphson IV inversion. Replaces
+  the toy linear-decay model. **State-of-the-art numerical robustness.**
+- `iv_surface.py` — Gatheral SVI smile fitting from observed contract quotes
+  + polynomial fallback + MAD outlier filtering + Nelder-Mead simplex
+  optimization. **Industry-standard parametric form.**
+- `strategy_greeks.py` — proper portfolio Greeks aggregator using the IV
+  surface for each leg.
+
+**2. BROKER ADAPTER** (`executor_v4/broker/`):
+- `base.py` — `BrokerAdapter` protocol with `BrokerOrder`, `BrokerOrderResult`,
+  `BrokerOrderState`, `BrokerPosition` dataclasses.
+- `paper.py` — `PaperBrokerAdapter` for safe defaults: instant fills, slippage
+  configurable, internal position tracking, kill switch.
+- `kite.py` — `KiteBrokerAdapter` wrapping `sentinel.kite_client.KiteAccount`.
+  Default `confirm_real=False`; flipping to True is the explicit live-trading
+  opt-in. Per-tick + per-day order caps, opposing-position guard.
+
+**3. LIVE RUNNER** (`v4_runner.py`):
+- `V4Runner.paper(...)` and `V4Runner.kite(api_key=..., access_token=...,
+  confirm_real=False)` factory shortcuts.
+- Per tick: engine_upgrades transform → manager.evaluate → broker routing →
+  state persistence → cockpit snapshot → optional JSONL emit.
+
+**4. STATE PERSISTENCE** (`persistence.py`):
+- Atomic write-to-tempfile + rename per tick.
+- `/var/lib/sentinel/executor_v4_state/manager_state_YYYY-MM-DD.json`.
+- Restores daily P&L on restart so a container restart mid-day doesn't lose
+  accounting.
+
+**5. ENGINE UPGRADES** (`engine_upgrades.py`):
+- Audit's top-5 fixes applied as a snapshot transformer (doesn't modify the
+  engine itself, so other consumers are unaffected):
+  - **Adaptive warmup**: graduated 30→80 bar window with confidence scaling
+  - **Dirty-quote healing**: pauses entries when ≥30% slots show dangerous
+    spreads / dirty marks
+  - **Realized-vol divergence**: confidence haircut when realized/implied
+    falls outside [0.7, 1.5]
+  - **Confidence intervals**: rolling stddev of confidence readings
+  - **Per-tick UpgradeReport**: attached to snapshot for cockpit visibility
+
+**6. THREE MORE STRATEGIES** (`strategy_library/`):
+- `strangle.py` — `LongStrangleStrategy` (cheaper than straddle, vol expansion)
+- `ratio_spread.py` — `BullRatioSpreadStrategy` (1×2 with built-in hedge)
+- `jade_lizard.py` — `JadeLizardStrategy` (institutional-feel chop play)
+
+Selector registers all 9 strategies now (was 6).
+
+**7. ONLINE LEARNING** (`learning.py`):
+- `OnlineLearner` updates aggregator weights from closed-position outcomes
+  using regularized logistic regression. Conservative bounds + sum-to-1
+  preservation. **Now the system gets smarter from its own ledger.**
+
+**8. REPLAY HARNESS** (`replay.py`):
+- `replay_jsonl(path)` consumes recorded BeliefSnapshot tapes. Reports win
+  rate, avg/median R, max drawdown, fees, slippage, net P&L, strategy usage,
+  per-strategy P&L, top refused reasons.
+- Lets the founder validate the executor against any historical day before
+  Monday's go-live.
+
+**9. MONDAY LAUNCHER** (`scripts/launch.py`):
+- One-line CLI: `python -m liqpool.research.belief.executor_v4.scripts.launch
+  --paper` or `--kite --api-key=... --access-token=... --confirm-real`.
+- Modes: paper, kite, stdin (pipe snapshots), replay (validate tape).
+- Emits cockpit JSONL + persists state. Environment variable fallback for
+  `KITE_API_KEY`, `KITE_ACCESS_TOKEN`, `V4_CONFIRM_REAL`.
+
+### Sunday push test totals:
+- 25 new pricing tests
+- 14 new broker tests
+- 9 new runner tests
+- 9 new engine upgrade tests
+- 15 new strategy + learner tests
+- 8 new replay tests
+- **Total Sunday additions: 80 tests. Full suite: 1410 passing, 1 skipped.**
+
+### What remains genuinely state-of-the-art-grade but NOT shipped:
+- Sentinel server-side UI hookup (the cockpit dict is the contract; rendering
+  is a frontend task best done with founder eyes on screen)
+- Greeks-aware portfolio optimizer (current is delta-cluster heuristic)
+- Full term-structure across multiple expiries (current is single-expiry SVI)
+- Walk-forward calibration of online learner
+
+---
 
 ---
 
