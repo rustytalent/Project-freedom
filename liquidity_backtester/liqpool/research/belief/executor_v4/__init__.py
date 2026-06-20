@@ -120,11 +120,39 @@ from .projection import (
     ProjectionDistribution,
     ProjectionRecord,
 )
+from .explainer import explain_tick
+from .hedge import (
+    HedgeLeg,
+    HedgeProposal,
+    HedgeProposalConfig,
+    HedgeProposer,
+)
+from .risk import (
+    PortfolioRiskConfig,
+    PortfolioRiskLayer,
+    PortfolioRiskReport,
+)
 from .scenario_web import (
     Scenario,
     ScenarioWeb,
     ScenarioWebConfig,
     WebSnapshot,
+)
+from .strategy_library import (
+    BaseStrategy,
+    BearVerticalStrategy,
+    BullVerticalStrategy,
+    ButterflyStrategy,
+    IronCondorStrategy,
+    LongStraddleStrategy,
+    SingleLegStrategy,
+    StrategyContext,
+    StrategyEntryDecision,
+    StrategyLeg,
+    StrategyLegs,
+    StrategyOutcome,
+    StrategySelector,
+    StrategySelectorResult,
 )
 from .substrate import (
     RichContext,
@@ -159,6 +187,28 @@ __all__ = [
     "TAIL_ACTION_NORMAL",
     "TAIL_ACTION_REFUSE",
     "TAIL_ACTION_SCALE_UP",
+    "BaseStrategy",
+    "BearVerticalStrategy",
+    "BullVerticalStrategy",
+    "ButterflyStrategy",
+    "HedgeLeg",
+    "HedgeProposal",
+    "HedgeProposalConfig",
+    "HedgeProposer",
+    "IronCondorStrategy",
+    "LongStraddleStrategy",
+    "PortfolioRiskConfig",
+    "PortfolioRiskLayer",
+    "PortfolioRiskReport",
+    "SingleLegStrategy",
+    "StrategyContext",
+    "StrategyEntryDecision",
+    "StrategyLeg",
+    "StrategyLegs",
+    "StrategyOutcome",
+    "StrategySelector",
+    "StrategySelectorResult",
+    "explain_tick",
     "ExecutionEconomicsConfig",
     "FeeBreakdown",
     "FlowEvent",

@@ -61,11 +61,11 @@ liqpool/research/belief/executor_v4/
 
 # Layer 2 — ECONOMICS + RISK
 ├── economics.py            # Sprint 1 ✅ — fees-FIRST EV gate
-├── risk.py                 # Sprint 4 — multi-position risk metrics
-├── hedge.py                # Sprint 4 — pair-trade proposals
+├── risk.py                 # Sprint 4 ✅ — multi-position risk metrics
+├── hedge.py                # Sprint 4 ✅ — pair-trade proposals
 
 # Layer 3 — STRATEGY (founder's library)
-├── strategy_library/       # Sprint 4
+├── strategy_library/       # Sprint 4 ✅
 │   ├── verticals.py
 │   ├── straddles.py
 │   ├── iron_condor.py
@@ -73,13 +73,13 @@ liqpool/research/belief/executor_v4/
 │   ├── calendar.py
 │   ├── ratio_spread.py
 │   └── risk_reversal.py
-├── strategy_selector.py    # Sprint 4
+├── strategy_selector.py    # Sprint 4 ✅ (lives inside strategy_library/)
 
 # Layer 4 — DECISION + AUDIT
 ├── hypothesis.py           # Sprint 1 ✅ — structured trade thesis
 ├── ledger.py               # Sprint 1 ✅ — bar-by-bar audit trail
 ├── aggregator.py           # Sprint 2 ✅ — Bayesian decision rule
-├── explainer.py            # Sprint 4 — human-readable "why"
+├── explainer.py            # Sprint 4 ✅ — human-readable "why"
 
 # Orchestration
 └── manager.py              # Sprint 1 ✅ + Sprint 2 ✅ (Sprint 3/4 still to come)
@@ -352,7 +352,62 @@ recommended_diversification`.
 
 ---
 
-## Sprint 4 — Strategy Library + Portfolio + Hedging
+## Sprint 4 — Strategy Library + Portfolio + Hedging ✅ (COMMITTED)
+
+**Shipped modules**:
+- `strategy_library/base.py` (~190 lines) — `BaseStrategy`,
+  `StrategyContext`, `StrategyLeg`, `StrategyLegs`,
+  `StrategyEntryDecision` dataclasses + ATM-distance-decay greeks model.
+- `strategy_library/single_leg.py` — long ATM CE/PE with fitness based
+  on web consensus, MM intent, fat-tail action, crowd-mirror flag.
+- `strategy_library/vertical_spread.py` — `BullVerticalStrategy` +
+  `BearVerticalStrategy` (long ATM + short OTM2); preferred when crowd
+  mirror flags retail-like or fat-tail HEDGE.
+- `strategy_library/straddle.py` — `LongStraddleStrategy` for vol
+  expansion; weighted by web consensus, regime stability, MM vol view.
+- `strategy_library/iron_condor.py` — `IronCondorStrategy` short
+  OTM2/long OTM4 strangle on both sides; preferred when web chop_mass
+  is dominant + MM pinning/neutral.
+- `strategy_library/butterfly.py` — `ButterflyStrategy` long ATM + 2×
+  short OTM1 + long OTM2; preferred under MM pinning_near_expiry.
+- `strategy_library/selector.py` — `StrategySelector` ranks survivors
+  by fitness; returns `StrategySelectorResult` with per-strategy
+  decisions.
+- `risk.py` (~170 lines) — `PortfolioRiskLayer` computes
+  total_premium_at_risk, net_directional_exposure, gross exposure,
+  drawdown_r, most_dangerous_position, correlated_clusters, net Greek
+  sums. Kill switches: budget overshoot, delta cap, drawdown floor,
+  cluster concentration (≥3 positions).
+- `hedge.py` (~140 lines) — `HedgeProposer` proposes protective wings
+  when fat-tail action = HEDGE or net delta exceeds cap. Returns
+  HedgeProposal with legs + rationale.
+- `explainer.py` (~110 lines) — `explain_tick(intent_dict)` composes a
+  multi-line operator-facing explanation (action, web summary, MM read,
+  fat-tail status, crowd mirror, P&L).
+
+**Manager integration**:
+- Per-tick: risk + hedge computed after position updates with current_r
+  fed into the risk aggregation; max-open-positions check moved upstream
+  so it's reported before downstream risk kills.
+- Sprint-4 portfolio risk kill switches surface in `refuse_reasons`
+  prefixed with "portfolio risk:".
+- Per new-entry payload and portfolio summary carry `portfolio_risk`
+  and `hedge_proposal`.
+
+**Tests shipped**: 38 new (single_leg 4, vertical 3, straddle 3,
+condor 3, butterfly 2, selector 4, greeks 2, risk 4, hedge 4,
+explainer 3, manager-sprint4 integration 6). **Status**: 1318 total
+tests passing, 0 regressions.
+
+The strategy library currently ships SingleLeg, BullVertical,
+BearVertical, LongStraddle, IronCondor, Butterfly — the highest-value
+structures for the Monday deadline. Strangle / calendar / ratio /
+risk_reversal remain on the roadmap as additional shipments without
+breaking the current manager API.
+
+---
+
+## Sprint 4 — Original spec (for reference)
 
 ### `strategy_library/`
 Each strategy declares:

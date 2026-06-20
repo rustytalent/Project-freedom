@@ -67,10 +67,20 @@ from .manipulation_patterns import (
     ManipulationBoardConfig,
     PatternMatch,
 )
+from .hedge import (
+    HedgeProposal,
+    HedgeProposalConfig,
+    HedgeProposer,
+)
 from .market_maker_mind import (
     MMPosterior,
     MarketMakerMind,
     MarketMakerMindConfig,
+)
+from .risk import (
+    PortfolioRiskConfig,
+    PortfolioRiskLayer,
+    PortfolioRiskReport,
 )
 from .economics import (
     EVDecision,
@@ -155,6 +165,10 @@ class PortfolioManagerConfig:
     fat_tail_amplifier: FatTailAmplifierConfig = field(
         default_factory=FatTailAmplifierConfig)
     crowd_mirror: CrowdMirrorConfig = field(default_factory=CrowdMirrorConfig)
+    # Sprint 4 layers
+    portfolio_risk: PortfolioRiskConfig = field(
+        default_factory=PortfolioRiskConfig)
+    hedge: HedgeProposalConfig = field(default_factory=HedgeProposalConfig)
     min_warm_bars: int = 80
     # Decision gates
     min_entry_confidence: float = 0.66
@@ -273,6 +287,11 @@ class PortfolioManager:
         self._last_tail_score: Optional[FatTailScore] = None
         self._last_crowd_report: Optional[CrowdMirrorReport] = None
         self._last_patterns: List[PatternMatch] = []
+        # Sprint 4 layers
+        self.portfolio_risk = PortfolioRiskLayer(self.cfg.portfolio_risk)
+        self.hedge_proposer = HedgeProposer(self.cfg.hedge)
+        self._last_risk_report: Optional[PortfolioRiskReport] = None
+        self._last_hedge_proposal: Optional[HedgeProposal] = None
         # Ledger + state
         self.ledger_store = LedgerStore()
         self._open_states: Dict[str, _OpenPositionState] = {}
@@ -332,6 +351,7 @@ class PortfolioManager:
         notes: List[str] = []
         closed_this_tick: List[Dict[str, Any]] = []
         position_updates: List[Dict[str, Any]] = []
+        current_r_by_position: Dict[str, float] = {}
 
         # 4. Update + check every open position
         for pos_id, state in list(self._open_states.items()):
@@ -339,6 +359,7 @@ class PortfolioManager:
             held_premium = self._resolve_held_premium(state, snapshot, held)
 
             current_r = self._position_r(state, held_premium)
+            current_r_by_position[pos_id] = current_r
             state.best_r = max(state.best_r, current_r)
             state.worst_r = min(state.worst_r, current_r)
             confidence_now = _num(_map(snapshot.get("decision")).get("confidence"))
@@ -402,11 +423,39 @@ class PortfolioManager:
             ).to_dict())
             state.last_bar = bar_index
 
+        # 4a. Sprint 4 portfolio risk aggregation.
+        risk_report = self.portfolio_risk.compute(
+            open_states=self._open_states,
+            current_r_by_position=current_r_by_position,
+            greeks_by_position=None,    # populated once strategy_library wires legs
+            lot_size=self.cfg.economics.lot_size,
+        )
+        self._last_risk_report = risk_report
+
+        # 4b. Sprint 4 hedge proposer (Sprint 4 layer).
+        strike_lookup = self._build_strike_lookup(snapshot)
+        self._last_hedge_proposal = self.hedge_proposer.propose(
+            fat_tail_action=(tail_score.recommended_action
+                              if tail_score else "NORMAL"),
+            net_delta_lots=risk_report.net_directional_exposure_lots,
+            open_positions=[s.hypothesis for s in self._open_states.values()],
+            strike_lookup=strike_lookup,
+            lot_size=self.cfg.economics.lot_size,
+        )
+
         # 5. Portfolio kill-switches.
         refuse_reasons: List[str] = []
+        decision = _map(snapshot.get("decision"))
+        action = str(decision.get("action") or "")
         bleed_block = daily_bleed_blocker(self.daily_pnl_rupees, self.cfg.economics)
         if bleed_block:
             refuse_reasons.append(bleed_block)
+        # Structural caps first — reported before downstream risk checks.
+        if (action in ENTRY_ACTIONS
+                and len(self._open_states) >= self.cfg.economics.max_open_positions):
+            refuse_reasons.append(
+                f"max open positions ({self.cfg.economics.max_open_positions}) reached"
+            )
         # Sprint-3 fat-tail kill switch.
         if (self._last_tail_score is not None
                 and self._last_tail_score.recommended_action == TAIL_ACTION_REFUSE):
@@ -415,11 +464,12 @@ class PortfolioManager:
                 f"{self._last_tail_score.tail_score:.2f}): "
                 + "; ".join(self._last_tail_score.notes[:2])
             )
+        # Sprint-4 portfolio risk kill switches.
+        for k in risk_report.kill_switches:
+            refuse_reasons.append(f"portfolio risk: {k}")
 
         # 6. Maybe open a new entry.
         new_entry: Optional[Dict[str, Any]] = None
-        decision = _map(snapshot.get("decision"))
-        action = str(decision.get("action") or "")
         if (not refuse_reasons
                 and action in ENTRY_ACTIONS
                 and bool(snapshot.get("is_warm"))
@@ -439,11 +489,6 @@ class PortfolioManager:
             refuse_reasons.append("warmup incomplete")
         elif action in ENTRY_ACTIONS and bar_index < self.cooldown_until_bar:
             refuse_reasons.append(f"cooldown until bar {self.cooldown_until_bar}")
-        elif (action in ENTRY_ACTIONS
-              and len(self._open_states) >= self.cfg.economics.max_open_positions):
-            refuse_reasons.append(
-                f"max open positions ({self.cfg.economics.max_open_positions}) reached"
-            )
 
         return PortfolioIntent(
             ts=ts, bar_index=bar_index,
@@ -742,6 +787,10 @@ class PortfolioManager:
                                 if self._last_tail_score else None),
             "crowd_mirror": (self._last_crowd_report.to_dict()
                               if self._last_crowd_report else None),
+            "portfolio_risk": (self._last_risk_report.to_dict()
+                                if self._last_risk_report else None),
+            "hedge_proposal": (self._last_hedge_proposal.to_dict()
+                                if self._last_hedge_proposal else None),
         }, []
 
     def _gather_contradictions(self, direction: int) -> List[str]:
@@ -849,6 +898,25 @@ class PortfolioManager:
             notes.append("thesis oscillation in recent history")
 
         return min(1.0, score), notes
+
+    def _build_strike_lookup(self, snapshot: Dict[str, Any]) -> Dict:
+        """Map (side, level) → (strike, premium, friendliness, spread_state)
+        from this tick's slot_readings."""
+        out: Dict = {}
+        for raw in snapshot.get("slot_readings") or []:
+            slot = _map(raw)
+            side = str(slot.get("option_type") or "")
+            level = int(_num(slot.get("level"), 999))
+            if side not in ("CE", "PE") or level == 999:
+                continue
+            mark = _num(slot.get("mark_price"), math.nan)
+            if not math.isfinite(mark) or mark <= 0:
+                continue
+            strike = _num(slot.get("strike"), 0.0)
+            friend = _num(slot.get("friendliness"), 1.0)
+            sstate = str(slot.get("spread_state") or "clean")
+            out[(side, level)] = (strike, mark, friend, sstate)
+        return out
 
     def _lookup_target_slot(self, snapshot: Dict[str, Any],
                               contract_side: str, contract_level: int,
@@ -1314,6 +1382,10 @@ class PortfolioManager:
                                 if self._last_tail_score else None),
             "crowd_mirror": (self._last_crowd_report.to_dict()
                               if self._last_crowd_report else None),
+            "portfolio_risk": (self._last_risk_report.to_dict()
+                                if self._last_risk_report else None),
+            "hedge_proposal": (self._last_hedge_proposal.to_dict()
+                                if self._last_hedge_proposal else None),
         }
 
     def reset_daily(self) -> None:
