@@ -32,6 +32,25 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
+from .aggregator import (
+    AGGR_ACCEPT,
+    AGGR_REFUSE,
+    AGGR_SIZE_DOWN,
+    AggregatorConfig,
+    DecisionAggregator,
+)
+from .counterfactual import (
+    CounterfactualConfig,
+    CounterfactualGenerator,
+    CounterfactualPlan,
+    SEVERITY_HARD,
+    SEVERITY_SOFT,
+)
+from .critic import (
+    AdversarialCritic,
+    CriticConfig,
+    CritiqueResult,
+)
 from .economics import (
     EVDecision,
     ExecutionEconomicsConfig,
@@ -55,6 +74,18 @@ from .ledger import (
     PositionLedger,
 )
 from .memory import MultiTimeframeMemory, TimeframeLevel
+from .projection import (
+    ForwardProjection,
+    ProjectionConfig,
+    ProjectionRecord,
+)
+from .scenario_web import (
+    ScenarioWeb,
+    ScenarioWebConfig,
+    STRAT_LONG_CE,
+    STRAT_LONG_PE,
+    WebSnapshot,
+)
 from .substrate import RichContext, SubstrateConfig, SubstrateState
 
 
@@ -90,6 +121,11 @@ class PortfolioManagerConfig:
     economics: ExecutionEconomicsConfig = field(default_factory=ExecutionEconomicsConfig)
     substrate: SubstrateConfig = field(default_factory=SubstrateConfig)
     flow_memory: FlowMemoryConfig = field(default_factory=FlowMemoryConfig)
+    scenario_web: ScenarioWebConfig = field(default_factory=ScenarioWebConfig)
+    critic: CriticConfig = field(default_factory=CriticConfig)
+    counterfactual: CounterfactualConfig = field(default_factory=CounterfactualConfig)
+    projection: ProjectionConfig = field(default_factory=ProjectionConfig)
+    aggregator: AggregatorConfig = field(default_factory=AggregatorConfig)
     min_warm_bars: int = 80
     # Decision gates
     min_entry_confidence: float = 0.66
@@ -193,11 +229,22 @@ class PortfolioManager:
         self.substrate_state = SubstrateState(self.cfg.substrate)
         self.mtf = MultiTimeframeMemory()
         self.flow = FlowMemory(self.cfg.flow_memory)
+        # Sprint 2 layers
+        self.web = ScenarioWeb(self.cfg.scenario_web)
+        self.critic = AdversarialCritic(self.cfg.critic)
+        self.counterfactual = CounterfactualGenerator(self.cfg.counterfactual)
+        self.projection = ForwardProjection(self.cfg.projection)
+        self.aggregator = DecisionAggregator(self.cfg.aggregator)
+        # Ledger + state
         self.ledger_store = LedgerStore()
         self._open_states: Dict[str, _OpenPositionState] = {}
         self.cooldown_until_bar: int = -1
         self.daily_pnl_rupees: float = 0.0
         self.cumulative_fees_rupees: float = 0.0
+        # Snapshot caches: latest web/critic for ledger persistence
+        self._last_web_snapshot: Optional[WebSnapshot] = None
+        # Per-position counterfactual plans (position_id → plan).
+        self._counterfactual_plans: Dict[str, CounterfactualPlan] = {}
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -217,6 +264,11 @@ class PortfolioManager:
         self.mtf.observe(snapshot)
         # 3. Flow memory
         flow_event = self.flow.observe(snapshot)
+        # 3a. Scenario web — live multi-scenario tracking (Sprint 2)
+        mtf_views_dict = {k: v.to_dict() for k, v
+                           in self.mtf.all_views().items()}
+        web_snap = self.web.observe(snapshot, rich, flow_event, mtf_views_dict)
+        self._last_web_snapshot = web_snap
 
         notes: List[str] = []
         closed_this_tick: List[Dict[str, Any]] = []
@@ -309,7 +361,7 @@ class PortfolioManager:
 
             new_entry_intent, additional_refuse = self._consider_entry(
                 snapshot=snapshot, rich=rich,
-                flow_event=flow_event,
+                flow_event=flow_event, web_snap=web_snap,
                 bar_index=bar_index, ts=ts,
             )
             if new_entry_intent is not None:
@@ -344,6 +396,7 @@ class PortfolioManager:
                          snapshot: Dict[str, Any],
                          rich: RichContext,
                          flow_event: FlowEvent,
+                         web_snap: WebSnapshot,
                          bar_index: int,
                          ts: Any,
                          ) -> tuple[Optional[Dict[str, Any]], List[str]]:
@@ -394,16 +447,23 @@ class PortfolioManager:
 
         # Gate D: temporal contradictions from flow memory.
         contradictions = self._gather_contradictions(direction)
-        antithesis_score, antithesis_notes = self._estimate_antithesis(
-            direction, flow_event, rich, contradictions,
-        )
 
-        # Strong antithesis blocks; moderate antithesis lets through but
-        # the size routine will haircut.
-        if antithesis_score >= 0.65:
+        # Gate D': Sprint-2 adversarial critic — replaces placeholder antithesis.
+        critique = self.critic.critique(
+            proposed_direction=direction,
+            proposed_profile=(PROFILE_SCALP if action in SCALP_ENTRY_ACTIONS
+                              else PROFILE_INTRADAY),
+            snapshot=snapshot, rich_context=rich, flow_event=flow_event,
+            flow_memory=self.flow, web_snapshot=web_snap,
+            mtf_alignment=mtf_alignment,
+        )
+        antithesis_score = critique.antithesis_score
+        antithesis_notes = list(critique.antithesis_reasons)
+
+        if critique.recommended_action == "REFUSE":
             refuse.append(
-                f"strong antithesis (score={antithesis_score:.2f}); "
-                f"deferring entry"
+                f"critic REFUSE (antithesis={antithesis_score:.2f}): "
+                + "; ".join(critique.antithesis_reasons[:2])
             )
 
         if refuse:
@@ -462,6 +522,55 @@ class PortfolioManager:
         if not ev.approve:
             refuse.extend(ev.reasons)
             return None, refuse
+
+        # Gate G: Sprint-2 forward projection — empirical distribution given context.
+        bf_verdict = str(bf.get("verdict") or "")
+        iv_state_str = str(iv.get("state") or "")
+        winding_zone = str(_map(snapshot.get("winding")).get("zone") or "NO_WINDING")
+        thesis_state = str(thesis.get("composite_state") or "")
+        projection = self.projection.project(
+            thesis_state=thesis_state, iv_state=iv_state_str,
+            battlefield_verdict=bf_verdict, winding_zone=winding_zone,
+            direction=direction,
+            regime_stability=rich.regime_stability_index,
+            target_r=profile_target, stop_r=1.0,
+        )
+
+        proposed_strategy_class = (STRAT_LONG_CE if direction > 0
+                                    else STRAT_LONG_PE)
+
+        # Gate H: Sprint-2 decision aggregator — combines everything.
+        agg = self.aggregator.decide(
+            base_confidence=confidence,
+            mtf_alignment=mtf_alignment,
+            projection=projection,
+            critique=critique,
+            ev_decision=ev,
+            web_snapshot=web_snap,
+            proposed_strategy_class=proposed_strategy_class,
+            proposed_direction=direction,
+            open_positions_count=len(self._open_states),
+            max_open_positions=cfg.economics.max_open_positions,
+            daily_pnl_rupees=self.daily_pnl_rupees,
+            max_daily_bleed=cfg.economics.max_daily_bleed,
+        )
+        if agg.decision == AGGR_REFUSE:
+            refuse.extend(agg.refuse_reasons[:3])
+            return None, refuse
+        size_multiplier = agg.recommended_size_multiplier
+        if size_multiplier < 1.0:
+            new_lots = max(1, int(round(size_lots * size_multiplier)))
+            if new_lots != size_lots:
+                size_lots = new_lots
+
+        # Gate I: counterfactual — generate position-specific kill plan.
+        cf_plan = self.counterfactual.generate(
+            proposed_direction=direction,
+            proposed_profile=profile,
+            proposed_strategy_class=proposed_strategy_class,
+            snapshot=snapshot, rich_context=rich,
+            flow_event=flow_event, web_snapshot=web_snap,
+        )
 
         # Hard cap: rupees-at-risk per trade.
         rupees_at_risk = abs(stop_premium - entry_premium) * cfg.economics.lot_size * size_lots
@@ -543,6 +652,8 @@ class PortfolioManager:
             low_water_confidence=confidence,
             last_premium=entry_premium,
         )
+        # Attach the counterfactual plan for per-bar kill checks.
+        self._counterfactual_plans[hypothesis.position_id] = cf_plan
         self.cooldown_until_bar = bar_index + cfg.cooldown_bars_after_entry
 
         return {
@@ -552,6 +663,11 @@ class PortfolioManager:
                         else INTENT_OPEN_SCALP_PUT),
             "hypothesis": hypothesis.to_dict(),
             "ev_decision": ev.to_dict(),
+            "critique": critique.to_dict(),
+            "aggregator_decision": agg.to_dict(),
+            "projection": projection.to_dict(),
+            "counterfactual_plan": cf_plan.to_dict(),
+            "web_snapshot": web_snap.to_dict(),
         }, []
 
     def _gather_contradictions(self, direction: int) -> List[str]:
@@ -766,6 +882,16 @@ class PortfolioManager:
             if ms in DIRTY_MARK_SOURCES:
                 hard.append(f"held mark source dirty ({ms})")
 
+        # ── Counterfactual position-specific kill criteria (Sprint 2) ──
+        cf_plan = self._counterfactual_plans.get(h.position_id)
+        if cf_plan is not None and age <= cf_plan.kill_window_bars:
+            cf_kills = self._evaluate_counterfactual_kills(
+                cf_plan=cf_plan, hypothesis=h,
+                snapshot=snapshot, held_read=held_read, age=age,
+            )
+            for kk in cf_kills:
+                hard.append(kk)
+
         if hard:
             return hard, "hard"
 
@@ -836,6 +962,72 @@ class PortfolioManager:
             return soft, "soft"
         return [], ""
 
+    def _evaluate_counterfactual_kills(self, *, cf_plan: CounterfactualPlan,
+                                         hypothesis: PositionHypothesis,
+                                         snapshot: Dict[str, Any],
+                                         held_read: Any, age: int) -> List[str]:
+        """Check each HARD-severity kill criterion against current evidence.
+
+        Returns the names of criteria that fired this tick. Each fired
+        criterion is treated as a hard exit reason by the caller.
+        """
+        fired: List[str] = []
+        thesis_state = str(_map(snapshot.get("thesis")).get(
+            "composite_state") or "")
+        iv_state = str(_map(snapshot.get("iv_state")).get("state") or "")
+        held_acc = (getattr(held_read, "acceptance", "")
+                    if held_read is not None else "")
+        # Compute current per-side defended fractions from slot_readings.
+        ce_def = pe_def = ce_total = pe_total = 0
+        for raw in snapshot.get("slot_readings") or []:
+            slot = _map(raw)
+            otype = str(slot.get("option_type") or "")
+            acc = str(slot.get("acceptance") or "normal")
+            if otype == "CE":
+                ce_total += 1
+                if acc == "defended":
+                    ce_def += 1
+            elif otype == "PE":
+                pe_total += 1
+                if acc == "defended":
+                    pe_def += 1
+        ce_def_frac = ce_def / ce_total if ce_total else 0.0
+        pe_def_frac = pe_def / pe_total if pe_total else 0.0
+        direction = hypothesis.direction
+
+        for k in cf_plan.kill_criteria:
+            if k.severity != SEVERITY_HARD:
+                continue
+            if age > k.monitor_window_bars:
+                continue
+            name = k.name
+            if name == "thesis_flips_bear" and direction > 0 \
+                    and "BEAR" in thesis_state:
+                fired.append(f"counterfactual: {name} fired (thesis={thesis_state})")
+            elif name == "thesis_flips_bull" and direction < 0 \
+                    and "BULL" in thesis_state:
+                fired.append(f"counterfactual: {name} fired (thesis={thesis_state})")
+            elif name == "iv_state_turns_dirty" \
+                    and iv_state in DIRTY_IV_STATES:
+                fired.append(
+                    f"counterfactual: {name} fired (iv_state={iv_state})"
+                )
+            elif name == "pe_defended_rises" and direction > 0 \
+                    and pe_def_frac >= 0.50:
+                fired.append(
+                    f"counterfactual: {name} fired "
+                    f"(pe_defended={pe_def_frac:.0%})"
+                )
+            elif name == "ce_defended_rises" and direction < 0 \
+                    and ce_def_frac >= 0.50:
+                fired.append(
+                    f"counterfactual: {name} fired "
+                    f"(ce_defended={ce_def_frac:.0%})"
+                )
+            elif name == "held_leg_rejected" and held_acc == "rejected":
+                fired.append(f"counterfactual: {name} fired")
+        return fired
+
     def _close_position(self, *, pos_id: str, state: _OpenPositionState,
                           snapshot: Dict[str, Any],
                           held_premium: Optional[float], held_read: Any,
@@ -897,6 +1089,37 @@ class PortfolioManager:
             hypothesis_vs_reality_score=round(hypothesis_vs_reality, 3),
         )
         self.ledger_store.close(pos_id, outcome)
+        # Feed the projection tape with the realized outcome.
+        target = (self.cfg.scalp_target_r if h.profile == PROFILE_SCALP
+                  else self.cfg.intraday_target_r)
+        closed_via_target = current_r >= target * 0.95
+        closed_via_stop = current_r <= -0.95
+        self.projection.record(ProjectionRecord(
+            ts=h.opened_at_ts,
+            bar_index=h.opened_at_bar,
+            thesis_state=h.thesis_state,
+            iv_state=str(h.trigger_snapshot_summary.get("iv_state") or ""),
+            battlefield_verdict=str(h.trigger_snapshot_summary.get(
+                "battlefield_verdict") or ""),
+            winding_zone=str(h.trigger_snapshot_summary.get(
+                "winding_zone") or "NO_WINDING"),
+            direction=h.direction,
+            regime_stability=float(
+                h.rich_context.get("regime_stability_index", 1.0)),
+            bull_score=float(h.trigger_snapshot_summary.get("bull_score") or 0.0),
+            bear_score=float(h.trigger_snapshot_summary.get("bear_score") or 0.0),
+            net_intent_z=float(h.rich_context.get("net_intent_velocity", 0.0)),
+            realized_premium_change_pct=round(
+                (exit_premium - h.entry_premium) / max(0.01, h.entry_premium),
+                4),
+            realized_r=round(current_r, 3),
+            bars_to_resolution=max(0, bar_index - state.entry_bar),
+            closed_via_target=closed_via_target,
+            closed_via_stop=closed_via_stop,
+            closed_via_neither=not (closed_via_target or closed_via_stop),
+        ))
+        # Forget the per-position counterfactual plan.
+        self._counterfactual_plans.pop(pos_id, None)
         del self._open_states[pos_id]
         self.cooldown_until_bar = max(
             self.cooldown_until_bar,
@@ -1007,6 +1230,9 @@ class PortfolioManager:
             "daily_pnl_rupees": round(self.daily_pnl_rupees, 2),
             "cumulative_fees_rupees": round(self.cumulative_fees_rupees, 2),
             "ledger_summary": self.ledger_store.summary(),
+            "scenario_web": (self._last_web_snapshot.to_dict()
+                              if self._last_web_snapshot is not None else None),
+            "projection_summary": self.projection.summary(),
         }
 
     def reset_daily(self) -> None:

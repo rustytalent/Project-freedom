@@ -44,6 +44,22 @@ Philosophy (founder-mandated, 2026-06-19):
 """
 from __future__ import annotations
 
+from .aggregator import (
+    AggregatorConfig,
+    AggregatorDecision,
+    DecisionAggregator,
+)
+from .counterfactual import (
+    CounterfactualConfig,
+    CounterfactualGenerator,
+    CounterfactualPlan,
+    KillCriterion,
+)
+from .critic import (
+    AdversarialCritic,
+    CriticConfig,
+    CritiqueResult,
+)
 from .economics import (
     ExecutionEconomicsConfig,
     FeeBreakdown,
@@ -74,6 +90,18 @@ from .memory import (
     TimeframeLevel,
     TimeframeView,
 )
+from .projection import (
+    ForwardProjection,
+    ProjectionConfig,
+    ProjectionDistribution,
+    ProjectionRecord,
+)
+from .scenario_web import (
+    Scenario,
+    ScenarioWeb,
+    ScenarioWebConfig,
+    WebSnapshot,
+)
 from .substrate import (
     RichContext,
     SubstrateConfig,
@@ -81,11 +109,22 @@ from .substrate import (
 )
 
 __all__ = [
+    "AdversarialCritic",
+    "AggregatorConfig",
+    "AggregatorDecision",
     "BarRecord",
+    "CounterfactualConfig",
+    "CounterfactualGenerator",
+    "CounterfactualPlan",
+    "CriticConfig",
+    "CritiqueResult",
+    "DecisionAggregator",
     "ExecutionEconomicsConfig",
     "FeeBreakdown",
     "FlowEvent",
     "FlowMemory",
+    "ForwardProjection",
+    "KillCriterion",
     "LedgerOutcome",
     "MultiTimeframeMemory",
     "NIFTY_LOT_SIZE",
@@ -95,10 +134,17 @@ __all__ = [
     "PortfolioManagerConfig",
     "PositionHypothesis",
     "PositionLedger",
+    "ProjectionConfig",
+    "ProjectionDistribution",
+    "ProjectionRecord",
     "RichContext",
+    "Scenario",
+    "ScenarioWeb",
+    "ScenarioWebConfig",
     "SubstrateConfig",
     "TimeframeLevel",
     "TimeframeView",
+    "WebSnapshot",
     "augment_snapshot",
     "build_hypothesis_from_snapshot",
     "expected_value_after_costs",

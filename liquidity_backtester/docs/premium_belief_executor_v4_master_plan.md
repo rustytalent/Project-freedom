@@ -48,10 +48,10 @@ liqpool/research/belief/executor_v4/
 ├── flow_memory.py          # Sprint 1 ✅ — event-level memory + sequence queries
 
 # Layer 1 — PROBABILITY WEB (the new thinking core)
-├── scenario_web.py         # Sprint 2 — live multi-scenario tracker
-├── projection.py           # Sprint 2 — forward Bayesian probabilities
-├── critic.py               # Sprint 2 — adversarial bear-case
-├── counterfactual.py       # Sprint 2 — kill criteria from imagined failure
+├── scenario_web.py         # Sprint 2 ✅ — live multi-scenario tracker
+├── projection.py           # Sprint 2 ✅ — forward Bayesian probabilities
+├── critic.py               # Sprint 2 ✅ — adversarial bear-case
+├── counterfactual.py       # Sprint 2 ✅ — kill criteria from imagined failure
 
 # Layer 1.5 — MARKET STRUCTURE / FAT-TAIL DEFENSE
 ├── manipulation_patterns.py    # Sprint 3 — pattern catalogue with detectors
@@ -78,11 +78,11 @@ liqpool/research/belief/executor_v4/
 # Layer 4 — DECISION + AUDIT
 ├── hypothesis.py           # Sprint 1 ✅ — structured trade thesis
 ├── ledger.py               # Sprint 1 ✅ — bar-by-bar audit trail
-├── aggregator.py           # Sprint 2 — Bayesian decision rule
+├── aggregator.py           # Sprint 2 ✅ — Bayesian decision rule
 ├── explainer.py            # Sprint 4 — human-readable "why"
 
 # Orchestration
-└── manager.py              # Sprint 1 ✅ (Sprint 2/3/4 enhance it)
+└── manager.py              # Sprint 1 ✅ + Sprint 2 ✅ (Sprint 3/4 still to come)
 ```
 
 ---
@@ -152,7 +152,45 @@ liqpool/research/belief/executor_v4/
 
 ---
 
-## Sprint 2 — The Probability Web (HIGHEST priority after Sprint 1)
+## Sprint 2 — The Probability Web ✅ (COMMITTED)
+
+**Shipped modules**:
+- `scenario_web.py` (~600 lines) — `ScenarioWeb` + `Scenario` dataclass with
+  4 families (directional/chop/manipulation/fat_tail), per-tick
+  DECAY → SPAWN → UPDATE → RETIRE → NORMALIZE, killer-signature
+  evaluation, top-k / consensus / tail_mass / strategy_class queries
+- `projection.py` (~190 lines) — `ForwardProjection` empirical conditional
+  estimator over (thesis, iv, bf, winding, direction, regime) coordinates;
+  returns `ProjectionDistribution` with target/stop probabilities, R
+  quantiles, sample-count confidence
+- `critic.py` (~250 lines) — `AdversarialCritic` with 10 weighted
+  arguments (brittle rail, single-strike distortion, thesis decline,
+  regime instability, opposite-side acceptance, recent traps, IV crush,
+  chop dominance, tail mass, oscillation, MTF failure); returns
+  REFUSE/SIZE_DOWN/PROCEED with reason chain
+- `counterfactual.py` (~270 lines) — `CounterfactualGenerator` produces
+  position-specific kill criteria with monitor windows, severity tags,
+  and narrative failure path
+- `aggregator.py` (~250 lines) — `DecisionAggregator` transparent
+  weighted-sum brain (0.30 base + 0.25 mtf + 0.20 projection + 0.15 fees
+  + 0.10 portfolio) with critic hard-refuse, web tail/chop/consensus
+  overrides, strategy-class disagreement penalty
+
+**Manager integration**:
+- Per-tick: substrate → MTF → flow → scenario_web (in order)
+- Entry pipeline gated through critic → projection → aggregator → counterfactual
+- Per-position counterfactual plan attached at open; HARD-severity kills
+  evaluated each bar inside the kill window
+- Closed positions feed the projection tape with realized R outcomes
+- Portfolio summary now carries `scenario_web` snapshot + `projection_summary`
+
+**Tests shipped**: 51 new (scenario_web 12, projection 8, critic 8,
+counterfactual+aggregator 17, manager+sprint2 integration 5, with one
+manager test split). **Status**: 1255 total tests passing, 0 regressions.
+
+---
+
+## Sprint 2 — Original spec (for reference)
 
 **Goal**: replace single-confidence decisioning with a live web of competing
 scenarios that the aggregator queries.
