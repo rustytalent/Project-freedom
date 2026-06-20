@@ -60,6 +60,30 @@ from .critic import (
     CriticConfig,
     CritiqueResult,
 )
+from .crowd_mirror import (
+    CrowdMirror,
+    CrowdMirrorConfig,
+    CrowdMirrorReport,
+)
+from .fat_tail_amplifier import (
+    FatTailAmplifier,
+    FatTailAmplifierConfig,
+    FatTailScore,
+    TAIL_ACTION_HEDGE,
+    TAIL_ACTION_NORMAL,
+    TAIL_ACTION_REFUSE,
+    TAIL_ACTION_SCALE_UP,
+)
+from .manipulation_patterns import (
+    ManipulationBoard,
+    ManipulationBoardConfig,
+    PatternMatch,
+)
+from .market_maker_mind import (
+    MMPosterior,
+    MarketMakerMind,
+    MarketMakerMindConfig,
+)
 from .economics import (
     ExecutionEconomicsConfig,
     FeeBreakdown,
@@ -118,7 +142,23 @@ __all__ = [
     "CounterfactualPlan",
     "CriticConfig",
     "CritiqueResult",
+    "CrowdMirror",
+    "CrowdMirrorConfig",
+    "CrowdMirrorReport",
     "DecisionAggregator",
+    "FatTailAmplifier",
+    "FatTailAmplifierConfig",
+    "FatTailScore",
+    "MMPosterior",
+    "ManipulationBoard",
+    "ManipulationBoardConfig",
+    "MarketMakerMind",
+    "MarketMakerMindConfig",
+    "PatternMatch",
+    "TAIL_ACTION_HEDGE",
+    "TAIL_ACTION_NORMAL",
+    "TAIL_ACTION_REFUSE",
+    "TAIL_ACTION_SCALE_UP",
     "ExecutionEconomicsConfig",
     "FeeBreakdown",
     "FlowEvent",

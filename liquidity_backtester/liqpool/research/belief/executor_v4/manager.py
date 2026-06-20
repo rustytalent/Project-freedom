@@ -51,6 +51,27 @@ from .critic import (
     CriticConfig,
     CritiqueResult,
 )
+from .crowd_mirror import (
+    CrowdMirror,
+    CrowdMirrorConfig,
+    CrowdMirrorReport,
+)
+from .fat_tail_amplifier import (
+    FatTailAmplifier,
+    FatTailAmplifierConfig,
+    FatTailScore,
+    TAIL_ACTION_REFUSE,
+)
+from .manipulation_patterns import (
+    ManipulationBoard,
+    ManipulationBoardConfig,
+    PatternMatch,
+)
+from .market_maker_mind import (
+    MMPosterior,
+    MarketMakerMind,
+    MarketMakerMindConfig,
+)
 from .economics import (
     EVDecision,
     ExecutionEconomicsConfig,
@@ -126,6 +147,14 @@ class PortfolioManagerConfig:
     counterfactual: CounterfactualConfig = field(default_factory=CounterfactualConfig)
     projection: ProjectionConfig = field(default_factory=ProjectionConfig)
     aggregator: AggregatorConfig = field(default_factory=AggregatorConfig)
+    # Sprint 3 layers
+    manipulation_board: ManipulationBoardConfig = field(
+        default_factory=ManipulationBoardConfig)
+    market_maker_mind: MarketMakerMindConfig = field(
+        default_factory=MarketMakerMindConfig)
+    fat_tail_amplifier: FatTailAmplifierConfig = field(
+        default_factory=FatTailAmplifierConfig)
+    crowd_mirror: CrowdMirrorConfig = field(default_factory=CrowdMirrorConfig)
     min_warm_bars: int = 80
     # Decision gates
     min_entry_confidence: float = 0.66
@@ -235,6 +264,15 @@ class PortfolioManager:
         self.counterfactual = CounterfactualGenerator(self.cfg.counterfactual)
         self.projection = ForwardProjection(self.cfg.projection)
         self.aggregator = DecisionAggregator(self.cfg.aggregator)
+        # Sprint 3 layers
+        self.manipulation_board = ManipulationBoard(self.cfg.manipulation_board)
+        self.mm_mind = MarketMakerMind(self.cfg.market_maker_mind)
+        self.fat_tail_amp = FatTailAmplifier(self.cfg.fat_tail_amplifier)
+        self.crowd_mirror = CrowdMirror(self.cfg.crowd_mirror)
+        self._last_mm_posterior: Optional[MMPosterior] = None
+        self._last_tail_score: Optional[FatTailScore] = None
+        self._last_crowd_report: Optional[CrowdMirrorReport] = None
+        self._last_patterns: List[PatternMatch] = []
         # Ledger + state
         self.ledger_store = LedgerStore()
         self._open_states: Dict[str, _OpenPositionState] = {}
@@ -269,6 +307,27 @@ class PortfolioManager:
                            in self.mtf.all_views().items()}
         web_snap = self.web.observe(snapshot, rich, flow_event, mtf_views_dict)
         self._last_web_snapshot = web_snap
+
+        # 3b. Sprint 3 — manipulation board + MM mind + fat-tail + crowd mirror.
+        patterns = self.manipulation_board.scan(
+            flow_memory=self.flow, rich_context=rich,
+            snapshot=snapshot, near_expiry=False,
+        )
+        self._last_patterns = patterns
+        mm_posterior = self.mm_mind.infer(patterns=patterns,
+                                            flow_event=flow_event)
+        self._last_mm_posterior = mm_posterior
+        crowd_report = self.crowd_mirror.inspect(
+            [s.hypothesis for s in self._open_states.values()],
+        )
+        self._last_crowd_report = crowd_report
+        tail_score = self.fat_tail_amp.amplify(
+            patterns=patterns, mm_posterior=mm_posterior,
+            flow_event=flow_event, rich_context=rich,
+            iv_state=str(_map(snapshot.get("iv_state")).get("state") or ""),
+            crowd_density=crowd_report.retail_similarity_score,
+        )
+        self._last_tail_score = tail_score
 
         notes: List[str] = []
         closed_this_tick: List[Dict[str, Any]] = []
@@ -348,6 +407,14 @@ class PortfolioManager:
         bleed_block = daily_bleed_blocker(self.daily_pnl_rupees, self.cfg.economics)
         if bleed_block:
             refuse_reasons.append(bleed_block)
+        # Sprint-3 fat-tail kill switch.
+        if (self._last_tail_score is not None
+                and self._last_tail_score.recommended_action == TAIL_ACTION_REFUSE):
+            refuse_reasons.append(
+                f"fat-tail amp REFUSE (tail_score="
+                f"{self._last_tail_score.tail_score:.2f}): "
+                + "; ".join(self._last_tail_score.notes[:2])
+            )
 
         # 6. Maybe open a new entry.
         new_entry: Optional[Dict[str, Any]] = None
@@ -668,6 +735,13 @@ class PortfolioManager:
             "projection": projection.to_dict(),
             "counterfactual_plan": cf_plan.to_dict(),
             "web_snapshot": web_snap.to_dict(),
+            "active_patterns": [p.to_dict() for p in self._last_patterns],
+            "mm_posterior": (self._last_mm_posterior.to_dict()
+                              if self._last_mm_posterior else None),
+            "fat_tail_score": (self._last_tail_score.to_dict()
+                                if self._last_tail_score else None),
+            "crowd_mirror": (self._last_crowd_report.to_dict()
+                              if self._last_crowd_report else None),
         }, []
 
     def _gather_contradictions(self, direction: int) -> List[str]:
@@ -1233,6 +1307,13 @@ class PortfolioManager:
             "scenario_web": (self._last_web_snapshot.to_dict()
                               if self._last_web_snapshot is not None else None),
             "projection_summary": self.projection.summary(),
+            "active_patterns": [p.to_dict() for p in self._last_patterns],
+            "mm_posterior": (self._last_mm_posterior.to_dict()
+                              if self._last_mm_posterior else None),
+            "fat_tail_score": (self._last_tail_score.to_dict()
+                                if self._last_tail_score else None),
+            "crowd_mirror": (self._last_crowd_report.to_dict()
+                              if self._last_crowd_report else None),
         }
 
     def reset_daily(self) -> None:

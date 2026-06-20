@@ -54,10 +54,10 @@ liqpool/research/belief/executor_v4/
 ├── counterfactual.py       # Sprint 2 ✅ — kill criteria from imagined failure
 
 # Layer 1.5 — MARKET STRUCTURE / FAT-TAIL DEFENSE
-├── manipulation_patterns.py    # Sprint 3 — pattern catalogue with detectors
-├── market_maker_mind.py        # Sprint 3 — Bayesian MM posterior
-├── fat_tail_amplifier.py       # Sprint 3 — tail-mass scalar feeding the web
-├── crowd_mirror.py             # Sprint 3 — "do we look like retail?"
+├── manipulation_patterns.py    # Sprint 3 ✅ — pattern catalogue with detectors
+├── market_maker_mind.py        # Sprint 3 ✅ — Bayesian MM posterior
+├── fat_tail_amplifier.py       # Sprint 3 ✅ — tail-mass scalar feeding the web
+├── crowd_mirror.py             # Sprint 3 ✅ — "do we look like retail?"
 
 # Layer 2 — ECONOMICS + RISK
 ├── economics.py            # Sprint 1 ✅ — fees-FIRST EV gate
@@ -264,7 +264,48 @@ If `final_score < 0.55`: refuse with explanation.
 
 ---
 
-## Sprint 3 — Market Structure + Fat-Tail Defense
+## Sprint 3 — Market Structure + Fat-Tail Defense ✅ (COMMITTED)
+
+**Shipped modules**:
+- `manipulation_patterns.py` (~450 lines) — `ManipulationBoard` running
+  10 detectors (stop_hunt_short, stop_hunt_long, liquidity_vacuum,
+  pin_near_expiry, accumulation, distribution, squeeze_setup,
+  fake_breakout, iceberg_buy, mm_inventory_flip); each emits
+  `PatternMatch(pattern_name, confidence, started_at_bar,
+  expected_resolution_bars, implied_mm_intent, suggested_trade,
+  suggested_avoid, evidence)`.
+- `market_maker_mind.py` (~220 lines) — `MarketMakerMind` Bayesian
+  posterior over 7 MM intents (pinning_near_expiry, accumulating,
+  distributing, hunting_stops, faking_direction, stepping_back,
+  neutral_inventory) using hand-calibrated likelihood-ratio tables per
+  pattern. Output: `MMPosterior` with intent distribution, implied
+  bias, vol view, dominant intent, operator guidance string.
+- `fat_tail_amplifier.py` (~180 lines) — `FatTailAmplifier` single
+  scalar in [0,1] from 8 weighted components (manipulation density,
+  stepping back, dispersion velocity, regime instability, IV state
+  risk, clean marks, crowd density, MM vol view). Maps to action:
+  SCALE_UP / NORMAL / HEDGE / REFUSE.
+- `crowd_mirror.py` (~160 lines) — `CrowdMirror` self-awareness:
+  measures structural similarity of OUR portfolio to retail pattern
+  (long-ATM clustering, no hedges, single underlying/expiry, bunched
+  stops); emits `CrowdMirrorReport` with `we_look_like_retail`,
+  `mm_likely_target_us`, recommended diversification moves.
+
+**Manager integration**:
+- Per-tick: substrate → MTF → flow → web → manipulation → MM-mind →
+  crowd-mirror → fat-tail amp.
+- Fat-tail REFUSE action becomes a portfolio-level entry blocker.
+- Each new entry's payload carries `active_patterns`, `mm_posterior`,
+  `fat_tail_score`, `crowd_mirror`.
+- Portfolio summary streams the same Sprint-3 state per tick.
+
+**Tests shipped**: 25 new (manipulation 8, MM mind 5, amplifier 3,
+crowd mirror 4, manager-sprint3 integration 5). **Status**: 1280
+total tests passing, 0 regressions.
+
+---
+
+## Sprint 3 — Original spec (for reference)
 
 ### `manipulation_patterns.py`
 Catalogued pattern detectors:
