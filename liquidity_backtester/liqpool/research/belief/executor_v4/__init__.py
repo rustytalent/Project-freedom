@@ -120,6 +120,10 @@ from .projection import (
     ProjectionDistribution,
     ProjectionRecord,
 )
+from .cockpit import (
+    CockpitSnapshot,
+    build_cockpit_snapshot,
+)
 from .explainer import explain_tick
 from .hedge import (
     HedgeLeg,
@@ -208,6 +212,8 @@ __all__ = [
     "StrategyOutcome",
     "StrategySelector",
     "StrategySelectorResult",
+    "CockpitSnapshot",
+    "build_cockpit_snapshot",
     "explain_tick",
     "ExecutionEconomicsConfig",
     "FeeBreakdown",

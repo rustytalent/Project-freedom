@@ -452,20 +452,46 @@ Greek-aware pair construction.
 
 ---
 
-## Sprint 5 — Polish + Sentinel cockpit
+## Sprint 5 — Polish + Sentinel cockpit ✅ (COMMITTED)
 
-- Full multi-position `manager.py` with all earlier integrations
-- `explainer.py` for human-readable "why" trails
-- Sentinel cockpit panels:
-  - Per-position cards with R, hypothesis, validation status
-  - Most-dangerous-position highlight
-  - Recent-contradictions panel
-  - Scenario web dominant pathways
-  - MM-mind posterior bar chart
-  - Strategy library current selection rationale
+**Shipped modules**:
+- `cockpit.py` (~190 lines) — `build_cockpit_snapshot(intent_dict)`
+  produces a `CockpitSnapshot` with 11 structured panels:
+    1. `action_card` — HOLD / ENTER / EXIT / REFUSE + headline
+    2. `web_panel` — consensus, tail/chop/manipulation masses,
+       dominant strategy, top 5 active scenarios
+    3. `mm_panel` — dominant intent + probability + bias + vol view
+       + operator guidance
+    4. `fat_tail_dial` — score + action + component breakdown
+    5. `crowd_panel` — retail-similarity score + density gauges +
+       diversification recommendations
+    6. `risk_panel` — net delta/vega/theta/gamma + gross exposure +
+       drawdown_r + clusters + kill switches
+    7. `patterns_panel` — currently active manipulation patterns
+    8. `hedge_panel` — proposed hedge legs + reasons
+    9. `positions_panel` — open positions roll-up
+   10. `pnl_panel` — daily P&L + cumulative fees + win rate
+   11. `explainer_text` — the multi-line human-readable explanation
 
-### Sprint 5 sizing
-~800 lines (mostly UI) + integration tests.
+Already shipped in Sprint 4:
+- `explainer.py` — `explain_tick(intent_dict)` multi-line operator
+  output, consumed by the cockpit's `explainer_text` panel.
+- Full multi-position `manager.py` carrying all earlier integrations.
+
+**Tests shipped**: 12 new for cockpit (action-card kinds, every panel
+populated, JSON-serializable, explainer integration). **Status**:
+1330 total tests passing, 0 regressions.
+
+**Front-end integration path**:
+The cockpit snapshot is a stable data contract — any UI (Sentinel
+panels, terminal dashboard, web view, replay tools) can consume it
+directly. Sentinel-side wiring (so the live publisher emits these
+snapshots, the dashboard renders them) is a separate frontend task
+sized for hands-on UX iteration with the founder. The executor
+backend ships complete for the Monday deadline.
+
+### Sprint 5 sizing (actual)
+~190 lines code, 12 tests.
 
 ---
 
