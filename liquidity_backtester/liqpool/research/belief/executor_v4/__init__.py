@@ -138,6 +138,12 @@ from .persistence import (
     ManagerStateSnapshot,
     PersistenceConfig,
 )
+from .replay import (
+    ReplayConfig,
+    ReplayReport,
+    replay_jsonl,
+    replay_snapshots,
+)
 from .pricing import (
     IVSurface,
     IVSurfaceConfig,
