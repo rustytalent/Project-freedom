@@ -41,17 +41,23 @@ from .vertical_spread import (
     BearVerticalStrategy,
 )
 from .straddle import LongStraddleStrategy
+from .strangle import LongStrangleStrategy
 from .iron_condor import IronCondorStrategy
 from .butterfly import ButterflyStrategy
+from .ratio_spread import BullRatioSpreadStrategy
+from .jade_lizard import JadeLizardStrategy
 from .selector import StrategySelector, StrategySelectorResult
 
 __all__ = [
     "BaseStrategy",
     "BearVerticalStrategy",
+    "BullRatioSpreadStrategy",
     "BullVerticalStrategy",
     "ButterflyStrategy",
     "IronCondorStrategy",
+    "JadeLizardStrategy",
     "LongStraddleStrategy",
+    "LongStrangleStrategy",
     "SingleLegStrategy",
     "StrategyContext",
     "StrategyEntryDecision",

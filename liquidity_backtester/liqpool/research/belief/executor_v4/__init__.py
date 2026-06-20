@@ -173,13 +173,21 @@ from .scenario_web import (
     ScenarioWebConfig,
     WebSnapshot,
 )
+from .learning import (
+    OnlineLearner,
+    OnlineLearnerConfig,
+    WeightUpdate,
+)
 from .strategy_library import (
     BaseStrategy,
     BearVerticalStrategy,
+    BullRatioSpreadStrategy,
     BullVerticalStrategy,
     ButterflyStrategy,
     IronCondorStrategy,
+    JadeLizardStrategy,
     LongStraddleStrategy,
+    LongStrangleStrategy,
     SingleLegStrategy,
     StrategyContext,
     StrategyEntryDecision,

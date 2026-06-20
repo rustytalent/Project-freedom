@@ -13,8 +13,11 @@ from typing import Any, Dict, List, Optional, Sequence
 from .base import BaseStrategy, StrategyContext, StrategyEntryDecision
 from .butterfly import ButterflyStrategy
 from .iron_condor import IronCondorStrategy
+from .jade_lizard import JadeLizardStrategy
+from .ratio_spread import BullRatioSpreadStrategy
 from .single_leg import SingleLegStrategy
 from .straddle import LongStraddleStrategy
+from .strangle import LongStrangleStrategy
 from .vertical_spread import BearVerticalStrategy, BullVerticalStrategy
 
 
@@ -44,8 +47,11 @@ _DEFAULT_STRATEGIES: List[BaseStrategy] = [
     BullVerticalStrategy(),
     BearVerticalStrategy(),
     LongStraddleStrategy(),
+    LongStrangleStrategy(),
     IronCondorStrategy(),
     ButterflyStrategy(),
+    BullRatioSpreadStrategy(),
+    JadeLizardStrategy(),
 ]
 
 
