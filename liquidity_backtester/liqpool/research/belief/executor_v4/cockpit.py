@@ -88,6 +88,8 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
             "aggregator_score": ad.get("final_score"),
             "size_multiplier": ad.get("recommended_size_multiplier"),
             "rupees_at_risk": h.get("rupees_at_risk"),
+            "conviction_label": (new_entry.get("conviction") or {}).get("label"),
+            "conviction_signed": (new_entry.get("conviction") or {}).get("signed_value"),
         }
     elif closed:
         # Take the first closure as the headline.

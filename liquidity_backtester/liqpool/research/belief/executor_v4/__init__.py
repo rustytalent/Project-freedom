@@ -132,6 +132,11 @@ from .cockpit import (
     CockpitSnapshot,
     build_cockpit_snapshot,
 )
+from .conviction import (
+    ConvictionConfig,
+    ConvictionScore,
+    compute_conviction,
+)
 from .cockpit_server import (
     CockpitFeed,
     CockpitServer,

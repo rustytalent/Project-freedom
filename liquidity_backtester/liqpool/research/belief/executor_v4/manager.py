@@ -90,6 +90,7 @@ from .risk import (
     PortfolioRiskLayer,
     PortfolioRiskReport,
 )
+from .conviction import ConvictionScore, compute_conviction
 from .economics import (
     EVDecision,
     ExecutionEconomicsConfig,
@@ -653,9 +654,22 @@ class PortfolioManager:
             stop_premium = entry_premium * (1.0 + premium_stop_pct)
             target_premium = entry_premium * (1.0 - premium_stop_pct * profile_target)
 
-        # Provisional sizing — we'll re-tune below.
-        size_lots = self._size_lots(confidence, antithesis_score,
+        # Continuous conviction (sign + magnitude) — strong signals size
+        # up, weak ones size down. Additive: does NOT touch `direction`.
+        conviction = compute_conviction(
+            direction=direction,
+            confidence=confidence,
+            web_directional_consensus=float(getattr(
+                web_snap, "directional_consensus", 0.0)),
+            mtf_alignment_score=float(mtf_alignment["alignment_score"]),
+            antithesis_score=antithesis_score,
+        )
+
+        # Provisional sizing — base buckets, then scaled by conviction.
+        base_lots = self._size_lots(confidence, antithesis_score,
                                        mtf_alignment["alignment_score"])
+        size_lots = max(1, int(round(base_lots
+                                       * conviction.size_multiplier)))
 
         # Probabilities — Sprint-1 placeholder uses confidence + alignment.
         # Sprint 2's scenario_web replaces this with proper Bayesian priors.
@@ -853,6 +867,7 @@ class PortfolioManager:
             "hedge_proposal": (self._last_hedge_proposal.to_dict()
                                 if self._last_hedge_proposal else None),
             "adaptive_exit": self._last_exit_decision,
+            "conviction": conviction.to_dict(),
         }, []
 
     def _gather_contradictions(self, direction: int) -> List[str]:
