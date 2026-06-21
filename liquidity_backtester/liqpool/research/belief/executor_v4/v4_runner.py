@@ -71,6 +71,7 @@ class V4RunnerConfig:
         default_factory=EngineUpgradesConfig)
     apply_engine_upgrades: bool = True
     write_cockpit_to_jsonl: Optional[Path] = None
+    cockpit_server_port: Optional[int] = None  # set to e.g. 8765 to enable
     emit_explainer_to_log: bool = True
     confirm_real_orders: bool = False
     # Sizing — lots translate to shares via lot_size.
@@ -113,6 +114,12 @@ class V4Runner:
         self.persistence = ManagerPersistence(self.cfg.persistence)
         self.engine_upgrades = (EngineUpgrades(self.cfg.engine_upgrades)
                                   if self.cfg.apply_engine_upgrades else None)
+        self._cockpit_server = None
+        if self.cfg.cockpit_server_port is not None:
+            from .cockpit_server import CockpitServer
+            self._cockpit_server = CockpitServer(self,
+                                                   port=self.cfg.cockpit_server_port)
+            self._cockpit_server.start()
         self._last_tick_ts: Optional[float] = None
         # Try to restore from disk if a snapshot exists for today.
         snap = self.persistence.load_today()
@@ -201,6 +208,11 @@ class V4Runner:
 
         # 4. Cockpit.
         cockpit = build_cockpit_snapshot(intent.to_dict())
+        if self._cockpit_server is not None:
+            try:
+                self._cockpit_server.publish(cockpit.to_dict())
+            except Exception:
+                pass    # never let UI plumbing break the trading loop
 
         # 5. Emit to JSONL if configured.
         if cfg.write_cockpit_to_jsonl is not None:
@@ -212,6 +224,15 @@ class V4Runner:
         return TickResult(intent=intent, cockpit=cockpit,
                            broker_results=broker_results,
                            persisted=persisted, notes=notes)
+
+    def stop(self) -> None:
+        """Clean shutdown (stops the cockpit server if running)."""
+        if self._cockpit_server is not None:
+            try:
+                self._cockpit_server.stop()
+            except Exception:
+                pass
+            self._cockpit_server = None
 
     def cockpit(self) -> Optional[CockpitSnapshot]:
         """Latest cockpit snapshot. Useful for serving a status endpoint."""
