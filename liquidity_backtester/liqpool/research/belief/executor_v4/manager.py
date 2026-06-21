@@ -46,6 +46,14 @@ from .counterfactual import (
     SEVERITY_HARD,
     SEVERITY_SOFT,
 )
+from .exit_engine import (
+    AdaptiveExitEngine,
+    AdaptiveExitEngineConfig,
+    MarketState,
+    PortfolioExitManager,
+    PortfolioExitManagerConfig,
+    build_exit_thesis,
+)
 from .critic import (
     AdversarialCritic,
     CriticConfig,
@@ -169,6 +177,11 @@ class PortfolioManagerConfig:
     portfolio_risk: PortfolioRiskConfig = field(
         default_factory=PortfolioRiskConfig)
     hedge: HedgeProposalConfig = field(default_factory=HedgeProposalConfig)
+    # Adaptive Exit Quote Engine
+    exit_engine: AdaptiveExitEngineConfig = field(
+        default_factory=AdaptiveExitEngineConfig)
+    portfolio_exit: PortfolioExitManagerConfig = field(
+        default_factory=PortfolioExitManagerConfig)
     min_warm_bars: int = 80
     # Decision gates
     min_entry_confidence: float = 0.66
@@ -302,6 +315,11 @@ class PortfolioManager:
         self._last_web_snapshot: Optional[WebSnapshot] = None
         # Per-position counterfactual plans (position_id → plan).
         self._counterfactual_plans: Dict[str, CounterfactualPlan] = {}
+        # Adaptive Exit Quote Engine — coordinates per-position exit
+        # ghost prices, modification budget (Zerodha 25-mod cap), and
+        # cross-position priority.
+        self.portfolio_exit = PortfolioExitManager(self.cfg.portfolio_exit)
+        self._last_exit_decision: Optional[Dict[str, Any]] = None
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -442,6 +460,28 @@ class PortfolioManager:
             strike_lookup=strike_lookup,
             lot_size=self.cfg.economics.lot_size,
         )
+
+        # 4c. Adaptive Exit Quote Engine — for every open position,
+        # update ghost exit + decide whether to spend a Zerodha mod.
+        try:
+            market_by_position = self._build_exit_markets(
+                snapshot=snapshot, held_quotes=held_quotes,
+                current_r_by_position=current_r_by_position,
+                bar_index=bar_index,
+            )
+            if market_by_position:
+                regime_side = int(_num(_map(snapshot.get("iv_state")).get(
+                    "direction"), 0))
+                exit_decision = self.portfolio_exit.evaluate(
+                    market_by_position,
+                    regime_winning_side=regime_side,
+                )
+                self._last_exit_decision = exit_decision.to_dict()
+            else:
+                self._last_exit_decision = None
+        except Exception:
+            # Exit engine is opt-in; never break the trading loop.
+            self._last_exit_decision = None
 
         # 5. Portfolio kill-switches.
         refuse_reasons: List[str] = []
@@ -766,6 +806,27 @@ class PortfolioManager:
         )
         # Attach the counterfactual plan for per-bar kill checks.
         self._counterfactual_plans[hypothesis.position_id] = cf_plan
+        # Register the per-position Adaptive Exit Engine — manages ghost
+        # exit price and the Zerodha 25-mod budget for this position.
+        try:
+            exit_thesis = build_exit_thesis(
+                position_id=hypothesis.position_id,
+                direction=direction,
+                entry_premium=entry_premium,
+                target_premium=target_premium,
+                stop_premium=stop_premium,
+                thesis_confidence=confidence,
+                profile=profile,
+            )
+            exit_engine_instance = AdaptiveExitEngine(
+                exit_thesis=exit_thesis,
+                cfg=cfg.exit_engine,
+            )
+            self.portfolio_exit.register(hypothesis.position_id,
+                                            exit_engine_instance)
+        except Exception:
+            # Adaptive exit is opt-in best-effort; never block entry.
+            pass
         self.cooldown_until_bar = bar_index + cfg.cooldown_bars_after_entry
 
         return {
@@ -791,6 +852,7 @@ class PortfolioManager:
                                 if self._last_risk_report else None),
             "hedge_proposal": (self._last_hedge_proposal.to_dict()
                                 if self._last_hedge_proposal else None),
+            "adaptive_exit": self._last_exit_decision,
         }, []
 
     def _gather_contradictions(self, direction: int) -> List[str]:
@@ -898,6 +960,55 @@ class PortfolioManager:
             notes.append("thesis oscillation in recent history")
 
         return min(1.0, score), notes
+
+    def _build_exit_markets(self, *, snapshot: Dict[str, Any],
+                                held_quotes: Optional[Dict[str, Any]],
+                                current_r_by_position: Dict[str, float],
+                                bar_index: int,
+                                ) -> Dict[str, MarketState]:
+        """For each open position, construct a MarketState the exit
+        engine can consume. Held premium comes from held_quotes if
+        present, otherwise from the snapshot's slot_readings for the
+        position's contract."""
+        out: Dict[str, MarketState] = {}
+        tail_action = (self._last_tail_score.recommended_action
+                        if self._last_tail_score is not None else "NORMAL")
+        portfolio_pressure = bool(
+            self._last_risk_report is not None
+            and self._last_risk_report.kill_switches
+        )
+        for pos_id, state in self._open_states.items():
+            h = state.hypothesis
+            held = (held_quotes or {}).get(pos_id)
+            held_premium = self._resolve_held_premium(state, snapshot, held)
+            if held_premium is None or not math.isfinite(held_premium) or held_premium <= 0:
+                continue
+            bid = float(getattr(held, "bid_price", 0.0) or 0.0)
+            ask = float(getattr(held, "ask_price", 0.0) or 0.0)
+            friend = float(getattr(held, "friendliness",
+                                       h.entry_friendliness) or 1.0)
+            confidence_now = _num(_map(snapshot.get("decision"))
+                                     .get("confidence"))
+            decay = max(0.0, state.high_water_confidence - confidence_now)
+            current_r = current_r_by_position.get(pos_id, 0.0)
+            # Heuristic micro-volatility: 0.5% of held premium.
+            micro_vol = max(0.20, abs(held_premium) * 0.005)
+            out[pos_id] = MarketState(
+                bar_index=bar_index,
+                ts=snapshot.get("ts"),
+                held_premium=float(held_premium),
+                held_bid=bid, held_ask=ask,
+                spread=max(0.0, ask - bid) if ask > 0 and bid > 0 else 0.0,
+                friendliness=friend,
+                thesis_intact=bool(snapshot.get("is_warm")),
+                thesis_confidence_decay=decay,
+                current_r=current_r,
+                bars_held=max(0, bar_index - state.entry_bar),
+                fat_tail_action=tail_action,
+                portfolio_under_pressure=portfolio_pressure,
+                micro_volatility=micro_vol,
+            )
+        return out
 
     def _build_strike_lookup(self, snapshot: Dict[str, Any]) -> Dict:
         """Map (side, level) → (strike, premium, friendliness, spread_state)
@@ -1262,6 +1373,11 @@ class PortfolioManager:
         ))
         # Forget the per-position counterfactual plan.
         self._counterfactual_plans.pop(pos_id, None)
+        # Unregister the adaptive exit engine.
+        try:
+            self.portfolio_exit.unregister(pos_id)
+        except Exception:
+            pass
         del self._open_states[pos_id]
         self.cooldown_until_bar = max(
             self.cooldown_until_bar,
@@ -1386,6 +1502,7 @@ class PortfolioManager:
                                 if self._last_risk_report else None),
             "hedge_proposal": (self._last_hedge_proposal.to_dict()
                                 if self._last_hedge_proposal else None),
+            "adaptive_exit": self._last_exit_decision,
         }
 
     def reset_daily(self) -> None:

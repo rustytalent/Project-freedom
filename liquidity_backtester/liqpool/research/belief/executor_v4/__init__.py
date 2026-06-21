@@ -148,6 +148,33 @@ from .rich_cockpit import (
     render_plain_cockpit,
     render_rich_cockpit,
 )
+from .exit_engine import (
+    AdaptiveExitEngine,
+    AdaptiveExitEngineConfig,
+    EXIT_MODE_CHASE_FILL,
+    EXIT_MODE_DE_RISK,
+    EXIT_MODE_HARVEST,
+    EXIT_MODE_KILL,
+    EXIT_MODE_SHADE,
+    ExitDecision,
+    ExitMode,
+    ExitThesis,
+    ExitThesisConfig,
+    LocalHighTracker,
+    LocalHighTrackerConfig,
+    MarketState,
+    ModificationBucket,
+    ModificationBudget,
+    ModificationBudgetConfig,
+    ModificationGate,
+    ModificationGateConfig,
+    ModificationGateDecision,
+    PortfolioExitDecision,
+    PortfolioExitManager,
+    PortfolioExitManagerConfig,
+    RevisitForecast,
+    build_exit_thesis,
+)
 from .explainer import explain_tick
 from .persistence import (
     ManagerPersistence,
