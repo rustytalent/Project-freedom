@@ -46,19 +46,38 @@ from .iron_condor import IronCondorStrategy
 from .butterfly import ButterflyStrategy
 from .ratio_spread import BullRatioSpreadStrategy
 from .jade_lizard import JadeLizardStrategy
+from .ecosystem import (
+    AccumulationBreakoutStrategy,
+    AntiCrowdContrarianStrategy,
+    CounterfactualInversionStrategy,
+    EpicenterMigrationStrategy,
+    MMIntentMimicryStrategy,
+    MTFDivergenceStrategy,
+    RegimeTransitionStrategy,
+    StopHuntFadeStrategy,
+    WebDominantPathwayStrategy,
+)
 from .selector import StrategySelector, StrategySelectorResult
 
 __all__ = [
+    "AccumulationBreakoutStrategy",
+    "AntiCrowdContrarianStrategy",
     "BaseStrategy",
     "BearVerticalStrategy",
     "BullRatioSpreadStrategy",
     "BullVerticalStrategy",
     "ButterflyStrategy",
+    "CounterfactualInversionStrategy",
+    "EpicenterMigrationStrategy",
     "IronCondorStrategy",
     "JadeLizardStrategy",
     "LongStraddleStrategy",
     "LongStrangleStrategy",
+    "MMIntentMimicryStrategy",
+    "MTFDivergenceStrategy",
+    "RegimeTransitionStrategy",
     "SingleLegStrategy",
+    "StopHuntFadeStrategy",
     "StrategyContext",
     "StrategyEntryDecision",
     "StrategyLeg",
@@ -66,4 +85,5 @@ __all__ = [
     "StrategyOutcome",
     "StrategySelector",
     "StrategySelectorResult",
+    "WebDominantPathwayStrategy",
 ]

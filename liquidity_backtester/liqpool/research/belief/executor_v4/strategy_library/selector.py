@@ -12,6 +12,17 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .base import BaseStrategy, StrategyContext, StrategyEntryDecision
 from .butterfly import ButterflyStrategy
+from .ecosystem import (
+    AccumulationBreakoutStrategy,
+    AntiCrowdContrarianStrategy,
+    CounterfactualInversionStrategy,
+    EpicenterMigrationStrategy,
+    MMIntentMimicryStrategy,
+    MTFDivergenceStrategy,
+    RegimeTransitionStrategy,
+    StopHuntFadeStrategy,
+    WebDominantPathwayStrategy,
+)
 from .iron_condor import IronCondorStrategy
 from .jade_lizard import JadeLizardStrategy
 from .ratio_spread import BullRatioSpreadStrategy
@@ -43,6 +54,7 @@ class StrategySelectorResult:
 
 # Strategy fitness bonuses based on context.
 _DEFAULT_STRATEGIES: List[BaseStrategy] = [
+    # Standard
     SingleLegStrategy(),
     BullVerticalStrategy(),
     BearVerticalStrategy(),
@@ -52,6 +64,16 @@ _DEFAULT_STRATEGIES: List[BaseStrategy] = [
     ButterflyStrategy(),
     BullRatioSpreadStrategy(),
     JadeLizardStrategy(),
+    # Ecosystem-specific — built for OUR Premium Belief Engine signals
+    MMIntentMimicryStrategy(),
+    AntiCrowdContrarianStrategy(),
+    EpicenterMigrationStrategy(),
+    StopHuntFadeStrategy(),
+    AccumulationBreakoutStrategy(),
+    MTFDivergenceStrategy(),
+    WebDominantPathwayStrategy(),
+    RegimeTransitionStrategy(),
+    CounterfactualInversionStrategy(),
 ]
 
 

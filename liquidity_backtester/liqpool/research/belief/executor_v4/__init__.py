@@ -184,17 +184,45 @@ from .learning import (
     OnlineLearnerConfig,
     WeightUpdate,
 )
+from .monday_bonuses import (
+    Alert,
+    AlertEmitterConfig,
+    AlertHookEmitter,
+    AutoHedgeAction,
+    DefensiveAutoHedger,
+    DefensiveAutoHedgerConfig,
+    SlippageRecord,
+    SlippageTracker,
+    TimeOfDayStopScaler,
+    TimeOfDayStopScalerConfig,
+    health_report,
+)
+from .portfolio_optimizer import (
+    CoordinateDescentSolver,
+    GreedyHedgeSolver,
+    GreekTargets,
+    OptimizerAction,
+    OptimizerProposal,
+)
 from .strategy_library import (
+    AccumulationBreakoutStrategy,
+    AntiCrowdContrarianStrategy,
     BaseStrategy,
     BearVerticalStrategy,
     BullRatioSpreadStrategy,
     BullVerticalStrategy,
     ButterflyStrategy,
+    CounterfactualInversionStrategy,
+    EpicenterMigrationStrategy,
     IronCondorStrategy,
     JadeLizardStrategy,
     LongStraddleStrategy,
     LongStrangleStrategy,
+    MMIntentMimicryStrategy,
+    MTFDivergenceStrategy,
+    RegimeTransitionStrategy,
     SingleLegStrategy,
+    StopHuntFadeStrategy,
     StrategyContext,
     StrategyEntryDecision,
     StrategyLeg,
@@ -202,6 +230,7 @@ from .strategy_library import (
     StrategyOutcome,
     StrategySelector,
     StrategySelectorResult,
+    WebDominantPathwayStrategy,
 )
 from .substrate import (
     RichContext,

@@ -36,6 +36,11 @@ class OnlineLearnerConfig:
     regularization: float = 0.001
     # Win definition: realized_r >= this is a "win"
     win_threshold_r: float = 0.20
+    # Walk-forward calibration
+    walk_forward_enabled: bool = True
+    walk_forward_train_fraction: float = 0.70
+    walk_forward_overfit_threshold: float = 1.30  # val_loss / train_loss
+    walk_forward_min_val_samples: int = 4
 
 
 @dataclass
@@ -46,6 +51,10 @@ class WeightUpdate:
     post_update_weights: Dict[str, float]
     weight_deltas: Dict[str, float]
     model_loss: float
+    train_loss: float = 0.0
+    val_loss: float = 0.0
+    walk_forward_accepted: bool = True
+    walk_forward_overfit_ratio: float = 1.0
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -55,6 +64,11 @@ class WeightUpdate:
             "post_update_weights": dict(self.post_update_weights),
             "weight_deltas": dict(self.weight_deltas),
             "model_loss": round(self.model_loss, 4),
+            "train_loss": round(self.train_loss, 4),
+            "val_loss": round(self.val_loss, 4),
+            "walk_forward_accepted": self.walk_forward_accepted,
+            "walk_forward_overfit_ratio": round(
+                self.walk_forward_overfit_ratio, 3),
             "notes": list(self.notes),
         }
 
@@ -113,7 +127,14 @@ class OnlineLearner:
         self.closures_since_update += 1
 
     def maybe_update(self) -> Optional[WeightUpdate]:
-        """Run an SGD step when conditions met. Returns the update or None."""
+        """Run an SGD step when conditions met. Returns the update or None.
+
+        With walk_forward_enabled (default), the observations are split
+        into TRAIN (oldest 70%) and VAL (newest 30%). We compute weights
+        from TRAIN only, then score on VAL. If val_loss > train_loss *
+        overfit_threshold, we REJECT the update — the proposed weights
+        overfit and won't generalize. The current weights are kept.
+        """
         cfg = self.cfg
         if self.closures_since_update < cfg.update_every_n_closures:
             return None
@@ -121,60 +142,126 @@ class OnlineLearner:
             return None
 
         pre = dict(self.weights)
-        # Logistic regression with the 5 component scores as features.
-        # Loss = -[y log(p) + (1-y) log(1-p)], weighted by realized_r magnitude.
-        # We update only the named weights' multiplier (one per feature).
-        # For simplicity: gradient of weight w_k = sum_i (y - p_i) * x_ik * weight_i
-        grads = {k: 0.0 for k in self._COMPONENTS}
-        loss_sum = 0.0
-        n = len(self.observations)
-        for obs in self.observations:
-            features = {
-                "w_base_score": obs["base_score"],
-                "w_mtf_alignment": obs["mtf_alignment_score"],
-                "w_projection": obs["projection_factor"],
-                "w_fees_clearance": obs["fees_clearance_score"],
-                "w_portfolio_capacity": obs["portfolio_capacity_score"],
-            }
-            logit = sum(self.weights[k] * features[k] for k in self._COMPONENTS)
-            # Add bias so logit centers around 0.
-            p = 1.0 / (1.0 + math.exp(-(logit - 0.5)))
-            y = obs["won"]
-            err = y - p
-            sample_w = obs["weight"]
-            loss_sum += sample_w * (-(y * math.log(max(1e-9, p))
-                                        + (1.0 - y)
-                                        * math.log(max(1e-9, 1.0 - p))))
+        all_obs = list(self.observations)
+        n_total = len(all_obs)
+
+        if cfg.walk_forward_enabled:
+            split = max(1, int(n_total * cfg.walk_forward_train_fraction))
+            train_obs = all_obs[:split]
+            val_obs = all_obs[split:]
+            if len(val_obs) < cfg.walk_forward_min_val_samples:
+                # Not enough holdout — fall back to single-pass update.
+                train_obs = all_obs
+                val_obs = []
+        else:
+            train_obs = all_obs
+            val_obs = []
+
+        # ── Train pass: compute gradients + new weights ─────────────
+        proposed_weights = self._gradient_step(train_obs, pre)
+        train_loss = self._compute_loss(train_obs, proposed_weights)
+
+        # ── Validation pass (if any) ────────────────────────────────
+        val_loss = 0.0
+        wf_accepted = True
+        overfit_ratio = 1.0
+        if val_obs:
+            val_loss = self._compute_loss(val_obs, proposed_weights)
+            ratio_denom = max(0.01, train_loss)
+            overfit_ratio = val_loss / ratio_denom
+            wf_accepted = (overfit_ratio
+                            <= cfg.walk_forward_overfit_threshold)
+
+        # ── Apply or reject ────────────────────────────────────────
+        deltas: Dict[str, float] = {}
+        notes: List[str] = []
+        if wf_accepted:
             for k in self._COMPONENTS:
-                grads[k] += sample_w * err * features[k]
+                deltas[k] = proposed_weights[k] - self.weights[k]
+                self.weights[k] = proposed_weights[k]
+            self._renormalize()
+            notes.append(
+                f"online_learner: applied; n_train={len(train_obs)}, "
+                f"n_val={len(val_obs)}, train_loss={train_loss:.4f}, "
+                f"val_loss={val_loss:.4f}"
+            )
+        else:
+            # Rejected: keep current weights, but record the attempt.
+            for k in self._COMPONENTS:
+                deltas[k] = 0.0
+            notes.append(
+                f"online_learner: REJECTED (overfit ratio "
+                f"{overfit_ratio:.2f} > {cfg.walk_forward_overfit_threshold:.2f}); "
+                f"weights unchanged"
+            )
 
-        # Regularization (pull weights toward prior).
-        prior = dict(pre)
-        for k in self._COMPONENTS:
-            grads[k] -= cfg.regularization * (self.weights[k] - prior[k]) * n
-
-        # Apply.
-        deltas = {}
-        for k in self._COMPONENTS:
-            new_w = self.weights[k] + (cfg.learning_rate / n) * grads[k]
-            new_w = max(cfg.weight_min, min(cfg.weight_max, new_w))
-            deltas[k] = new_w - self.weights[k]
-            self.weights[k] = new_w
-
-        self._renormalize()
         post = dict(self.weights)
+        loss_for_summary = (val_loss if val_obs and wf_accepted else train_loss)
         update = WeightUpdate(
-            samples_used=n,
+            samples_used=n_total,
             pre_update_weights=pre,
             post_update_weights=post,
             weight_deltas=deltas,
-            model_loss=loss_sum / max(1, n),
-            notes=[f"online_learner: {n} samples, "
-                    f"avg loss {loss_sum / max(1, n):.4f}"],
+            model_loss=loss_for_summary,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            walk_forward_accepted=wf_accepted,
+            walk_forward_overfit_ratio=overfit_ratio,
+            notes=notes,
         )
         self.update_history.append(update)
         self.closures_since_update = 0
         return update
+
+    def _gradient_step(self, observations: List[Dict[str, float]],
+                         prior: Dict[str, float]) -> Dict[str, float]:
+        """One SGD step over the given observations. Returns proposed weights
+        WITHOUT mutating self.weights."""
+        cfg = self.cfg
+        n = len(observations)
+        grads = {k: 0.0 for k in self._COMPONENTS}
+        for obs in observations:
+            features = self._features(obs)
+            logit = sum(self.weights[k] * features[k] for k in self._COMPONENTS)
+            p = 1.0 / (1.0 + math.exp(-(logit - 0.5)))
+            err = obs["won"] - p
+            sample_w = obs["weight"]
+            for k in self._COMPONENTS:
+                grads[k] += sample_w * err * features[k]
+        # Regularization toward prior.
+        for k in self._COMPONENTS:
+            grads[k] -= cfg.regularization * (self.weights[k] - prior[k]) * n
+        proposed = {}
+        for k in self._COMPONENTS:
+            new_w = self.weights[k] + (cfg.learning_rate / max(1, n)) * grads[k]
+            proposed[k] = max(cfg.weight_min, min(cfg.weight_max, new_w))
+        return proposed
+
+    def _compute_loss(self, observations: List[Dict[str, float]],
+                        weights: Dict[str, float]) -> float:
+        """Average sample-weighted cross-entropy under given weights."""
+        if not observations:
+            return 0.0
+        total = 0.0
+        for obs in observations:
+            features = self._features(obs)
+            logit = sum(weights[k] * features[k] for k in self._COMPONENTS)
+            p = 1.0 / (1.0 + math.exp(-(logit - 0.5)))
+            y = obs["won"]
+            sample_w = obs["weight"]
+            total += sample_w * (-(y * math.log(max(1e-9, p))
+                                     + (1.0 - y) * math.log(max(1e-9, 1.0 - p))))
+        return total / max(1, len(observations))
+
+    @staticmethod
+    def _features(obs: Dict[str, float]) -> Dict[str, float]:
+        return {
+            "w_base_score": obs["base_score"],
+            "w_mtf_alignment": obs["mtf_alignment_score"],
+            "w_projection": obs["projection_factor"],
+            "w_fees_clearance": obs["fees_clearance_score"],
+            "w_portfolio_capacity": obs["portfolio_capacity_score"],
+        }
 
     def apply_to_aggregator_config(self, aggregator_cfg) -> None:
         """Push the current learned weights into a live AggregatorConfig.
