@@ -86,7 +86,16 @@ NEUTRAL_THESIS = "NEUTRAL"
 
 @dataclass
 class ThesisMemoryConfig:
-    """Knobs for the thesis-memory state. Defaults are the founder's numbers."""
+    """Knobs for the thesis-memory state. Defaults are the founder's numbers.
+
+    The advanced fields below are ALL opt-in (default = off → identical
+    behavior to the original Phase-6 builder). Added on Sun 2026-06-22
+    in response to the founder's audit, which flagged two primitives:
+      1. Fixed decay rate regardless of tape speed — in fast tape,
+         conviction should bleed faster; in slow tape, slower.
+      2. No uncertainty propagation — scores are point estimates with
+         no confidence carry; downstream can't tell "72 ± 8" from "72 ± 1".
+    """
     entry_confidence: float = 70.0
     exit_confidence: float = 45.0
     no_trade_danger: float = 65.0
@@ -106,6 +115,26 @@ class ThesisMemoryConfig:
     confidence_amp: float = 1.0
     eps: float = 1e-9
 
+    # ── Advanced (opt-in) — tape-speed-aware decay ────────────────
+    # When enabled, the effective decay each bar = decay_per_bar adjusted
+    # by an observed-tape-speed signal. The signal is provided per-update
+    # via `tape_speed` (a ratio: realized / baseline volatility, ≈1.0 in
+    # normal tape, >1 in fast tape, <1 in slow tape). Effective decay is
+    # bounded to [decay_min, decay_max].
+    enable_adaptive_decay: bool = False
+    decay_min: float = 0.86             # ≈ 5-bar half-life cap (fast tape)
+    decay_max: float = 0.975            # ≈ 27-bar half-life cap (slow tape)
+    adaptive_decay_sensitivity: float = 0.06   # per-unit tape-speed pull
+
+    # ── Advanced (opt-in) — score uncertainty ─────────────────────
+    # When enabled, every score gets a confidence interval inferred from
+    # the recent stability of the inputs (frequent IV-state flips = wide
+    # CI; consistent reads = tight CI). Added as fields on ThesisSnapshot;
+    # the point estimates are unchanged.
+    enable_uncertainty: bool = False
+    uncertainty_window: int = 12
+    uncertainty_max_band: float = 18.0      # max ± band around any score
+
     def __post_init__(self) -> None:
         if not (0.0 < self.decay_per_bar < 1.0):
             raise ValueError("decay_per_bar must be in (0,1)")
@@ -113,11 +142,31 @@ class ThesisMemoryConfig:
             raise ValueError("exit_confidence must be < entry_confidence (hysteresis)")
         if not (0.0 <= self.no_trade_danger <= 100.0):
             raise ValueError("no_trade_danger must be in [0,100]")
+        if self.enable_adaptive_decay:
+            if not (0 < self.decay_min < self.decay_max < 1.0):
+                raise ValueError(
+                    "adaptive decay: 0 < decay_min < decay_max < 1 required")
+            if not (self.decay_min <= self.decay_per_bar <= self.decay_max):
+                raise ValueError(
+                    "adaptive decay: decay_per_bar must lie in "
+                    "[decay_min, decay_max]")
+        if self.enable_uncertainty:
+            if self.uncertainty_window < 3:
+                raise ValueError("uncertainty_window must be >= 3")
+            if self.uncertainty_max_band <= 0:
+                raise ValueError("uncertainty_max_band must be > 0")
 
 
 @dataclass
 class ThesisSnapshot:
-    """Per-bar output of the memory layer."""
+    """Per-bar output of the memory layer.
+
+    The advanced CI fields default to 0.0 (zero-width band) so that any
+    downstream consumer that doesn't care about uncertainty sees the
+    same point-estimate-only world it always saw. When the memory has
+    ``enable_uncertainty`` on, the half-width bands report how confident
+    the score is.
+    """
     bull_thesis_score: float
     bear_thesis_score: float
     vol_expansion_score: float
@@ -127,6 +176,16 @@ class ThesisSnapshot:
     composite_state: str                 # one of the BULL_ENTRY / HOLD_BULL / ... labels
     just_changed: bool                   # composite_state different from previous bar
     note: str
+    # Advanced (opt-in) — confidence half-widths around each score
+    # (i.e. score ± ci). 0.0 = the legacy "no uncertainty surfaced" world.
+    bull_thesis_ci: float = 0.0
+    bear_thesis_ci: float = 0.0
+    vol_expansion_ci: float = 0.0
+    liquidity_danger_ci: float = 0.0
+    no_trade_ci: float = 0.0
+    # Realized decay applied this bar (informational; defaults to cfg's
+    # static decay_per_bar when adaptive decay is off).
+    effective_decay: float = 0.94
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -140,6 +199,12 @@ class _MutableState:
     liq_danger: float = 0.0
     held_direction: int = 0
     last_composite: str = NEUTRAL_THESIS
+    # Advanced uncertainty history — rolling window of recent IV-state
+    # labels so we can detect flip-flopping (= wide CI) vs consistent
+    # reads (= tight CI). Bounded by ThesisMemoryConfig.uncertainty_window.
+    iv_state_history: list = field(default_factory=list)
+    delta_history: list = field(default_factory=list)
+    last_effective_decay: float = 0.94
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -176,6 +241,7 @@ class ThesisMemory:
     def snapshot(self) -> ThesisSnapshot:
         s = self._state
         no_trade = max(s.liq_danger, s.vol_exp * 0.5)
+        ci = self._compute_uncertainty()
         return ThesisSnapshot(
             bull_thesis_score=s.bull,
             bear_thesis_score=s.bear,
@@ -186,13 +252,57 @@ class ThesisMemory:
             composite_state=s.last_composite,
             just_changed=False,
             note="snapshot (no update)",
+            bull_thesis_ci=ci, bear_thesis_ci=ci,
+            vol_expansion_ci=ci, liquidity_danger_ci=ci,
+            no_trade_ci=ci,
+            effective_decay=s.last_effective_decay,
         )
+
+    def _compute_uncertainty(self) -> float:
+        """Confidence half-width band around each score.
+
+        When the IV-state history is unstable (flip-flopping) AND/OR
+        the recent deltas have high variance, the band widens. When
+        everything is consistent, the band collapses toward 0.
+
+        Returns 0.0 when ``enable_uncertainty`` is off (legacy behavior).
+        """
+        cfg = self.cfg
+        if not cfg.enable_uncertainty:
+            return 0.0
+        s = self._state
+        history = s.iv_state_history[-cfg.uncertainty_window:]
+        deltas = s.delta_history[-cfg.uncertainty_window:]
+        if len(history) < 3:
+            # Early in the session — wide band by default.
+            return cfg.uncertainty_max_band * 0.6
+
+        # Flip-flop fraction: how often did the IV state CHANGE label?
+        flips = sum(
+            1 for i in range(1, len(history)) if history[i] != history[i - 1])
+        flip_rate = flips / max(1, len(history) - 1)
+
+        # Delta variance: how erratic have the recent updates been?
+        if len(deltas) >= 3:
+            mean_d = sum(deltas) / len(deltas)
+            var_d = sum((d - mean_d) ** 2 for d in deltas) / len(deltas)
+            std_d = var_d ** 0.5
+            # Normalize against the typical bull/bear delta magnitude.
+            std_norm = min(1.0, std_d / max(1.0, cfg.delta_battlefield_bull_agreement))
+        else:
+            std_norm = 0.5
+
+        # Blend: more flips OR more delta variance = wider band.
+        instability = 0.6 * flip_rate + 0.4 * std_norm
+        band = cfg.uncertainty_max_band * instability
+        return max(0.0, min(cfg.uncertainty_max_band, band))
 
     def update(self,
                *,
                iv_state: Optional[IVState] = None,
                hunt_verdict: str = "",
                trap_verdict: str = "",
+               tape_speed: Optional[float] = None,
                ) -> ThesisSnapshot:
         """Advance the memory by one bar.
 
@@ -202,16 +312,37 @@ class ThesisMemory:
                                 ``"LIQUIDITY_HUNT_UP"`` / ``"REGIME_BREAK_DOWN"``)
           * ``trap_verdict``  — string from ``premium_divergence`` (e.g.
                                 ``"STRONG_BULL_TRAP"`` / ``"BULL_TRAP"``)
+          * ``tape_speed``    — OPTIONAL float used only when
+                                ``enable_adaptive_decay`` is True. Ratio of
+                                realized to baseline volatility: ~1.0 in normal
+                                tape, >1.0 in fast tape (decay faster), <1.0 in
+                                slow tape (decay slower). When omitted with the
+                                flag on, defaults to 1.0 (no adjustment).
 
         Any input may be omitted / empty — the memory simply decays.
         """
         cfg = self.cfg
         s = self._state
+
         # 1. Bleed all scores by the decay factor.
-        s.bull *= cfg.decay_per_bar
-        s.bear *= cfg.decay_per_bar
-        s.vol_exp *= cfg.decay_per_bar
-        s.liq_danger *= cfg.decay_per_bar
+        # If adaptive decay is enabled, scale the legacy decay by the
+        # observed tape speed (clipped to [decay_min, decay_max]). Default
+        # behavior (flag off) is bit-identical to the original.
+        if cfg.enable_adaptive_decay:
+            ts = float(tape_speed) if tape_speed is not None else 1.0
+            # Faster tape → smaller decay coefficient (faster bleed).
+            # The sensitivity scales how much the coefficient shifts per
+            # unit of tape-speed deviation from 1.0.
+            adjust = (ts - 1.0) * cfg.adaptive_decay_sensitivity
+            eff_decay = cfg.decay_per_bar - adjust
+            eff_decay = max(cfg.decay_min, min(cfg.decay_max, eff_decay))
+        else:
+            eff_decay = cfg.decay_per_bar
+        s.last_effective_decay = eff_decay
+        s.bull *= eff_decay
+        s.bear *= eff_decay
+        s.vol_exp *= eff_decay
+        s.liq_danger *= eff_decay
 
         notes: list[str] = []
 
@@ -318,6 +449,24 @@ class ThesisMemory:
                 composite = NEUTRAL_THESIS
 
         s.last_composite = composite
+
+        # ── Advanced uncertainty bookkeeping (opt-in) ─────────────
+        if cfg.enable_uncertainty:
+            iv_label = (iv_state.state if iv_state is not None else "")
+            s.iv_state_history.append(iv_label)
+            # Magnitude of the largest score-state shift this bar — used
+            # as a stand-in for "how much did this bar's update move us?"
+            s.delta_history.append(
+                abs(s.bull - (s.bull / max(eff_decay, 1e-9)))
+                + abs(s.bear - (s.bear / max(eff_decay, 1e-9))))
+            # Bound the history to its window so memory doesn't grow.
+            cap = max(cfg.uncertainty_window * 4, 64)
+            if len(s.iv_state_history) > cap:
+                s.iv_state_history = s.iv_state_history[-cap:]
+            if len(s.delta_history) > cap:
+                s.delta_history = s.delta_history[-cap:]
+        ci = self._compute_uncertainty()
+
         return ThesisSnapshot(
             bull_thesis_score=round(s.bull, 2),
             bear_thesis_score=round(s.bear, 2),
@@ -328,4 +477,10 @@ class ThesisMemory:
             composite_state=composite,
             just_changed=(composite != prev),
             note="; ".join(notes) if notes else "decay-only",
+            bull_thesis_ci=round(ci, 2),
+            bear_thesis_ci=round(ci, 2),
+            vol_expansion_ci=round(ci, 2),
+            liquidity_danger_ci=round(ci, 2),
+            no_trade_ci=round(ci, 2),
+            effective_decay=round(eff_decay, 4),
         )
