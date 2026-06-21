@@ -137,6 +137,18 @@ from .conviction import (
     ConvictionScore,
     compute_conviction,
 )
+from .live_calibrator import (
+    CalibrationOutcome,
+    LiveCalibrator,
+    LiveCalibratorConfig,
+)
+from .weight_evolution import (
+    WeightEvolutionAnalysis,
+    WeightEvolutionAnalyzer,
+    WeightEvolutionMemory,
+    WeightEvolutionMemoryConfig,
+    WeightSnapshot,
+)
 from .cockpit_server import (
     CockpitFeed,
     CockpitServer,

@@ -129,6 +129,9 @@ def _make_handler(feed: CockpitFeed, runner_ref: Callable[[], Any]):
                 if self.path == "/health":
                     self._serve_health()
                     return
+                if self.path == "/api/controls":
+                    self._serve_controls_get()
+                    return
                 self._send_text(404, "not found\n")
             except Exception as exc:
                 log.exception("handler error: %s", exc)
@@ -136,6 +139,154 @@ def _make_handler(feed: CockpitFeed, runner_ref: Callable[[], Any]):
                     self._send_text(500, f"internal error: {exc}\n")
                 except Exception:
                     pass
+
+        def do_POST(self) -> None:
+            try:
+                # Read body if any.
+                length = int(self.headers.get("Content-Length") or 0)
+                body = (self.rfile.read(length).decode("utf-8")
+                          if length else "")
+                # CONTROL endpoints — these MUTATE live state.
+                if self.path == "/api/execution/enable":
+                    self._control_execution_enable(body)
+                    return
+                if self.path == "/api/execution/disable":
+                    self._control_execution_disable(body)
+                    return
+                if self.path == "/api/execution/kill":
+                    self._control_execution_kill(body)
+                    return
+                if self.path == "/api/calibrator/pause":
+                    self._control_calibrator_pause(body)
+                    return
+                if self.path == "/api/calibrator/resume":
+                    self._control_calibrator_resume(body)
+                    return
+                if self.path == "/api/calibrator/rollback":
+                    self._control_calibrator_rollback(body)
+                    return
+                self._send_text(404, "control endpoint not found\n")
+            except Exception as exc:
+                log.exception("control handler error: %s", exc)
+                try:
+                    self._send_text(500, f"internal error: {exc}\n")
+                except Exception:
+                    pass
+
+        # ── Control handlers (LIVE TOGGLES) ───────────────────────
+
+        def _serve_controls_get(self) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            out = {
+                "broker_name": type(runner.broker).__name__,
+                "broker_is_live": bool(getattr(runner.broker, "is_live", False)),
+                "broker_killed": bool(getattr(runner.broker, "killed", False)),
+                "calibrator_paused": False,
+                "calibrator_enabled": False,
+            }
+            try:
+                out["calibrator_paused"] = bool(
+                    runner.manager.live_calibrator.paused)
+                out["calibrator_enabled"] = bool(
+                    runner.manager.live_calibrator.cfg.enabled)
+            except Exception:
+                pass
+            self._send_json(200, out)
+
+        def _control_execution_enable(self, body: str) -> None:
+            """ENABLE real execution. Requires explicit confirm flag in body."""
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            # Demand explicit confirmation phrase.
+            data = self._parse_body(body)
+            if data.get("confirm") != "I_UNDERSTAND_REAL_MONEY":
+                self._send_json(400, {
+                    "error": "must POST {'confirm': 'I_UNDERSTAND_REAL_MONEY'}",
+                    "reason": "safety guard against accidental live toggle",
+                })
+                return
+            broker = runner.broker
+            broker.killed = False
+            # Flip Kite confirm_real if applicable.
+            if hasattr(broker, "cfg") and hasattr(broker.cfg, "confirm_real"):
+                broker.cfg.confirm_real = True
+                broker.is_live = True
+                broker.dry_run = False
+            self._send_json(200, {
+                "ok": True,
+                "broker_is_live": bool(getattr(broker, "is_live", False)),
+            })
+
+        def _control_execution_disable(self, body: str) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            broker = runner.broker
+            if hasattr(broker, "cfg") and hasattr(broker.cfg, "confirm_real"):
+                broker.cfg.confirm_real = False
+                broker.is_live = False
+                broker.dry_run = True
+            self._send_json(200, {"ok": True,
+                                     "broker_is_live": False})
+
+        def _control_execution_kill(self, body: str) -> None:
+            """Emergency kill — block ALL future order placements."""
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                runner.broker.kill_switch("operator kill via UI")
+            except Exception:
+                runner.broker.killed = True
+            self._send_json(200, {"ok": True, "killed": True})
+
+        def _control_calibrator_pause(self, body: str) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                runner.manager.live_calibrator.pause("operator")
+                self._send_json(200, {"ok": True, "paused": True})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+
+        def _control_calibrator_resume(self, body: str) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                runner.manager.live_calibrator.resume()
+                self._send_json(200, {"ok": True, "paused": False})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+
+        def _control_calibrator_rollback(self, body: str) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                ok = runner.manager.live_calibrator.rollback_last_applied()
+                self._send_json(200, {"ok": ok})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+
+        def _parse_body(self, body: str) -> Dict[str, Any]:
+            if not body:
+                return {}
+            try:
+                return json.loads(body) or {}
+            except Exception:
+                return {}
 
         def _serve_viewer(self) -> None:
             body = _DEFAULT_VIEWER_HTML.encode("utf-8")
@@ -342,11 +493,30 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
   .footer { margin-top: 24px; color: var(--muted); font-size: 11px; }
   pre { white-space: pre-wrap; word-break: break-word; margin: 0;
          font-family: inherit; font-size: 12px; }
+  .control-bar { margin-top: 12px; padding: 12px; background: var(--panel);
+                  border-radius: 8px; display: flex; align-items: center;
+                  gap: 10px; flex-wrap: wrap; }
+  .btn { padding: 8px 14px; border: none; border-radius: 4px;
+          font-family: inherit; font-size: 13px; cursor: pointer;
+          font-weight: bold; letter-spacing: 1px; }
+  .btn-paper { background: #2a4d3a; color: var(--green); }
+  .btn-live { background: var(--bear); color: #fff; }
+  .btn-kill { background: #6b0d18; color: #fff; }
+  .btn-kill:hover { background: #8b0d18; }
+  .btn-neutral { background: #2a3340; color: var(--text); }
+  .btn:hover { filter: brightness(1.15); }
 </style>
 </head>
 <body>
   <h1>◆ PREMIUM BELIEF v4 — LIVE COCKPIT</h1>
   <div id="status" class="muted"><span class="status-dot pulse"></span>connecting…</div>
+  <div class="control-bar">
+    <button id="btn-live-toggle" class="btn btn-paper">PAPER MODE</button>
+    <button id="btn-kill" class="btn btn-kill">⛔ EMERGENCY KILL</button>
+    <button id="btn-calib-toggle" class="btn btn-neutral">CALIB: …</button>
+    <button id="btn-rollback" class="btn btn-neutral">↩ ROLLBACK</button>
+    <span id="control-status" class="muted" style="margin-left: 12px;"></span>
+  </div>
   <div class="grid" style="margin-top: 12px">
     <div class="panel">
       <h2>ACTION</h2>
@@ -532,6 +702,67 @@ function render(snap) {
      </div>`).join("");
   document.getElementById("patterns").innerHTML = pHtml || "<em class='muted'>no patterns</em>";
 }
+// ── Control bar (LIVE TOGGLES) ────────────────────────────────
+async function refreshControls() {
+  try {
+    const r = await fetch("/api/controls");
+    const j = await r.json();
+    const liveBtn = document.getElementById("btn-live-toggle");
+    if (j.broker_is_live) {
+      liveBtn.textContent = "● LIVE MONEY (click to stop)";
+      liveBtn.className = "btn btn-live";
+    } else {
+      liveBtn.textContent = "PAPER MODE — click to GO LIVE";
+      liveBtn.className = "btn btn-paper";
+    }
+    const calibBtn = document.getElementById("btn-calib-toggle");
+    calibBtn.textContent = j.calibrator_paused ? "CALIB: PAUSED ▶ resume" : "CALIB: live ⏸ pause";
+    document.getElementById("control-status").textContent =
+      `broker=${j.broker_name} | killed=${j.broker_killed}`;
+  } catch (e) { /* server not ready */ }
+}
+async function postControl(path, body) {
+  try {
+    const r = await fetch(path, {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: body ? JSON.stringify(body) : "" });
+    const j = await r.json();
+    if (!r.ok) alert("control failed: " + JSON.stringify(j));
+  } catch (e) { alert("control error: " + e); }
+  refreshControls();
+}
+document.getElementById("btn-live-toggle").addEventListener("click", async () => {
+  // Check current state to know which way to toggle.
+  const r = await fetch("/api/controls"); const j = await r.json();
+  if (j.broker_is_live) {
+    if (!confirm("Disable real execution? Orders will revert to paper.")) return;
+    await postControl("/api/execution/disable");
+  } else {
+    const phrase = prompt(
+      "About to ENABLE REAL EXECUTION. Type EXACTLY:\n  I_UNDERSTAND_REAL_MONEY\n\nThis is your only safety guard.");
+    if (phrase !== "I_UNDERSTAND_REAL_MONEY") {
+      alert("not enabled — phrase did not match");
+      return;
+    }
+    await postControl("/api/execution/enable", {confirm: "I_UNDERSTAND_REAL_MONEY"});
+  }
+});
+document.getElementById("btn-kill").addEventListener("click", async () => {
+  if (!confirm("EMERGENCY KILL — block all future order placements?")) return;
+  await postControl("/api/execution/kill");
+});
+document.getElementById("btn-calib-toggle").addEventListener("click", async () => {
+  const r = await fetch("/api/controls"); const j = await r.json();
+  if (j.calibrator_paused) await postControl("/api/calibrator/resume");
+  else await postControl("/api/calibrator/pause");
+});
+document.getElementById("btn-rollback").addEventListener("click", async () => {
+  if (!confirm("Rollback the most recent applied weight change?")) return;
+  await postControl("/api/calibrator/rollback");
+});
+refreshControls();
+setInterval(refreshControls, 5000);
+
 var es = new EventSource("/api/stream");
 es.addEventListener("cockpit", e => {
   try { render(JSON.parse(e.data)); } catch (err) { console.error(err); }

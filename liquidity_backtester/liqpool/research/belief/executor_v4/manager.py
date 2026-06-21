@@ -292,6 +292,21 @@ class PortfolioManager:
         self.counterfactual = CounterfactualGenerator(self.cfg.counterfactual)
         self.projection = ForwardProjection(self.cfg.projection)
         self.aggregator = DecisionAggregator(self.cfg.aggregator)
+        # Live weight evolution memory + calibrator (founder Sun 2026-06-22)
+        from .weight_evolution import (
+            WeightEvolutionMemory, WeightEvolutionMemoryConfig,
+            WeightEvolutionAnalyzer,
+        )
+        from .live_calibrator import LiveCalibrator, LiveCalibratorConfig
+        self.weight_memory = WeightEvolutionMemory(
+            WeightEvolutionMemoryConfig())
+        self.weight_analyzer = WeightEvolutionAnalyzer()
+        self.live_calibrator = LiveCalibrator(
+            aggregator_cfg=self.cfg.aggregator,
+            memory=self.weight_memory,
+            calibrator_cfg=LiveCalibratorConfig(enabled=True),
+        )
+        self._last_calibration: Optional[Dict[str, Any]] = None
         # Sprint 3 layers
         self.manipulation_board = ManipulationBoard(self.cfg.manipulation_board)
         self.mm_mind = MarketMakerMind(self.cfg.market_maker_mind)
@@ -1386,6 +1401,28 @@ class PortfolioManager:
             closed_via_stop=closed_via_stop,
             closed_via_neither=not (closed_via_target or closed_via_stop),
         ))
+        # Feed the live calibrator (walk-forward + safety-gated). We use
+        # the hypothesis's stored aggregator components when available.
+        try:
+            component_scores = {
+                "base_score": float(h.expected_edge_multiple
+                                       if h.expected_edge_multiple else
+                                       state.high_water_confidence) / 3.0,
+                "mtf_alignment_score": float(
+                    h.mtf_alignment.get("alignment_score", 0.0)),
+                "projection_factor": 0.5,
+                "fees_clearance_score": min(1.0, max(0.0,
+                    (h.expected_edge_multiple - 1.0) / 1.5 * 0.5 + 0.5)),
+                "portfolio_capacity_score": 0.7,
+            }
+            calib = self.live_calibrator.on_position_closed(
+                component_scores=component_scores,
+                realized_r=float(current_r),
+                bar_index=bar_index,
+            )
+            self._last_calibration = calib.to_dict()
+        except Exception:
+            self._last_calibration = None
         # Forget the per-position counterfactual plan.
         self._counterfactual_plans.pop(pos_id, None)
         # Unregister the adaptive exit engine.
@@ -1518,7 +1555,26 @@ class PortfolioManager:
             "hedge_proposal": (self._last_hedge_proposal.to_dict()
                                 if self._last_hedge_proposal else None),
             "adaptive_exit": self._last_exit_decision,
+            "live_calibration": self._last_calibration,
+            "weight_evolution": self._weight_evolution_summary(),
         }
+
+    def _weight_evolution_summary(self) -> Dict[str, Any]:
+        try:
+            analysis = self.weight_analyzer.analyze(self.weight_memory)
+            return {
+                "calibrator_paused": self.live_calibrator.paused,
+                "n_snapshots": analysis.n_snapshots,
+                "adaptability_index": analysis.adaptability_index,
+                "trend_per_weight": analysis.trend_per_weight,
+                "most_drifting_weight": analysis.most_drifting_weight,
+                "coordinated_drift_score": analysis.coordinated_drift_score,
+                "val_loss_trend": analysis.val_loss_trend,
+                "warnings": analysis.warnings,
+            }
+        except Exception:
+            return {"calibrator_paused": self.live_calibrator.paused,
+                     "n_snapshots": 0}
 
     def reset_daily(self) -> None:
         """Reset daily counters at session start."""
