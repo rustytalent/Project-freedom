@@ -185,8 +185,8 @@ class PortfolioManagerConfig:
         default_factory=PortfolioExitManagerConfig)
     min_warm_bars: int = 80
     # Decision gates
-    min_entry_confidence: float = 0.66
-    min_scalp_confidence: float = 0.72
+    min_entry_confidence: float = 0.55   # founder hot-fix 2026-06-22 LIVE (was 0.66)
+    min_scalp_confidence: float = 0.62   # founder hot-fix 2026-06-22 LIVE (was 0.72)
     min_clean_mark_fraction: float = 0.85
     min_spread_friendliness: float = 0.55
     max_abnormal_slot_fraction: float = 0.40
@@ -688,11 +688,19 @@ class PortfolioManager:
 
         # Continuous conviction (sign + magnitude) — strong signals size
         # up, weak ones size down. Additive: does NOT touch `direction`.
+        # HOT FIX 2026-06-22 LIVE: prefer the horizon-weighted consensus
+        # (drops sub-0.15 short-term noise, weights survivors by horizon).
+        # Falls back to the raw consensus only when nothing passes the
+        # noise floor (so a totally quiet web doesn't read as bearish).
+        _raw_consensus = float(getattr(web_snap, "directional_consensus", 0.0))
+        _hw_consensus = float(getattr(
+            web_snap, "directional_consensus_horizon_weighted", 0.0))
+        _consensus_for_conviction = (
+            _hw_consensus if abs(_hw_consensus) > 1e-6 else _raw_consensus)
         conviction = compute_conviction(
             direction=direction,
             confidence=confidence,
-            web_directional_consensus=float(getattr(
-                web_snap, "directional_consensus", 0.0)),
+            web_directional_consensus=_consensus_for_conviction,
             mtf_alignment_score=float(mtf_alignment["alignment_score"]),
             antithesis_score=antithesis_score,
         )
@@ -1160,15 +1168,39 @@ class PortfolioManager:
     def _resolve_held_premium(self, state: _OpenPositionState,
                                 snapshot: Dict[str, Any],
                                 held_quote: Any) -> Optional[float]:
-        """Prefer the explicit held_quote, fall back to slot_readings."""
+        """Prefer the explicit held_quote, fall back to slot_readings.
+
+        HOT FIX 2026-06-22 LIVE (founder caught this with real money):
+        The slot fallback used to look up by ``contract_level``. That is
+        WRONG when the underlying drifts — ATM shifts, so the level-0
+        slot now belongs to a DIFFERENT strike. The held position's
+        strike is FIXED at h.strike_price; we must look up by STRIKE.
+        Using level produced phantom thousand-rupee profits when the
+        ATM moved away from the held contract.
+        """
         if held_quote is not None and hasattr(held_quote, "best_price"):
             best = held_quote.best_price
             if best is not None and math.isfinite(best) and best > 0:
                 return float(best)
-        # Slot fallback.
         h = state.hypothesis
-        _, mark, _, _, _ = self._lookup_target_slot(snapshot, h.contract_side, h.contract_level)
-        return mark
+        target_side = h.contract_side
+        target_strike = float(h.strike_price)
+        if target_strike <= 0:
+            # No strike recorded — fall back to the legacy level-based
+            # lookup, but this path should never fire for a real position.
+            _, mark, _, _, _ = self._lookup_target_slot(
+                snapshot, target_side, h.contract_level)
+            return mark
+        for raw in snapshot.get("slot_readings") or []:
+            slot = _map(raw)
+            if str(slot.get("option_type") or "") != target_side:
+                continue
+            if abs(_num(slot.get("strike"), 0.0) - target_strike) > 0.01:
+                continue
+            mark = _num(slot.get("mark_price"), math.nan)
+            if math.isfinite(mark) and mark > 0:
+                return float(mark)
+        return None
 
     def _exit_check(self, *, state: _OpenPositionState,
                      snapshot: Dict[str, Any], held_read: Any,
@@ -1262,8 +1294,15 @@ class PortfolioManager:
         if h.direction < 0 and "BULL" in thesis_state:
             soft.append(f"thesis flipped against short: {thesis_state}")
 
-        # Confidence giveback
-        if (state.high_water_confidence - confidence >= cfg.confidence_giveback
+        # Confidence giveback — HOT FIX 2026-06-22 LIVE: founder observed
+        # this exit alone (no thesis flip) was killing trades within 1-3
+        # bars of entry because confidence is noisy. Now requires that
+        # the thesis composite ALSO no longer supports the held side.
+        thesis_supports_held = (
+            (h.direction > 0 and "BULL" in thesis_state)
+            or (h.direction < 0 and "BEAR" in thesis_state))
+        if (not thesis_supports_held
+                and state.high_water_confidence - confidence >= cfg.confidence_giveback
                 and confidence < cfg.min_entry_confidence):
             soft.append(
                 f"confidence giveback {state.high_water_confidence - confidence:.2f}"

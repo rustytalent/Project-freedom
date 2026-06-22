@@ -61,7 +61,7 @@ DEFAULT_SLIPPAGE_PER_LEG: float = 0.50           # rupees per share (lot_size sh
 
 # Edge margin — minimum expected profit AFTER fees + slippage to bother
 # entering at all. Without this we trade the 50/50s and lose to fees.
-DEFAULT_MIN_EDGE_MULTIPLE: float = 1.5           # require E[profit] ≥ 1.5x cost
+DEFAULT_MIN_EDGE_MULTIPLE: float = 1.8           # founder hot-fix 2026-06-22 LIVE (was 1.5) — fees were eating winners
 
 
 # ─────────────────────────────────────────────────────────────────

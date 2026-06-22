@@ -160,6 +160,10 @@ class WebSnapshot:
     dominant_strategy_class: str
     currently_dominant_pathway: Optional[Dict[str, Any]]
     family_mass: Dict[str, float]
+    # HOT FIX 2026-06-22 LIVE — horizon-weighted consensus (the noise
+    # filter the founder discovered live). Default value preserves the
+    # legacy API for any constructor that doesn't supply it.
+    directional_consensus_horizon_weighted: float = 0.0
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -168,6 +172,8 @@ class WebSnapshot:
             "n_active": self.n_active,
             "top_scenarios": list(self.top_scenarios),
             "directional_consensus": round(self.directional_consensus, 4),
+            "directional_consensus_horizon_weighted": round(
+                self.directional_consensus_horizon_weighted, 4),
             "tail_mass": round(self.tail_mass, 4),
             "chop_mass": round(self.chop_mass, 4),
             "manipulation_mass": round(self.manipulation_mass, 4),
@@ -843,6 +849,40 @@ class ScenarioWeb:
             score += sc.implied_direction * sc.current_probability
         return max(-1.0, min(1.0, score))
 
+    def horizon_weighted_consensus(self, *,
+                                       min_probability: float = 0.15,
+                                       horizon_weight_exp: float = 0.5,
+                                       ) -> float:
+        """HOT FIX 2026-06-22 LIVE — temporal context for consensus.
+
+        Founder caught it live: short-term scenarios (~1-3 bars) at low
+        probability were CONTAMINATING the long-term signal. His
+        observation: probs > 0.40 are real 3-10 min reads; probs < 0.10
+        are short-term noise.
+
+        This consensus:
+          * drops scenarios below ``min_probability`` (default 0.15)
+            — kills the short-term noise floor entirely
+          * weights survivors by ``horizon_bars ** exp`` so a 30-bar
+            scenario gets ~3x the weight of a 3-bar one
+          * normalizes by total weight so the result is a true [-1,+1]
+        """
+        score = 0.0
+        total_weight = 0.0
+        for sc in self.active():
+            if sc.family != FAMILY_DIRECTIONAL or sc.implied_direction == 0:
+                continue
+            if sc.current_probability < min_probability:
+                continue
+            h = max(1, int(sc.implied_horizon_bars))
+            h_weight = h ** horizon_weight_exp
+            weight = sc.current_probability * h_weight
+            score += sc.implied_direction * weight
+            total_weight += weight
+        if total_weight < 1e-6:
+            return 0.0
+        return max(-1.0, min(1.0, score / total_weight))
+
     def tail_mass(self) -> float:
         return sum(sc.current_probability for sc in self.active()
                    if sc.family == FAMILY_FAT_TAIL)
@@ -887,6 +927,7 @@ class ScenarioWeb:
             n_active=len(active),
             top_scenarios=[sc.to_dict() for sc in top],
             directional_consensus=self.directional_consensus(),
+            directional_consensus_horizon_weighted=self.horizon_weighted_consensus(),
             tail_mass=tail,
             chop_mass=chop,
             manipulation_mass=self.manipulation_mass(),
