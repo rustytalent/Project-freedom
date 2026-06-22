@@ -533,13 +533,28 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
     <div class="panel">
       <h2>PROBABILITY WEB</h2>
       <div class="kv">
-        <div class="k">Consensus</div><div class="v" id="web_consensus">—</div>
+        <div class="k">Consensus (raw)</div><div class="v" id="web_consensus">—</div>
+        <div class="k">Consensus (horizon-wt)</div><div class="v" id="web_consensus_hw">—</div>
         <div class="k">Tail mass</div><div class="v" id="web_tail">—</div>
         <div class="k">Chop mass</div><div class="v" id="web_chop">—</div>
         <div class="k">Dominant strategy</div><div class="v" id="web_dom_strat">—</div>
       </div>
       <h2 style="margin-top:14px;">Top scenarios</h2>
       <div id="web_scenarios">—</div>
+    </div>
+    <div class="panel full">
+      <h2>PULSING WEB (all active scenarios)</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Bubble size = probability × √horizon.
+        Color: <span class="green">bull</span> /
+        <span class="red">bear</span> /
+        <span style="color:#9ca8c0;">chop</span> /
+        <span style="color:#c78aff;">tail-risk</span> /
+        <span style="color:#fff19a;">manipulation</span>.
+        Trail shows last 12 probability samples; growing = brightening.
+      </div>
+      <svg id="web_svg" width="100%" height="380" viewBox="0 0 1000 380"
+           style="background: radial-gradient(circle at 50% 50%, #0c1320 0%, #050810 100%); border-radius: 6px;"></svg>
     </div>
     <div class="panel">
       <h2>MM MIND</h2>
@@ -645,6 +660,106 @@ function fmt_bar(v, low, high) {
   var pct = (v - low) / (high - low) * 100;
   return `<span class="bar"><span class="bar-fill" style="width:${pct.toFixed(0)}%"></span></span>`;
 }
+// ── Pulsing probability web (founder ask 2026-06-22) ─────────────
+// SVG bubble chart: every active scenario is a node. Size = probability
+// × √horizon. Color = family + direction. Glow trail = last few
+// probability samples (rising = brightens; falling = dims).
+function colorForScenario(sc) {
+  var fam = sc.family || "";
+  if (fam === "directional") {
+    return sc.direction > 0 ? "#7dff8e" : (sc.direction < 0 ? "#ff7d8e" : "#cad3df");
+  }
+  if (fam === "chop") return "#9ca8c0";
+  if (fam === "fat_tail") return "#c78aff";
+  if (fam === "manipulation") return "#fff19a";
+  if (fam === "neutral") return "#5dffd0";
+  return "#cad3df";
+}
+function render_pulsing_web(scenarios) {
+  var svg = document.getElementById("web_svg");
+  if (!svg) return;
+  // Clear existing children.
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!scenarios || scenarios.length === 0) {
+    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", 500); t.setAttribute("y", 190);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("fill", "#5a6172");
+    t.textContent = "no active scenarios";
+    svg.appendChild(t);
+    return;
+  }
+  // Spiral layout: place scenarios on a logarithmic spiral, sorted by
+  // probability × horizon (the strongest sit centre, weakest on the rim).
+  // Avoids overlap better than a grid for varying counts.
+  var sorted = scenarios.slice().sort(function(a, b) {
+    var sa = (a.probability||0) * Math.sqrt(a.horizon_bars||1);
+    var sb = (b.probability||0) * Math.sqrt(b.horizon_bars||1);
+    return sb - sa;
+  });
+  var cx = 500, cy = 190;
+  var W = 1000, H = 380;
+  for (var i = 0; i < sorted.length; i++) {
+    var s = sorted[i];
+    var prob = s.probability || 0;
+    var h = s.horizon_bars || 1;
+    var weight = prob * Math.sqrt(h);
+    var radius = Math.max(8, Math.min(60, 6 + 60 * weight));
+    // Spiral coords.
+    var angle = i * 0.72;
+    var r = 30 + 20 * Math.sqrt(i + 1);
+    var x = cx + r * Math.cos(angle);
+    var y = cy + r * Math.sin(angle) * 0.55;     // squash vertically
+    x = Math.max(radius + 4, Math.min(W - radius - 4, x));
+    y = Math.max(radius + 4, Math.min(H - radius - 4, y));
+    var color = colorForScenario(s);
+    // ── Glow trail from recent_probabilities ─────────────────
+    var rp = s.recent_probabilities || [];
+    var rising = rp.length >= 2 && rp[rp.length-1] > rp[0];
+    var glow_factor = 1.0;
+    if (rp.length >= 2) {
+      var first = rp[0], last = rp[rp.length-1];
+      var delta = last - first;
+      glow_factor = 1.0 + 6 * Math.abs(delta);     // 1..3 typical
+    }
+    // Outer glow circle (only if probability is meaningful).
+    if (prob >= 0.1) {
+      var glow = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      glow.setAttribute("cx", x); glow.setAttribute("cy", y);
+      glow.setAttribute("r", radius * 1.6 * glow_factor);
+      glow.setAttribute("fill", color);
+      glow.setAttribute("opacity", (0.10 + 0.20 * prob).toFixed(3));
+      glow.setAttribute("filter", "blur(4px)");
+      svg.appendChild(glow);
+    }
+    // Main bubble.
+    var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", x); c.setAttribute("cy", y);
+    c.setAttribute("r", radius);
+    c.setAttribute("fill", color);
+    c.setAttribute("opacity", (0.30 + 0.55 * prob).toFixed(3));
+    c.setAttribute("stroke", rising ? "#fff" : color);
+    c.setAttribute("stroke-width", rising ? "2" : "1");
+    svg.appendChild(c);
+    // Label inside if bubble is big enough.
+    if (radius >= 14) {
+      var lbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      lbl.setAttribute("x", x); lbl.setAttribute("y", y - 2);
+      lbl.setAttribute("text-anchor", "middle");
+      lbl.setAttribute("fill", "#0a0e14");
+      lbl.setAttribute("font-size", radius >= 24 ? "11" : "9");
+      lbl.setAttribute("font-weight", "bold");
+      lbl.textContent = (s.name || "").slice(0, 14);
+      svg.appendChild(lbl);
+      var pl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      pl.setAttribute("x", x); pl.setAttribute("y", y + 10);
+      pl.setAttribute("text-anchor", "middle");
+      pl.setAttribute("fill", "#0a0e14");
+      pl.setAttribute("font-size", "10");
+      pl.textContent = prob.toFixed(2) + " · " + h + "b";
+      svg.appendChild(pl);
+    }
+  }
+}
 function render(snap) {
   document.getElementById("ts").textContent = snap.ts || "—";
   document.getElementById("status").innerHTML = '<span class="status-dot"></span>live';
@@ -671,6 +786,9 @@ function render(snap) {
   var w = snap.web_panel || {};
   document.getElementById("web_consensus").innerHTML =
     fmt_bar(w.directional_consensus||0, -1, 1) + " " + (w.directional_consensus||0).toFixed(2);
+  document.getElementById("web_consensus_hw").innerHTML =
+    fmt_bar(w.directional_consensus_horizon_weighted||0, -1, 1)
+    + " " + (w.directional_consensus_horizon_weighted||0).toFixed(2);
   document.getElementById("web_tail").innerHTML =
     fmt_bar(w.tail_mass||0, 0, 1) + " " + (w.tail_mass||0).toFixed(2);
   document.getElementById("web_chop").innerHTML =
@@ -686,6 +804,7 @@ function render(snap) {
        <span class="green" style="float:right;">${(s.probability||0).toFixed(3)}</span>
      </div>`).join("");
   document.getElementById("web_scenarios").innerHTML = top || "<em class='muted'>none active</em>";
+  render_pulsing_web(w.all_scenarios || []);
   // MM
   var mm = snap.mm_panel || {};
   document.getElementById("mm_intent").textContent = mm.dominant_intent || "—";

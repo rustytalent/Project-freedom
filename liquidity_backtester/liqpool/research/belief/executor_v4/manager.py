@@ -184,6 +184,17 @@ class PortfolioManagerConfig:
     portfolio_exit: PortfolioExitManagerConfig = field(
         default_factory=PortfolioExitManagerConfig)
     min_warm_bars: int = 80
+    # Dead-market guard (founder hot-fix 2026-06-22 LIVE): when the
+    # scenario web reads strongly chop/manipulation-dominant, REFUSE
+    # directional entries. Multi-leg neutral strategies (iron condor,
+    # jade lizard, butterfly) are in the library but not yet routed
+    # through the broker (that's a separate change). Until they are,
+    # taking no trade in chop is the right move.
+    dead_market_refuse_directional: bool = True
+    dead_market_chop_threshold: float = 0.50
+    dead_market_manipulation_threshold: float = 0.40
+    dead_market_low_consensus_threshold: float = 0.10
+    dead_market_tail_threshold: float = 0.30
     # Decision gates
     min_entry_confidence: float = 0.55   # founder hot-fix 2026-06-22 LIVE (was 0.66)
     min_scalp_confidence: float = 0.62   # founder hot-fix 2026-06-22 LIVE (was 0.72)
@@ -611,6 +622,39 @@ class PortfolioManager:
             refuse.append(
                 f"no_trade_score {thesis.get('no_trade_score'):.1f} too high"
             )
+
+        # Gate A2 (HOT FIX 2026-06-22): dead-market guard. When the
+        # scenario web reads chop/manipulation-dominant, taking a
+        # directional trade is the textbook way to bleed fees. Multi-leg
+        # neutral strategies (iron condor, jade lizard, butterfly) are
+        # in the library but not yet routed; until they are, refusing
+        # is the right move in this regime.
+        if cfg.dead_market_refuse_directional:
+            chop_mass = float(getattr(web_snap, "chop_mass", 0.0))
+            manip_mass = float(getattr(web_snap, "manipulation_mass", 0.0))
+            tail_mass = float(getattr(web_snap, "tail_mass", 0.0))
+            hw_consensus = float(getattr(
+                web_snap, "directional_consensus_horizon_weighted", 0.0))
+            chop_dominant = chop_mass >= cfg.dead_market_chop_threshold
+            manip_dominant = manip_mass >= cfg.dead_market_manipulation_threshold
+            tail_with_no_signal = (
+                tail_mass >= cfg.dead_market_tail_threshold
+                and abs(hw_consensus) < cfg.dead_market_low_consensus_threshold)
+            if chop_dominant:
+                refuse.append(
+                    f"dead market: chop_mass {chop_mass:.2f} ≥ "
+                    f"{cfg.dead_market_chop_threshold:.2f} — refusing directional "
+                    "(neutral structures not yet routed)")
+            elif manip_dominant:
+                refuse.append(
+                    f"dead market: manipulation_mass {manip_mass:.2f} ≥ "
+                    f"{cfg.dead_market_manipulation_threshold:.2f} — refusing "
+                    "directional (MM is hunting; wait for resolution)")
+            elif tail_with_no_signal:
+                refuse.append(
+                    f"dead market: tail_mass {tail_mass:.2f} elevated AND "
+                    f"horizon-weighted consensus {hw_consensus:+.2f} near zero — "
+                    "no edge to direct")
 
         # Gate B: confidence.
         profile = (PROFILE_SCALP if action in SCALP_ENTRY_ACTIONS

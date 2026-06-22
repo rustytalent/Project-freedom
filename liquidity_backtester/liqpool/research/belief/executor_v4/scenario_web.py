@@ -107,6 +107,10 @@ class Scenario:
     retired: bool = False
     retire_reason: str = ""
     explanation: str = ""
+    # Cockpit "pulsing web" visualization (founder ask 2026-06-22):
+    # last N probability samples so the UI can render a glow trail
+    # showing direction + rate of change.
+    recent_probabilities: List[float] = field(default_factory=list)
 
     def add_confirm(self, evidence: str, bar: int, cap: int) -> None:
         self.confirming_observations.append(evidence)
@@ -135,6 +139,8 @@ class Scenario:
             "base_prior": round(self.base_prior, 3),
             "current_probability": round(self.current_probability, 4),
             "decay_rate": round(self.decay_rate, 4),
+            "recent_probabilities": [round(p, 4)
+                                       for p in self.recent_probabilities[-12:]],
             "confirming_observations": list(self.confirming_observations),
             "contradicting_observations": list(self.contradicting_observations),
             "killer_signatures": list(self.killer_signatures),
@@ -164,6 +170,9 @@ class WebSnapshot:
     # filter the founder discovered live). Default value preserves the
     # legacy API for any constructor that doesn't supply it.
     directional_consensus_horizon_weighted: float = 0.0
+    # Founder ask 2026-06-22: ALL active scenarios for the pulsing-web
+    # visualization (not just the top 5 list).
+    all_scenarios: List[Dict[str, Any]] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -181,6 +190,7 @@ class WebSnapshot:
             "currently_dominant_pathway": (dict(self.currently_dominant_pathway)
                                             if self.currently_dominant_pathway else None),
             "family_mass": dict(self.family_mass),
+            "all_scenarios": list(self.all_scenarios),
             "notes": list(self.notes),
         }
 
@@ -707,6 +717,10 @@ class ScenarioWeb:
                 * (cfg.shrink_per_contradict ** sc.n_contradicted_this_tick)
             sc.current_probability = max(0.0,
                                           min(0.95, sc.current_probability * mult))
+            # Probability-history ring for the cockpit's pulsing-web view.
+            sc.recent_probabilities.append(sc.current_probability)
+            if len(sc.recent_probabilities) > 12:
+                sc.recent_probabilities = sc.recent_probabilities[-12:]
 
     # ── retire & normalize ──────────────────────────────────────────────
 
@@ -934,6 +948,7 @@ class ScenarioWeb:
             dominant_strategy_class=self.dominant_strategy_class(),
             currently_dominant_pathway=dominant.to_dict() if dominant else None,
             family_mass=fam,
+            all_scenarios=[sc.to_dict() for sc in active],
             notes=notes,
         )
 

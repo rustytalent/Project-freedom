@@ -128,6 +128,8 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
     web_panel = {
         "n_active": web.get("n_active", 0),
         "directional_consensus": web.get("directional_consensus", 0.0),
+        "directional_consensus_horizon_weighted": web.get(
+            "directional_consensus_horizon_weighted", 0.0),
         "tail_mass": web.get("tail_mass", 0.0),
         "chop_mass": web.get("chop_mass", 0.0),
         "manipulation_mass": web.get("manipulation_mass", 0.0),
@@ -141,6 +143,18 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
                 "horizon_bars": sc.get("implied_horizon_bars"),
             }
             for sc in (web.get("top_scenarios") or [])[:5]
+        ],
+        # Founder ask 2026-06-22: ALL scenarios for the pulsing-web view.
+        "all_scenarios": [
+            {
+                "name": sc.get("name"),
+                "family": sc.get("family"),
+                "probability": sc.get("current_probability"),
+                "direction": sc.get("implied_direction"),
+                "horizon_bars": sc.get("implied_horizon_bars"),
+                "recent_probabilities": sc.get("recent_probabilities") or [],
+            }
+            for sc in (web.get("all_scenarios") or [])
         ],
         "notes": web.get("notes") or [],
     }
