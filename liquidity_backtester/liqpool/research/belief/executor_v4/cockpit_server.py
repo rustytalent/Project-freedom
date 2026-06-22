@@ -581,8 +581,22 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <div id="risk_kills" style="margin-top:8px;"></div>
     </div>
     <div class="panel full">
+      <h2>LIVE CAPITAL (account)</h2>
+      <div class="kv">
+        <div class="k">Starting / Net</div><div class="v" id="cap_starting">—</div>
+        <div class="k">Available cash</div><div class="v" id="cap_avail">—</div>
+        <div class="k">Used margin</div><div class="v" id="cap_used">—</div>
+        <div class="k">Current total</div><div class="v" id="cap_total">—</div>
+        <div class="k">Daily P&amp;L (manager)</div><div class="v" id="cap_daily">—</div>
+      </div>
+    </div>
+    <div class="panel full">
       <h2>OPEN POSITIONS</h2>
       <div id="positions">—</div>
+    </div>
+    <div class="panel full">
+      <h2>LIVE TRADES (last 15)</h2>
+      <div id="trades">—</div>
     </div>
     <div class="panel full">
       <h2>ACTIVE PATTERNS</h2>
@@ -701,6 +715,36 @@ function render(snap) {
        <span class="muted"> intent: ${x.implied_mm_intent}</span>
      </div>`).join("");
   document.getElementById("patterns").innerHTML = pHtml || "<em class='muted'>no patterns</em>";
+  // ── Live capital panel ─────────────────────────────────────
+  var cap = snap.capital_panel || {};
+  document.getElementById("cap_starting").textContent = "₹" + (cap.starting_capital_rupees || 0).toLocaleString("en-IN");
+  document.getElementById("cap_avail").textContent = "₹" + (cap.available_rupees || 0).toLocaleString("en-IN");
+  document.getElementById("cap_used").textContent = "₹" + (cap.used_margin_rupees || 0).toLocaleString("en-IN");
+  document.getElementById("cap_total").textContent = "₹" + (cap.current_total_rupees || 0).toLocaleString("en-IN");
+  document.getElementById("cap_daily").innerHTML = fmt_pnl(cap.daily_pnl_rupees);
+  // ── Live trades tape ───────────────────────────────────────
+  var tradesObj = snap.trades_panel || {};
+  var tradesHtml = (tradesObj.trades || []).map(t => {
+    var dir = t.direction > 0 ? "long" : (t.direction < 0 ? "short" : "·");
+    var kindLabel = t.kind === "OPEN" ? "→ OPEN" : "← CLOSE";
+    var kindColor = t.kind === "OPEN" ? "green" : "yellow";
+    if (t.kind === "CLOSE") {
+      return `<div class="position-row">
+        <strong class="${kindColor}">${kindLabel}</strong>
+        ${t.contract_label} ${dir} ${t.size_lots}L
+        @ ₹${(t.exit_premium||0).toFixed(2)}
+        <span class="muted">[${(t.realized_r||0).toFixed(2)}R | ${fmt_pnl(t.realized_rupees)}]</span>
+        <span class="muted" style="float:right">${t.exit_reason || ""}</span>
+      </div>`;
+    }
+    return `<div class="position-row">
+      <strong class="${kindColor}">${kindLabel}</strong>
+      ${t.contract_label} ${dir} ${t.size_lots}L
+      @ ₹${(t.entry_premium||0).toFixed(2)}
+      <span class="muted" style="float:right">strategy: ${t.strategy || ""}</span>
+    </div>`;
+  }).join("");
+  document.getElementById("trades").innerHTML = tradesHtml || "<em class='muted'>no recent trades</em>";
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

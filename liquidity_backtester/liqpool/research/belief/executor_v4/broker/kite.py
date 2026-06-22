@@ -197,6 +197,33 @@ class KiteBrokerAdapter(BrokerAdapter):
             ))
         return out
 
+    def get_capital(self) -> Dict[str, float]:
+        """Fetch real margins from the Kite account when available;
+        fall back to zeros otherwise (paper broker shape preserved)."""
+        try:
+            margins = (self.kite_account.margins()
+                        if hasattr(self.kite_account, "margins") else None)
+        except Exception:
+            margins = None
+        if not margins:
+            return super().get_capital()
+        try:
+            # Kite margins() typically returns
+            # {"equity": {"net": ..., "available": {...}, "utilised": {...}}, "commodity": {...}}.
+            eq = (margins.get("equity")
+                   if isinstance(margins, dict) else None) or {}
+            avail = float((eq.get("available") or {}).get("cash") or 0.0)
+            used = float((eq.get("utilised") or {}).get("debits") or 0.0)
+            net = float(eq.get("net") or (avail + used))
+            return {
+                "starting_capital_rupees": round(net, 2),
+                "available_rupees": round(avail, 2),
+                "used_margin_rupees": round(used, 2),
+                "current_total_rupees": round(net, 2),
+            }
+        except Exception:
+            return super().get_capital()
+
     def healthcheck(self) -> Dict[str, Any]:
         base = super().healthcheck()
         base.update({

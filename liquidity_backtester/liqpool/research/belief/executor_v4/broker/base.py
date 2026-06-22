@@ -120,6 +120,20 @@ class BrokerAdapter:
     def get_positions(self) -> List[BrokerPosition]:
         return []
 
+    def get_capital(self) -> Dict[str, float]:
+        """Return account capital: starting / available / used / current.
+
+        Default implementation returns zeros — subclasses (paper + Kite)
+        override with the real numbers. Always returns a dict so the UI
+        and tests can render it without conditional shape checks.
+        """
+        return {
+            "starting_capital_rupees": 0.0,
+            "available_rupees": 0.0,
+            "used_margin_rupees": 0.0,
+            "current_total_rupees": 0.0,
+        }
+
     # ── Optional helpers ─────────────────────────────────────────────
 
     def kill_switch(self, reason: str = "operator triggered") -> None:

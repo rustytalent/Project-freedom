@@ -38,8 +38,11 @@ class PaperBrokerAdapter(BrokerAdapter):
     def __init__(self, *,
                   mark_lookup=None,
                   default_slippage_bps: float = 0.0,
-                  reject_when_killed: bool = True) -> None:
+                  reject_when_killed: bool = True,
+                  starting_capital_rupees: float = 50_000.0) -> None:
         super().__init__(dry_run=True)
+        self.starting_capital_rupees = float(starting_capital_rupees)
+        self.realized_pnl_rupees = 0.0
         self.mark_lookup = mark_lookup    # callable: tradingsymbol -> price
         self.default_slippage_bps = default_slippage_bps
         self.reject_when_killed = reject_when_killed
@@ -150,6 +153,34 @@ class PaperBrokerAdapter(BrokerAdapter):
                 unrealized_pnl=unrealized,
             ))
         return out
+
+    def get_capital(self) -> Dict[str, float]:
+        # Used margin = sum of |qty| × avg over open positions.
+        used = 0.0
+        for sym, qty in self._positions.items():
+            avg = self._avg_price.get(sym, 0.0)
+            used += abs(qty) * max(avg, 0.0)
+        available = max(0.0, self.starting_capital_rupees
+                         + self.realized_pnl_rupees - used)
+        current_total = (self.starting_capital_rupees
+                          + self.realized_pnl_rupees)
+        return {
+            "starting_capital_rupees": round(self.starting_capital_rupees, 2),
+            "available_rupees": round(available, 2),
+            "used_margin_rupees": round(used, 2),
+            "current_total_rupees": round(current_total, 2),
+        }
+
+    def credit_realized_pnl(self, amount: float) -> None:
+        """Hook used by V4Runner.on_tick to feed manager.daily_pnl deltas
+        back into the paper broker so its capital projection reflects
+        the actual ledger outcomes."""
+        if amount is None:
+            return
+        try:
+            self.realized_pnl_rupees += float(amount)
+        except (TypeError, ValueError):
+            pass
 
     def healthcheck(self) -> Dict[str, Any]:
         base = super().healthcheck()

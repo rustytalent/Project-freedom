@@ -135,6 +135,15 @@ class BeliefEngineConfig:
     thesis_cfg: ThesisMemoryConfig = field(default_factory=ThesisMemoryConfig)
     winding_cfg: WindingConfig = field(default_factory=WindingConfig)
     decision_cfg: DecisionConfig = field(default_factory=DecisionConfig)
+    # Advanced runtime (Sun 2026-06-22 audit fix). When True, the engine
+    # feeds tape_speed (realized vol ratio) into ThesisMemory.update and
+    # time_of_day_scale (session-phase factor) into slot_residual_frame,
+    # so the opt-in upgrades in those modules actually fire at runtime.
+    # Off by default = legacy bit-identical behavior.
+    feed_tape_speed: bool = False
+    feed_time_of_day_scale: bool = False
+    realized_vol_window_bars: int = 30
+    realized_vol_baseline_window_bars: int = 120
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,10 @@ class BeliefEngine:
     _bars_seen: int = field(default=0, init=False)
     _last_friendliness: float = field(default=1.0, init=False)
     _last_spread_state: str = field(default=SPREAD_CLEAN, init=False)
+    # Bookkeeping for the advanced runtime feeders.
+    _spot_returns: Deque[float] = field(default_factory=deque, init=False)
+    _last_tape_speed: float = field(default=1.0, init=False)
+    _last_tod_scale: float = field(default=1.0, init=False)
 
     def __post_init__(self) -> None:
         self._mark_tracker = MarkPriceTracker(cfg=self.cfg.mark_cfg)
@@ -245,6 +258,63 @@ class BeliefEngine:
     def is_warm(self) -> bool:
         return self._bars_seen >= self.cfg.warmup_bars
 
+    # ── Runtime feeders for the advanced (opt-in) Phase-4/6 layers ──
+
+    def _compute_tape_speed(self) -> float:
+        """Realized-vol ratio (recent / baseline). >1 = fast tape, <1 = slow.
+
+        Falls back to 1.0 until we have enough samples to be meaningful."""
+        import statistics
+        cfg = self.cfg
+        rets = list(self._spot_returns)
+        if len(rets) < cfg.realized_vol_window_bars + 4:
+            return 1.0
+        recent = rets[-cfg.realized_vol_window_bars:]
+        baseline_n = min(len(rets), cfg.realized_vol_baseline_window_bars)
+        baseline = rets[-baseline_n:]
+        try:
+            sd_recent = statistics.pstdev(recent)
+            sd_base = statistics.pstdev(baseline)
+        except Exception:
+            return 1.0
+        if sd_base <= 1e-9:
+            return 1.0
+        ratio = sd_recent / sd_base
+        # Bound aggressively — the calibrator inside ThesisMemoryConfig
+        # already clips the resulting decay, but a tame input is safer.
+        return max(0.25, min(4.0, ratio))
+
+    def _compute_time_of_day_scale(self, ts: Any) -> float:
+        """Per-bar band scale factor based on IST session phase.
+
+        * 09:15-09:30 morning open: 1.30 (wider)
+        * 11:30-13:30 lunch chop:   1.20 (wider)
+        * 14:45-15:30 closing run:  1.25 (wider)
+        * Other:                    1.00 (normal)
+        """
+        try:
+            from datetime import datetime, timezone, timedelta
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            elif isinstance(ts, datetime):
+                dt = ts
+            else:
+                return 1.0
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now = dt.astimezone(ist) if dt.tzinfo else dt.replace(tzinfo=ist)
+            minute = now.hour * 60 + now.minute
+            if minute < 9 * 60 + 15:
+                return 1.0
+            if minute < 9 * 60 + 30:
+                return 1.30
+            if 11 * 60 + 30 <= minute < 13 * 60 + 30:
+                return 1.20
+            if 14 * 60 + 45 <= minute <= 15 * 60 + 30:
+                return 1.25
+            return 1.0
+        except Exception:
+            return 1.0
+
     def _rebuild_slots(self, spot: float, quote_keys: List[Any]) -> None:
         """Build (or rebuild on ATM drift) the moneyness slots for every
         contract key in the current tick."""
@@ -267,9 +337,21 @@ class BeliefEngine:
         """Run one tick through the whole stack and return the snapshot."""
         cfg = self.cfg
         self._bars_seen += 1
+        # Track spot log-returns for the realized-vol-based tape-speed signal.
+        prev_spot = self._spot_hist[-1] if self._spot_hist else None
         self._spot_hist.append(float(spot))
         while len(self._spot_hist) > _HISTORY_BARS:
             self._spot_hist.popleft()
+        if prev_spot is not None and prev_spot > 0:
+            import math
+            try:
+                self._spot_returns.append(math.log(float(spot) / prev_spot))
+            except Exception:
+                pass
+            cap = max(cfg.realized_vol_baseline_window_bars,
+                       cfg.realized_vol_window_bars) + 8
+            while len(self._spot_returns) > cap:
+                self._spot_returns.popleft()
 
         # 1. Phase 2 — mark price per contract; track clean-mark fraction.
         clean_count = 0
@@ -328,7 +410,18 @@ class BeliefEngine:
                 spread_state_counts[SPREAD_CLEAN] = spread_state_counts.get(SPREAD_CLEAN, 0) + 1
                 continue
             try:
-                resid = slot_residual_frame(df, slot, cfg.fair_cfg, cfg.resid_cfg)
+                tod_series = None
+                if (cfg.feed_time_of_day_scale
+                        and cfg.resid_cfg.enable_time_of_day_scaling):
+                    # df.index carries the per-bar ts; compute the scale series.
+                    import pandas as _pd
+                    scale_vals = [self._compute_time_of_day_scale(ix)
+                                  for ix in df.index]
+                    tod_series = _pd.Series(scale_vals, index=df.index)
+                resid = slot_residual_frame(
+                    df, slot, cfg.fair_cfg, cfg.resid_cfg,
+                    time_of_day_scale=tod_series,
+                )
                 last_resid = resid.iloc[-1]
                 spread = spread_friendliness_frame(df, cfg.spread_cfg)
                 last_sp = spread.iloc[-1]
@@ -368,9 +461,14 @@ class BeliefEngine:
                                 cfg=cfg.iv_cfg)
 
         # 6. Phase 6 — thesis memory.
+        tape_speed_arg = None
+        if cfg.feed_tape_speed and cfg.thesis_cfg.enable_adaptive_decay:
+            tape_speed_arg = self._compute_tape_speed()
+            self._last_tape_speed = tape_speed_arg
         thesis = self._thesis.update(iv_state=iv,
                                       hunt_verdict=hunt_verdict,
-                                      trap_verdict=trap_verdict)
+                                      trap_verdict=trap_verdict,
+                                      tape_speed=tape_speed_arg)
 
         # 7. Phase 7 — winding + state machines.
         winding = self._winding.observe(

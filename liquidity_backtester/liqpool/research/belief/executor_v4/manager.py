@@ -307,6 +307,10 @@ class PortfolioManager:
             calibrator_cfg=LiveCalibratorConfig(enabled=True),
         )
         self._last_calibration: Optional[Dict[str, Any]] = None
+        # Recent-trades tape (last N opens + closes, newest first) — feeds
+        # the cockpit's Live Trades panel.
+        from collections import deque as _deque
+        self._recent_trades: _deque = _deque(maxlen=30)
         # Sprint 3 layers
         self.manipulation_board = ManipulationBoard(self.cfg.manipulation_board)
         self.mm_mind = MarketMakerMind(self.cfg.market_maker_mind)
@@ -858,6 +862,19 @@ class PortfolioManager:
             pass
         self.cooldown_until_bar = bar_index + cfg.cooldown_bars_after_entry
 
+        # Record on the recent-trades tape (for the UI's Live Trades panel).
+        import time as _time
+        self._recent_trades.appendleft({
+            "kind": "OPEN", "ts": _time.time(),
+            "bar_index": bar_index,
+            "position_id": hypothesis.position_id,
+            "contract_label": hypothesis.contract_label,
+            "direction": hypothesis.direction,
+            "size_lots": hypothesis.size_lots,
+            "entry_premium": hypothesis.entry_premium,
+            "strategy": hypothesis.trigger_action,
+        })
+
         return {
             "intent": (INTENT_OPEN_LONG if direction > 0 and profile == PROFILE_INTRADAY
                         else INTENT_OPEN_SHORT if direction < 0 and profile == PROFILE_INTRADAY
@@ -1372,6 +1389,20 @@ class PortfolioManager:
             hypothesis_vs_reality_score=round(hypothesis_vs_reality, 3),
         )
         self.ledger_store.close(pos_id, outcome)
+        # Record on the recent-trades tape (newest first; deque enforces cap).
+        import time as _time
+        self._recent_trades.appendleft({
+            "kind": "CLOSE", "ts": _time.time(),
+            "bar_index": bar_index,
+            "position_id": pos_id,
+            "contract_label": h.contract_label,
+            "direction": h.direction,
+            "size_lots": h.size_lots,
+            "exit_premium": exit_premium,
+            "realized_r": current_r,
+            "realized_rupees": net,
+            "exit_reason": (exit_reasons[0] if exit_reasons else ""),
+        })
         # Feed the projection tape with the realized outcome.
         target = (self.cfg.scalp_target_r if h.profile == PROFILE_SCALP
                   else self.cfg.intraday_target_r)
@@ -1557,6 +1588,7 @@ class PortfolioManager:
             "adaptive_exit": self._last_exit_decision,
             "live_calibration": self._last_calibration,
             "weight_evolution": self._weight_evolution_summary(),
+            "recent_trades": list(self._recent_trades)[:20],
         }
 
     def _weight_evolution_summary(self) -> Dict[str, Any]:

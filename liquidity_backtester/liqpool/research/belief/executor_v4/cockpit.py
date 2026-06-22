@@ -57,6 +57,9 @@ class CockpitSnapshot:
     positions_panel: Dict[str, Any]
     pnl_panel: Dict[str, Any]
     explainer_text: str
+    # Founder-requested live panels (2026-06-22)
+    capital_panel: Dict[str, Any] = field(default_factory=dict)
+    trades_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -235,6 +238,23 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         pnl_panel["worst_trade_rupees"] = ledger_summary.get("worst_trade_rupees")
         pnl_panel["total_realized_rupees"] = ledger_summary.get("total_realized_rupees")
 
+    # Live Capital panel (broker-sourced; founder requested 2026-06-22).
+    capital = intent_dict.get("broker_capital") or {}
+    capital_panel = {
+        "starting_capital_rupees": capital.get("starting_capital_rupees", 0.0),
+        "available_rupees": capital.get("available_rupees", 0.0),
+        "used_margin_rupees": capital.get("used_margin_rupees", 0.0),
+        "current_total_rupees": capital.get("current_total_rupees", 0.0),
+        "daily_pnl_rupees": intent_dict.get("daily_pnl_rupees", 0.0),
+    }
+
+    # Live Trades tape (newest first) — opens + closes from the manager.
+    recent = summary.get("recent_trades") or []
+    trades_panel = {
+        "n_recent": len(recent),
+        "trades": list(recent)[:15],
+    }
+
     explainer_text = explain_tick(intent_dict)
 
     return CockpitSnapshot(
@@ -251,4 +271,6 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         positions_panel=positions_panel,
         pnl_panel=pnl_panel,
         explainer_text=explainer_text,
+        capital_panel=capital_panel,
+        trades_panel=trades_panel,
     )

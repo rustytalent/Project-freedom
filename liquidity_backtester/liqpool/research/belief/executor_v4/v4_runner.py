@@ -201,13 +201,25 @@ class V4Runner:
                     mark = slot.get("mark_price")
                     if mark and math.isfinite(mark) and mark > 0:
                         self.broker.update_mark(sym, float(mark))
+            # Credit realized P&L from each close into the paper broker so
+            # the Live Capital panel reflects actual outcomes.
+            for closed in intent.closed_this_tick:
+                outcome = closed.get("outcome") or {}
+                realized = outcome.get("realized_rupees")
+                if realized is not None:
+                    self.broker.credit_realized_pnl(realized)
 
         # 3. Persistence.
         snap = capture_state(self.manager)
         persisted = self.persistence.write(snap)
 
         # 4. Cockpit.
-        cockpit = build_cockpit_snapshot(intent.to_dict())
+        intent_dict_for_cockpit = intent.to_dict()
+        try:
+            intent_dict_for_cockpit["broker_capital"] = self.broker.get_capital()
+        except Exception:
+            intent_dict_for_cockpit["broker_capital"] = {}
+        cockpit = build_cockpit_snapshot(intent_dict_for_cockpit)
         if self._cockpit_server is not None:
             try:
                 self._cockpit_server.publish(cockpit.to_dict())
