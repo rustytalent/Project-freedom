@@ -161,6 +161,55 @@ def _drive_from_replay(runner, path: str) -> None:
     print(report.to_summary_string())
 
 
+def _drive_kite_live(args: argparse.Namespace) -> None:
+    """Real Kite-driven live loop using KiteV4LiveRunner.
+
+    Pulls NIFTY option quotes via Kite REST, feeds them through the
+    BeliefEngine, then through the v4 brain (NOT v3), and routes any
+    intents to the configured broker (paper unless --confirm-real)."""
+    api_key = args.api_key or os.environ.get("KITE_API_KEY")
+    access_token = args.access_token or os.environ.get("KITE_ACCESS_TOKEN")
+    if not api_key or not access_token:
+        print("FATAL: --kite-live requires --api-key + --access-token "
+               "(or KITE_API_KEY + KITE_ACCESS_TOKEN env vars).",
+               file=sys.stderr)
+        sys.exit(2)
+    confirm_real = args.confirm_real or os.environ.get(
+        "V4_CONFIRM_REAL") == "1"
+
+    from liqpool.research.belief.executor_v4.v4_live_bridge import (
+        KiteV4BridgeConfig, KiteV4LiveRunner,
+    )
+    from liqpool.research.belief.live_runner import BeliefLiveConfig
+
+    belief_cfg = BeliefLiveConfig(
+        underlying=args.underlying,
+        output_jsonl=Path(args.cockpit_out).parent / "v4_belief.jsonl",
+    )
+    bridge_cfg = KiteV4BridgeConfig(
+        belief=belief_cfg,
+        confirm_real_orders=confirm_real,
+        cockpit_server_port=8765,
+        write_cockpit_jsonl=(Path(args.cockpit_out)
+                              if args.cockpit_out else None),
+        print_explainer_each_tick=False,
+    )
+    runner = KiteV4LiveRunner(
+        api_key=api_key, access_token=access_token,
+        bridge_cfg=bridge_cfg,
+    )
+    print(f"{'!' * 60}", file=sys.stderr)
+    if confirm_real:
+        print("LIVE MODE: orders will hit Zerodha for real.",
+               file=sys.stderr)
+    else:
+        print("PAPER MODE: real Kite quotes, paper broker fills.",
+               file=sys.stderr)
+    print(f"Cockpit UI: http://127.0.0.1:8765/", file=sys.stderr)
+    print(f"{'!' * 60}", file=sys.stderr)
+    runner.run_forever()
+
+
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(
@@ -168,19 +217,22 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    runner = _build_runner(args, explainer_to_log=not args.print_explainer)
-
     if args.replay:
+        runner = _build_runner(args, explainer_to_log=not args.print_explainer)
         _drive_from_replay(runner, args.replay)
         return
     if args.stdin:
+        runner = _build_runner(args, explainer_to_log=not args.print_explainer)
         _drive_from_stdin(runner)
         return
+    if args.kite:
+        # Real live path: Kite REST → BeliefEngine → v4 brain → broker.
+        _drive_kite_live(args)
+        return
 
-    # Default: paper or kite mode wants a tick source.
-    # For convenience we just emit a one-shot health report and exit; the
-    # operator is expected to wire the runner into their own ingestion
-    # loop (e.g. live_runner.py's tick stream).
+    # Paper without ticks: emit a healthcheck so the operator can confirm
+    # construction works before wiring data.
+    runner = _build_runner(args, explainer_to_log=not args.print_explainer)
     healthcheck = {
         "runner": "V4Runner",
         "broker": runner.broker.healthcheck(),
