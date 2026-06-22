@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 from .aggregator import (
@@ -195,6 +196,16 @@ class PortfolioManagerConfig:
     dead_market_manipulation_threshold: float = 0.40
     dead_market_low_consensus_threshold: float = 0.10
     dead_market_tail_threshold: float = 0.30
+    # Calibration handoff (founder 2026-06-22): when set, the calibration
+    # state is persisted under this directory and replayed on startup.
+    # V4Runner forwards its persistence.state_dir here. None disables the
+    # multi-day handoff (calibrator runs session-local).
+    calibration_state_dir: Optional[Path] = None
+    calibration_bootstrap_days: int = 5
+    # Regime-aware confidence-floor nudge: bounded additive delta to the
+    # entry-confidence floor based on prior-day per-family win rates.
+    # Zero disables the nudge.
+    regime_confidence_nudge_max: float = 0.08
     # Decision gates
     min_entry_confidence: float = 0.55   # founder hot-fix 2026-06-22 LIVE (was 0.66)
     min_scalp_confidence: float = 0.62   # founder hot-fix 2026-06-22 LIVE (was 0.72)
@@ -318,6 +329,35 @@ class PortfolioManager:
             calibrator_cfg=LiveCalibratorConfig(enabled=True),
         )
         self._last_calibration: Optional[Dict[str, Any]] = None
+        # Last RichContext from substrate — surfaces velocity / acceleration /
+        # regime stability / 22-slot dod_z heatmap to the cockpit (founder
+        # 2026-06-22: bring back the dev-of-dev surface from the old codex
+        # build).
+        self._last_rich: Optional[RichContext] = None
+        self._last_snapshot: Optional[Dict[str, Any]] = None
+        self._last_mtf_views: Dict[str, Dict[str, Any]] = {}
+        # Yesterday-to-today calibration handoff (founder 2026-06-22).
+        # Persists learner observations + weights per IST date; replays
+        # them through the OnlineLearner at startup so today's session
+        # inherits yesterday's lessons. Also tracks per-family win
+        # history to nudge the entry confidence floor based on which
+        # regimes were profitable in recent days.
+        from .learning_persistence import (
+            CalibrationStateStore, RegimeWinHistory,
+        )
+        if self.cfg.calibration_state_dir is not None:
+            self.calibration_store: Optional[CalibrationStateStore] = (
+                CalibrationStateStore(
+                    state_dir=Path(self.cfg.calibration_state_dir),
+                    bootstrap_days=self.cfg.calibration_bootstrap_days,
+                ))
+        else:
+            self.calibration_store = None
+        self.regime_history = RegimeWinHistory(
+            max_adjustment=self.cfg.regime_confidence_nudge_max,
+        )
+        self._bootstrap_result: Optional[Dict[str, Any]] = None
+        self._bootstrap_attempted: bool = False
         # Recent-trades tape (last N opens + closes, newest first) — feeds
         # the cockpit's Live Trades panel.
         from collections import deque as _deque
@@ -377,8 +417,29 @@ class PortfolioManager:
         bar_index = int(_num(snapshot.get("bars_seen"), 0))
         ts = snapshot.get("ts")
 
+        # 0. One-shot calibration bootstrap (founder 2026-06-22). Runs on
+        # the first tick of each session: replays prior days' closures
+        # through the live OnlineLearner so today inherits yesterday's
+        # weights, then loads the per-family regime history.
+        if (self.calibration_store is not None
+                and not self._bootstrap_attempted):
+            self._bootstrap_attempted = True
+            try:
+                boot = self.calibration_store.bootstrap(
+                    learner=self.live_calibrator.learner,
+                    aggregator_cfg=self.cfg.aggregator,
+                )
+                self._bootstrap_result = boot.to_dict()
+                prior = self.calibration_store.load_prior(
+                    self.calibration_store.bootstrap_days)
+                self.regime_history.load_from_records(prior)
+            except Exception:
+                self._bootstrap_result = None
+
         # 1. Information substrate update
         rich = self.substrate_state.observe(snapshot)
+        self._last_rich = rich
+        self._last_snapshot = snapshot
         # 2. Multi-timeframe memory
         self.mtf.observe(snapshot)
         # 3. Flow memory
@@ -386,6 +447,7 @@ class PortfolioManager:
         # 3a. Scenario web — live multi-scenario tracking (Sprint 2)
         mtf_views_dict = {k: v.to_dict() for k, v
                            in self.mtf.all_views().items()}
+        self._last_mtf_views = mtf_views_dict
         web_snap = self.web.observe(snapshot, rich, flow_event, mtf_views_dict)
         self._last_web_snapshot = web_snap
 
@@ -656,14 +718,25 @@ class PortfolioManager:
                     f"horizon-weighted consensus {hw_consensus:+.2f} near zero — "
                     "no edge to direct")
 
-        # Gate B: confidence.
+        # Gate B: confidence (with regime-aware floor nudge).
+        # Founder 2026-06-22: prior-day per-family win rates nudge the
+        # floor — looser when today's regime printed money yesterday,
+        # tighter when it didn't. Bounded by regime_confidence_nudge_max.
         profile = (PROFILE_SCALP if action in SCALP_ENTRY_ACTIONS
                    else PROFILE_INTRADAY)
-        conf_floor = (cfg.min_scalp_confidence if profile == PROFILE_SCALP
-                      else cfg.min_entry_confidence)
+        base_floor = (cfg.min_scalp_confidence if profile == PROFILE_SCALP
+                       else cfg.min_entry_confidence)
+        today_family = self._today_dominant_family()
+        regime_nudge = (self.regime_history.confidence_adjustment_for(
+            today_family) if today_family else 0.0)
+        conf_floor = max(0.0, min(1.0, base_floor + regime_nudge))
         if confidence < conf_floor:
+            nudge_note = (f" (regime nudge {regime_nudge:+.2f} for "
+                          f"{today_family or 'unknown'})"
+                          if regime_nudge != 0.0 else "")
             refuse.append(
                 f"confidence {confidence:.2f} below floor {conf_floor:.2f}"
+                + nudge_note
             )
 
         # Gate C: multi-timeframe alignment.
@@ -1596,6 +1669,37 @@ class PortfolioManager:
             self._last_calibration = calib.to_dict()
         except Exception:
             self._last_calibration = None
+        # Persist the closure (with regime tag) for the multi-day
+        # calibration handoff, and update the live regime-win history.
+        try:
+            from .learning_persistence import regime_tag_from_web_snapshot
+            web_dict = (self._last_web_snapshot.to_dict()
+                          if self._last_web_snapshot is not None else None)
+            regime_tag = regime_tag_from_web_snapshot(web_dict)
+            realized_rupees = (float(getattr(outcome, "realized_rupees", 0.0))
+                                 if outcome is not None else 0.0)
+            self.regime_history.add_closure(
+                regime_tag=regime_tag,
+                realized_r=float(current_r),
+                realized_rupees=realized_rupees,
+            )
+            if self.calibration_store is not None:
+                self.calibration_store.record_closure(
+                    component_scores=component_scores,
+                    realized_r=float(current_r),
+                    regime_tag=regime_tag,
+                    bar_index=bar_index,
+                    strategy=str(getattr(h, "strategy_class", "")
+                                  or getattr(h, "strategy", "")
+                                  or ""),
+                )
+                self.calibration_store.record_weights(
+                    weights=dict(self.live_calibrator.learner.weights),
+                    n_observations=len(
+                        self.live_calibrator.learner.observations),
+                )
+        except Exception:
+            pass
         # Forget the per-position counterfactual plan.
         self._counterfactual_plans.pop(pos_id, None)
         # Unregister the adaptive exit engine.
@@ -1695,6 +1799,83 @@ class PortfolioManager:
             contradictions_this_bar=[],
         ))
 
+    def _rich_context_summary(self) -> Optional[Dict[str, Any]]:
+        """Surface the substrate's RichContext to the cockpit so the
+        founder can SEE the dev-of-dev family that drives entry decisions:
+        per-rail velocity / acceleration, regime stability index,
+        epicenter migration, and the 22-slot dod_z heatmap.
+        """
+        rich = self._last_rich
+        if rich is None:
+            return None
+        # Pair the heatmap with slot labels so the viewer can label each
+        # cell (CE_-5 .. PE_+5). Falls back to bare index labels.
+        slot_labels: List[str] = []
+        snap = self._last_snapshot or {}
+        for raw in (snap.get("slot_readings") or []):
+            slot = raw if isinstance(raw, dict) else {}
+            lbl = str(slot.get("label") or slot.get("moneyness_label") or "")
+            if lbl:
+                slot_labels.append(lbl)
+        heatmap = list(rich.heatmap_flat)
+        if len(slot_labels) < len(heatmap):
+            slot_labels = slot_labels + [
+                f"slot_{i}" for i in range(len(slot_labels), len(heatmap))
+            ]
+        return {
+            "regime_stability_index": round(rich.regime_stability_index, 4),
+            "epicenter_label": str(rich.epicenter_label or ""),
+            "epicenter_level": int(rich.epicenter_level),
+            "epicenter_migration_distance": round(
+                rich.epicenter_migration_distance, 4),
+            "thesis_velocity_dominant_side": rich.thesis_velocity_dominant_side,
+            "ce_signed_z_velocity": round(rich.ce_signed_z_velocity, 4),
+            "ce_signed_z_acceleration": round(rich.ce_signed_z_acceleration, 4),
+            "pe_signed_z_velocity": round(rich.pe_signed_z_velocity, 4),
+            "pe_signed_z_acceleration": round(rich.pe_signed_z_acceleration, 4),
+            "net_intent_velocity": round(rich.net_intent_velocity, 4),
+            "net_intent_acceleration": round(rich.net_intent_acceleration, 4),
+            "thesis_bull_velocity": round(rich.thesis_bull_velocity, 3),
+            "thesis_bear_velocity": round(rich.thesis_bear_velocity, 3),
+            "dispersion_velocity": round(rich.dispersion_velocity, 4),
+            # The dev-of-dev surface — 22 slot dod_z values, slot-ordered,
+            # with labels so the viewer can render a proper heatmap.
+            "dod_heatmap": [round(v, 3) for v in heatmap],
+            "dod_heatmap_labels": slot_labels[:len(heatmap)],
+        }
+
+    def _mtf_alignment_summary(self) -> Dict[str, Any]:
+        """Per-timeframe consensus for the cockpit. We sample both
+        directions so the viewer can show 'long supported by L5/L15' or
+        'short supported by L60' without redoing the math."""
+        try:
+            long_align = self.mtf.alignment(proposed_direction=1)
+            short_align = self.mtf.alignment(proposed_direction=-1)
+        except Exception:
+            return {}
+        # The per-tf bias direction is what the operator actually wants —
+        # the alignment() match flags only tell us whether each tf agrees
+        # with the *proposed* direction. We extract the raw bias here.
+        per_tf: Dict[str, Dict[str, Any]] = {}
+        for level, view in (long_align.get("views") or {}).items():
+            per_tf[level] = {
+                "direction_bias": view.get("direction_bias", 0),
+                "dominant_thesis": view.get("dominant_thesis", ""),
+                "dominant_battlefield": view.get("dominant_battlefield", ""),
+                "n_samples": view.get("n_samples", 0),
+            }
+        return {
+            "alignment_ok_long": bool(long_align.get("alignment_ok", False)),
+            "alignment_score_long": float(long_align.get("alignment_score", 0.0)),
+            "alignment_ok_short": bool(short_align.get("alignment_ok", False)),
+            "alignment_score_short": float(short_align.get("alignment_score", 0.0)),
+            "confirmation_count_long": int(
+                long_align.get("confirmation_count", 0)),
+            "confirmation_count_short": int(
+                short_align.get("confirmation_count", 0)),
+            "per_timeframe": per_tf,
+        }
+
     def _portfolio_summary(self) -> Dict[str, Any]:
         return {
             "n_open": len(self._open_states),
@@ -1730,10 +1911,42 @@ class PortfolioManager:
             "adaptive_exit": self._last_exit_decision,
             "live_calibration": self._last_calibration,
             "weight_evolution": self._weight_evolution_summary(),
+            "rich_context": self._rich_context_summary(),
+            "mtf_alignment": self._mtf_alignment_summary(),
+            "calibrator_bootstrap": (self._bootstrap_result
+                                       if self._bootstrap_result is not None
+                                       else {"ran": False, "days_loaded": 0,
+                                              "observations_replayed": 0,
+                                              "updates_applied": 0,
+                                              "seeded_weights": {},
+                                              "notes": [
+                                                  "calibration store not "
+                                                  "configured"
+                                              ] if self.calibration_store is None
+                                              else [
+                                                  "bootstrap pending — "
+                                                  "fires on first observe"
+                                              ]}),
+            "regime_win_history": self.regime_history.today_summary(
+                today_dominant_family=self._today_dominant_family(),
+            ),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),
         }
+
+    def _today_dominant_family(self) -> str:
+        """Read the dominant scenario family from the most-recent web
+        snapshot — used to pick which prior-day stat applies today."""
+        if self._last_web_snapshot is None:
+            return ""
+        try:
+            from .learning_persistence import regime_tag_from_web_snapshot
+            tag = regime_tag_from_web_snapshot(
+                self._last_web_snapshot.to_dict())
+            return str(tag.get("dominant_family", ""))
+        except Exception:
+            return ""
 
     def _strategy_confidence_multiplier(self, strategy_name: str,
                                             *, min_trades: int = 4,

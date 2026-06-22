@@ -109,7 +109,17 @@ class V4Runner:
                   cfg: Optional[V4RunnerConfig] = None,
                   broker: Optional[BrokerAdapter] = None) -> None:
         self.cfg = cfg or V4RunnerConfig()
-        self.manager = PortfolioManager(self.cfg.manager)
+        # Forward the persistence directory into the manager config so the
+        # calibration handoff (founder 2026-06-22) can persist its state
+        # under the same root as the position snapshots. Only wire it
+        # when persistence is enabled — disabling persistence also
+        # disables the multi-day calibration handoff cleanly.
+        manager_cfg = self.cfg.manager or PortfolioManagerConfig()
+        if (self.cfg.persistence is not None
+                and self.cfg.persistence.enabled
+                and manager_cfg.calibration_state_dir is None):
+            manager_cfg.calibration_state_dir = self.cfg.persistence.state_dir
+        self.manager = PortfolioManager(manager_cfg)
         self.broker = broker or PaperBrokerAdapter()
         self.persistence = ManagerPersistence(self.cfg.persistence)
         self.engine_upgrades = (EngineUpgrades(self.cfg.engine_upgrades)

@@ -63,6 +63,18 @@ class CockpitSnapshot:
     # Workaround panels (2026-06-22)
     latency_panel: Dict[str, Any] = field(default_factory=dict)
     attribution_panel: Dict[str, Any] = field(default_factory=dict)
+    # Cockpit restoration (founder 2026-06-22): bring back the dev-of-dev
+    # surface + calibrator transparency + exit reasoning + projection
+    # divergence + multi-timeframe per-tf breakdown.
+    substrate_panel: Dict[str, Any] = field(default_factory=dict)
+    dod_heatmap_panel: Dict[str, Any] = field(default_factory=dict)
+    mtf_panel: Dict[str, Any] = field(default_factory=dict)
+    calibration_panel: Dict[str, Any] = field(default_factory=dict)
+    weight_evolution_panel: Dict[str, Any] = field(default_factory=dict)
+    exit_decision_panel: Dict[str, Any] = field(default_factory=dict)
+    projection_panel: Dict[str, Any] = field(default_factory=dict)
+    regime_history_panel: Dict[str, Any] = field(default_factory=dict)
+    bootstrap_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -292,6 +304,127 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "slippage_tracker": summary.get("slippage_tracker") or {},
     }
 
+    # ── Restoration panels (founder 2026-06-22) ──────────────────────
+    # Substrate panel — the dev-of-dev family the cockpit was dropping.
+    rich = summary.get("rich_context") or {}
+    substrate_panel = {
+        "regime_stability_index": rich.get("regime_stability_index", 0.0),
+        "epicenter_label": rich.get("epicenter_label", ""),
+        "epicenter_level": rich.get("epicenter_level", 0),
+        "epicenter_migration_distance": rich.get(
+            "epicenter_migration_distance", 0.0),
+        "thesis_velocity_dominant_side": rich.get(
+            "thesis_velocity_dominant_side", "flat"),
+        "ce_signed_z_velocity": rich.get("ce_signed_z_velocity", 0.0),
+        "ce_signed_z_acceleration": rich.get("ce_signed_z_acceleration", 0.0),
+        "pe_signed_z_velocity": rich.get("pe_signed_z_velocity", 0.0),
+        "pe_signed_z_acceleration": rich.get("pe_signed_z_acceleration", 0.0),
+        "net_intent_velocity": rich.get("net_intent_velocity", 0.0),
+        "net_intent_acceleration": rich.get("net_intent_acceleration", 0.0),
+        "thesis_bull_velocity": rich.get("thesis_bull_velocity", 0.0),
+        "thesis_bear_velocity": rich.get("thesis_bear_velocity", 0.0),
+        "dispersion_velocity": rich.get("dispersion_velocity", 0.0),
+    }
+    # Dev-of-dev heatmap panel — slot labels + dod_z values for SVG render.
+    dod_heatmap_panel = {
+        "values": list(rich.get("dod_heatmap") or []),
+        "labels": list(rich.get("dod_heatmap_labels") or []),
+    }
+
+    # Multi-timeframe alignment panel.
+    mtf = summary.get("mtf_alignment") or {}
+    mtf_panel = {
+        "alignment_ok_long": mtf.get("alignment_ok_long", False),
+        "alignment_score_long": mtf.get("alignment_score_long", 0.0),
+        "alignment_ok_short": mtf.get("alignment_ok_short", False),
+        "alignment_score_short": mtf.get("alignment_score_short", 0.0),
+        "confirmation_count_long": mtf.get("confirmation_count_long", 0),
+        "confirmation_count_short": mtf.get("confirmation_count_short", 0),
+        "per_timeframe": dict(mtf.get("per_timeframe") or {}),
+    }
+
+    # Live calibration panel — what the calibrator did at the last close.
+    calib = summary.get("live_calibration") or {}
+    calibration_panel = {
+        "has_event": bool(calib),
+        "proposed": calib.get("proposed", False),
+        "applied": calib.get("applied", False),
+        "paused": calib.get("paused", False),
+        "rejected_reason": calib.get("rejected_reason", ""),
+        "pre_weights": dict(calib.get("pre_weights") or {}),
+        "post_weights": dict(calib.get("post_weights") or {}),
+        "deltas": dict(calib.get("deltas") or {}),
+        "train_loss": calib.get("train_loss", 0.0),
+        "val_loss": calib.get("val_loss", 0.0),
+        "notes": list(calib.get("notes") or []),
+    }
+
+    # Weight evolution panel — trends + warnings + adaptability.
+    wevo = summary.get("weight_evolution") or {}
+    weight_evolution_panel = {
+        "calibrator_paused": wevo.get("calibrator_paused", False),
+        "n_snapshots": wevo.get("n_snapshots", 0),
+        "adaptability_index": wevo.get("adaptability_index", 0.0),
+        "trend_per_weight": dict(wevo.get("trend_per_weight") or {}),
+        "most_drifting_weight": wevo.get("most_drifting_weight", ""),
+        "coordinated_drift_score": wevo.get("coordinated_drift_score", 0.0),
+        "val_loss_trend": wevo.get("val_loss_trend", 0.0),
+        "warnings": list(wevo.get("warnings") or []),
+    }
+
+    # Adaptive-exit decision panel — portfolio-level exit coordinator
+    # outputs the per-position list, plus cluster sizing + which side is
+    # winning + which positions had their modifications approved.
+    aex = summary.get("adaptive_exit") or {}
+    exit_decision_panel = {
+        "has_decision": bool(aex),
+        "per_position": list(aex.get("per_position") or []),
+        "cluster_bullish_count": aex.get("cluster_bullish_count", 0),
+        "cluster_bearish_count": aex.get("cluster_bearish_count", 0),
+        "weakest_thesis_position_id": aex.get(
+            "weakest_thesis_position_id", ""),
+        "modifications_approved_this_tick": list(
+            aex.get("modifications_approved_this_tick") or []),
+        "modifications_deferred_this_tick": list(
+            aex.get("modifications_deferred_this_tick") or []),
+        "regime_winning_side": aex.get("regime_winning_side", 0),
+        "notes": list(aex.get("notes") or []),
+    }
+
+    # Projection panel — calibration tape summary (target/stop/neither
+    # resolution rate from prior trades). The mean_realized_r tells us
+    # whether the projection is, on average, calling the right shots.
+    proj = summary.get("projection_summary") or {}
+    projection_panel = {
+        "tape_size": proj.get("tape_size", 0),
+        "n_target_hits": proj.get("n_target_hits", 0),
+        "n_stop_hits": proj.get("n_stop_hits", 0),
+        "n_neither": proj.get("n_neither", 0),
+        "mean_realized_r": proj.get("mean_realized_r", 0.0),
+    }
+
+    # Regime history panel — per-family win rates from yesterday onwards.
+    regime_hist = summary.get("regime_win_history") or {}
+    regime_history_panel = {
+        "days_loaded": regime_hist.get("days_loaded", 0),
+        "by_family": dict(regime_hist.get("by_family") or {}),
+        "today_dominant_family": regime_hist.get("today_dominant_family", ""),
+        "today_confidence_adjustment": regime_hist.get(
+            "today_confidence_adjustment", 0.0),
+        "notes": list(regime_hist.get("notes") or []),
+    }
+
+    # Bootstrap panel — what the calibrator inherited from prior days.
+    boot = summary.get("calibrator_bootstrap") or {}
+    bootstrap_panel = {
+        "ran": boot.get("ran", False),
+        "days_loaded": boot.get("days_loaded", 0),
+        "observations_replayed": boot.get("observations_replayed", 0),
+        "updates_applied": boot.get("updates_applied", 0),
+        "seeded_weights": dict(boot.get("seeded_weights") or {}),
+        "notes": list(boot.get("notes") or []),
+    }
+
     explainer_text = explain_tick(intent_dict)
 
     return CockpitSnapshot(
@@ -312,4 +445,13 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         trades_panel=trades_panel,
         latency_panel=latency_panel,
         attribution_panel=attribution_panel,
+        substrate_panel=substrate_panel,
+        dod_heatmap_panel=dod_heatmap_panel,
+        mtf_panel=mtf_panel,
+        calibration_panel=calibration_panel,
+        weight_evolution_panel=weight_evolution_panel,
+        exit_decision_panel=exit_decision_panel,
+        projection_panel=projection_panel,
+        regime_history_panel=regime_history_panel,
+        bootstrap_panel=bootstrap_panel,
     )

@@ -641,6 +641,102 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <h2>STRATEGY ATTRIBUTION (closed trades)</h2>
       <div id="attribution">—</div>
     </div>
+    <div class="panel full">
+      <h2>DEV-OF-DEV — 22-SLOT dod_z HEATMAP</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Per-slot dod_z (deviation-of-deviation). <span class="green">green</span> = unusually friendly (premium compressed below model),
+        <span class="red">red</span> = unusually distorted (premium inflated). Centre column = ATM.
+      </div>
+      <svg id="dod_svg" width="100%" height="120" viewBox="0 0 1000 120"
+           style="background: radial-gradient(circle at 50% 50%, #0c1320 0%, #050810 100%); border-radius: 6px;"></svg>
+    </div>
+    <div class="panel">
+      <h2>SUBSTRATE — VELOCITIES &amp; REGIME</h2>
+      <div class="kv">
+        <div class="k">Regime stability</div><div class="v" id="sub_regime">—</div>
+        <div class="k">Epicenter</div><div class="v" id="sub_epi">—</div>
+        <div class="k">Epi migration</div><div class="v" id="sub_epi_mig">—</div>
+        <div class="k">CE signed-z v / a</div><div class="v" id="sub_ce_va">—</div>
+        <div class="k">PE signed-z v / a</div><div class="v" id="sub_pe_va">—</div>
+        <div class="k">Net intent v / a</div><div class="v" id="sub_net_va">—</div>
+        <div class="k">Thesis bull v</div><div class="v" id="sub_bull_v">—</div>
+        <div class="k">Thesis bear v</div><div class="v" id="sub_bear_v">—</div>
+        <div class="k">Dispersion velocity</div><div class="v" id="sub_disp_v">—</div>
+        <div class="k">Dominant side</div><div class="v" id="sub_dom_side">—</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>MULTI-TIMEFRAME ALIGNMENT</h2>
+      <div class="kv">
+        <div class="k">Long alignment</div><div class="v" id="mtf_long">—</div>
+        <div class="k">Short alignment</div><div class="v" id="mtf_short">—</div>
+      </div>
+      <h2 style="margin-top:12px;">Per-TF bias</h2>
+      <div id="mtf_per_tf">—</div>
+    </div>
+    <div class="panel full">
+      <h2>LIVE CALIBRATION (last close)</h2>
+      <div class="kv">
+        <div class="k">Proposed / Applied</div><div class="v" id="calib_pa">—</div>
+        <div class="k">Train / Val loss</div><div class="v" id="calib_loss">—</div>
+        <div class="k">Rejected reason</div><div class="v" id="calib_reason">—</div>
+      </div>
+      <div id="calib_weights" style="margin-top: 8px;">—</div>
+      <pre id="calib_notes" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel">
+      <h2>WEIGHT EVOLUTION</h2>
+      <div class="kv">
+        <div class="k">Adaptability</div><div class="v" id="wevo_adapt">—</div>
+        <div class="k">Snapshots seen</div><div class="v" id="wevo_n">—</div>
+        <div class="k">Coord. drift</div><div class="v" id="wevo_drift">—</div>
+        <div class="k">Val-loss trend</div><div class="v" id="wevo_vlt">—</div>
+        <div class="k">Most drifting</div><div class="v" id="wevo_mdr">—</div>
+      </div>
+      <div id="wevo_warnings" class="red" style="margin-top: 6px;"></div>
+    </div>
+    <div class="panel">
+      <h2>ADAPTIVE EXIT (portfolio coordinator)</h2>
+      <div class="kv">
+        <div class="k">Cluster bull / bear</div><div class="v" id="exit_cluster">—</div>
+        <div class="k">Winning side</div><div class="v" id="exit_winning">—</div>
+        <div class="k">Approved this tick</div><div class="v" id="exit_appr">—</div>
+        <div class="k">Deferred this tick</div><div class="v" id="exit_def">—</div>
+        <div class="k">Weakest thesis pos</div><div class="v" id="exit_weak">—</div>
+      </div>
+      <div id="exit_per_position" style="margin-top: 6px;">—</div>
+      <pre id="exit_notes" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel">
+      <h2>PROJECTION (intent vs realized)</h2>
+      <div class="kv">
+        <div class="k">Records</div><div class="v" id="proj_n">—</div>
+        <div class="k">Divergence</div><div class="v" id="proj_div">—</div>
+      </div>
+      <div id="proj_recent" style="margin-top: 6px;">—</div>
+    </div>
+    <div class="panel full">
+      <h2>HEDGE PROPOSAL</h2>
+      <div class="kv">
+        <div class="k">Proposed?</div><div class="v" id="hedge_proposed">—</div>
+        <div class="k">Total premium</div><div class="v" id="hedge_premium">—</div>
+      </div>
+      <div id="hedge_proposals" style="margin-top: 6px;">—</div>
+      <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel full">
+      <h2>REGIME-AWARE CALIBRATION (yesterday → today)</h2>
+      <div class="kv">
+        <div class="k">Bootstrap ran?</div><div class="v" id="boot_ran">—</div>
+        <div class="k">Days loaded</div><div class="v" id="boot_days">—</div>
+        <div class="k">Observations replayed</div><div class="v" id="boot_obs">—</div>
+        <div class="k">Updates applied at startup</div><div class="v" id="boot_upd">—</div>
+        <div class="k">Today's dominant family</div><div class="v" id="reg_today">—</div>
+        <div class="k">Confidence floor nudge</div><div class="v" id="reg_nudge">—</div>
+      </div>
+      <div id="reg_family_rows" style="margin-top: 8px;">—</div>
+      <pre id="boot_notes" class="muted" style="margin-top: 6px;"></pre>
+    </div>
   </div>
   <div class="footer">SSE source: <code>/api/stream</code>. Latest snapshot: <span id="ts">—</span></div>
 <script>
@@ -759,6 +855,256 @@ function render_pulsing_web(scenarios) {
       svg.appendChild(pl);
     }
   }
+}
+// ── Dev-of-dev heatmap (founder restoration 2026-06-22) ─────────
+// Renders the 22-slot dod_z heatmap as a horizontal strip. CE slots on
+// the right, PE slots on the left (matches the strike ladder).
+function render_dod_heatmap(values, labels) {
+  var svg = document.getElementById("dod_svg");
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!values || values.length === 0) {
+    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", 500); t.setAttribute("y", 60);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("fill", "#5a6172");
+    t.textContent = "no slot readings";
+    svg.appendChild(t);
+    return;
+  }
+  var n = values.length;
+  var W = 1000, H = 120;
+  var pad = 20;
+  var cellW = (W - 2*pad) / n;
+  var cellH = 60;
+  var y0 = 25;
+  // Find max abs value for colour scaling.
+  var maxAbs = 1.5;
+  for (var i = 0; i < n; i++) maxAbs = Math.max(maxAbs, Math.abs(values[i]));
+  for (var i = 0; i < n; i++) {
+    var v = values[i];
+    var norm = Math.max(-1, Math.min(1, v / maxAbs));
+    // Diverging palette: positive = red (distorted up), negative = green (friendly).
+    var r, g, b;
+    if (norm >= 0) {
+      r = Math.round(20 + 235 * norm); g = Math.round(120 - 60 * norm); b = Math.round(140 - 60 * norm);
+    } else {
+      r = Math.round(20 - 0 * norm); g = Math.round(120 + 135 * (-norm)); b = Math.round(140 - 50 * (-norm));
+    }
+    var color = "rgb(" + r + "," + g + "," + b + ")";
+    var x = pad + i * cellW;
+    var cell = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    cell.setAttribute("x", x); cell.setAttribute("y", y0);
+    cell.setAttribute("width", cellW - 1); cell.setAttribute("height", cellH);
+    cell.setAttribute("fill", color);
+    cell.setAttribute("rx", 2);
+    svg.appendChild(cell);
+    // Label below.
+    var lbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    lbl.setAttribute("x", x + cellW/2); lbl.setAttribute("y", y0 + cellH + 14);
+    lbl.setAttribute("text-anchor", "middle"); lbl.setAttribute("fill", "#5a6172");
+    lbl.setAttribute("font-size", "9");
+    lbl.textContent = (labels && labels[i]) ? labels[i] : "";
+    svg.appendChild(lbl);
+    // Value inside the cell when cell is wide enough.
+    if (cellW >= 28) {
+      var val = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      val.setAttribute("x", x + cellW/2); val.setAttribute("y", y0 + cellH/2 + 4);
+      val.setAttribute("text-anchor", "middle"); val.setAttribute("fill", "#0a0e14");
+      val.setAttribute("font-size", "10");
+      val.setAttribute("font-weight", "bold");
+      val.textContent = v.toFixed(1);
+      svg.appendChild(val);
+    }
+  }
+}
+function fmt_v(v, digits) {
+  if (v == null) return "—";
+  digits = digits == null ? 3 : digits;
+  var n = Number(v);
+  var sign = n > 0 ? "+" : "";
+  var cls = n > 0 ? "green" : (n < 0 ? "red" : "muted");
+  return '<span class="' + cls + '">' + sign + n.toFixed(digits) + '</span>';
+}
+function render_substrate(sub) {
+  var s = sub || {};
+  document.getElementById("sub_regime").innerHTML =
+    fmt_bar(s.regime_stability_index||0, 0, 1) + " " + (s.regime_stability_index||0).toFixed(2);
+  document.getElementById("sub_epi").textContent =
+    (s.epicenter_label || "—") + " (lvl " + (s.epicenter_level || 0) + ")";
+  document.getElementById("sub_epi_mig").textContent = (s.epicenter_migration_distance||0).toFixed(2);
+  document.getElementById("sub_ce_va").innerHTML =
+    fmt_v(s.ce_signed_z_velocity, 3) + " / " + fmt_v(s.ce_signed_z_acceleration, 3);
+  document.getElementById("sub_pe_va").innerHTML =
+    fmt_v(s.pe_signed_z_velocity, 3) + " / " + fmt_v(s.pe_signed_z_acceleration, 3);
+  document.getElementById("sub_net_va").innerHTML =
+    fmt_v(s.net_intent_velocity, 3) + " / " + fmt_v(s.net_intent_acceleration, 3);
+  document.getElementById("sub_bull_v").innerHTML = fmt_v(s.thesis_bull_velocity, 2);
+  document.getElementById("sub_bear_v").innerHTML = fmt_v(s.thesis_bear_velocity, 2);
+  document.getElementById("sub_disp_v").innerHTML = fmt_v(s.dispersion_velocity, 3);
+  var dom = s.thesis_velocity_dominant_side || "flat";
+  var domCls = dom === "bull" ? "green" : (dom === "bear" ? "red" : "muted");
+  document.getElementById("sub_dom_side").innerHTML =
+    '<span class="' + domCls + '">' + dom + '</span>';
+}
+function render_mtf(mtf) {
+  var m = mtf || {};
+  var okL = m.alignment_ok_long;
+  var okS = m.alignment_ok_short;
+  document.getElementById("mtf_long").innerHTML =
+    '<span class="' + (okL ? "green" : "red") + '">' + (okL ? "OK" : "block") + '</span> '
+    + fmt_bar(m.alignment_score_long||0, 0, 1) + " " + (m.alignment_score_long||0).toFixed(2)
+    + ' <span class="muted">(' + (m.confirmation_count_long||0) + '/3 confirm)</span>';
+  document.getElementById("mtf_short").innerHTML =
+    '<span class="' + (okS ? "green" : "red") + '">' + (okS ? "OK" : "block") + '</span> '
+    + fmt_bar(m.alignment_score_short||0, 0, 1) + " " + (m.alignment_score_short||0).toFixed(2)
+    + ' <span class="muted">(' + (m.confirmation_count_short||0) + '/3 confirm)</span>';
+  var per = m.per_timeframe || {};
+  var rows = ["L1","L5","L15","L60"].map(function(level){
+    var view = per[level] || {};
+    var bias = Number(view.direction_bias || 0);
+    var biasCls = bias > 0 ? "bull" : (bias < 0 ? "bear" : "");
+    var biasTxt = bias > 0 ? "↑ +1" : (bias < 0 ? "↓ -1" : "·  0");
+    return '<div class="position-row"><strong>' + level + '</strong>'
+      + ' <span class="badge ' + biasCls + '">' + biasTxt + '</span>'
+      + ' <span class="muted">' + (view.dominant_thesis || "") + ' · ' + (view.dominant_battlefield || "") + '</span>'
+      + ' <span class="muted" style="float:right">n=' + (view.n_samples||0) + '</span></div>';
+  }).join("");
+  document.getElementById("mtf_per_tf").innerHTML = rows;
+}
+function render_calibration(calib) {
+  var c = calib || {};
+  if (!c.has_event) {
+    document.getElementById("calib_pa").innerHTML = '<span class="muted">no event yet</span>';
+    document.getElementById("calib_loss").textContent = "—";
+    document.getElementById("calib_reason").textContent = "—";
+    document.getElementById("calib_weights").innerHTML = "";
+    document.getElementById("calib_notes").textContent = "";
+    return;
+  }
+  var paTxt = '<span class="' + (c.applied ? "green" : "muted") + '">'
+    + (c.applied ? "APPLIED" : (c.proposed ? "proposed" : "no-op")) + '</span>';
+  if (c.paused) paTxt += ' <span class="yellow">[paused]</span>';
+  document.getElementById("calib_pa").innerHTML = paTxt;
+  document.getElementById("calib_loss").textContent =
+    "train " + Number(c.train_loss||0).toFixed(4) + " / val " + Number(c.val_loss||0).toFixed(4);
+  document.getElementById("calib_reason").textContent = c.rejected_reason || "—";
+  var pre = c.pre_weights || {}, post = c.post_weights || {}, d = c.deltas || {};
+  var keys = Object.keys(pre);
+  var html = '<table style="width:100%;font-size:12px;border-collapse:collapse;">'
+    + '<tr style="color:#5a6172;text-align:left;"><th>weight</th><th>pre</th><th>post</th><th>Δ</th></tr>';
+  keys.forEach(function(k){
+    var p1 = Number(pre[k]||0), p2 = Number(post[k]||0), dd = Number(d[k]||0);
+    var ddCls = dd > 0 ? "green" : (dd < 0 ? "red" : "muted");
+    html += '<tr><td>' + k + '</td>'
+      + '<td>' + p1.toFixed(3) + '</td>'
+      + '<td>' + p2.toFixed(3) + '</td>'
+      + '<td class="' + ddCls + '">' + (dd >= 0 ? "+" : "") + dd.toFixed(4) + '</td></tr>';
+  });
+  html += '</table>';
+  document.getElementById("calib_weights").innerHTML = html;
+  document.getElementById("calib_notes").textContent = (c.notes || []).join("\n");
+}
+function render_weight_evolution(wevo) {
+  var w = wevo || {};
+  document.getElementById("wevo_adapt").innerHTML =
+    fmt_bar(w.adaptability_index||0, 0, 1) + " " + (w.adaptability_index||0).toFixed(2);
+  document.getElementById("wevo_n").textContent = w.n_snapshots || 0;
+  document.getElementById("wevo_drift").innerHTML = fmt_v(w.coordinated_drift_score, 3);
+  document.getElementById("wevo_vlt").innerHTML = fmt_v(w.val_loss_trend, 4);
+  document.getElementById("wevo_mdr").textContent = w.most_drifting_weight || "—";
+  document.getElementById("wevo_warnings").innerHTML =
+    (w.warnings || []).map(function(x){ return "⚠ " + x; }).join("<br>");
+}
+function render_exit_decision(ex) {
+  var e = ex || {};
+  if (!e.has_decision) {
+    document.getElementById("exit_cluster").innerHTML = '<span class="muted">no held position</span>';
+    document.getElementById("exit_winning").textContent = "—";
+    document.getElementById("exit_appr").textContent = "—";
+    document.getElementById("exit_def").textContent = "—";
+    document.getElementById("exit_weak").textContent = "—";
+    document.getElementById("exit_per_position").innerHTML = "";
+    document.getElementById("exit_notes").textContent = "";
+    return;
+  }
+  document.getElementById("exit_cluster").innerHTML =
+    '<span class="green">' + (e.cluster_bullish_count||0) + '</span> / '
+    + '<span class="red">' + (e.cluster_bearish_count||0) + '</span>';
+  var ws = e.regime_winning_side;
+  document.getElementById("exit_winning").innerHTML =
+    ws > 0 ? '<span class="green">↑ bull</span>'
+    : (ws < 0 ? '<span class="red">↓ bear</span>' : '<span class="muted">·</span>');
+  document.getElementById("exit_appr").textContent =
+    (e.modifications_approved_this_tick || []).map(function(p){return p.slice(0,8);}).join(", ") || "—";
+  document.getElementById("exit_def").textContent =
+    (e.modifications_deferred_this_tick || []).map(function(p){return p.slice(0,8);}).join(", ") || "—";
+  document.getElementById("exit_weak").textContent =
+    (e.weakest_thesis_position_id || "").slice(0,8) || "—";
+  var rows = (e.per_position || []).slice(0, 8).map(function(pp){
+    var act = pp.action || pp.mode || "";
+    var actCls = String(act).indexOf("KILL") >= 0 || String(act).indexOf("EXIT") >= 0 ? "red"
+                : (String(act).indexOf("HOLD") >= 0 ? "green" : "yellow");
+    return '<div class="position-row"><strong class="' + actCls + '">' + act + '</strong> '
+      + ' <span class="muted">' + (pp.position_id || "").slice(0,8) + '</span>'
+      + ' <span class="muted">' + (pp.reason || pp.note || "") + '</span></div>';
+  }).join("");
+  document.getElementById("exit_per_position").innerHTML = rows;
+  document.getElementById("exit_notes").textContent = (e.notes || []).join("\n");
+}
+function render_projection(p) {
+  var pp = p || {};
+  document.getElementById("proj_n").textContent = pp.tape_size || 0;
+  var mr = Number(pp.mean_realized_r||0);
+  var mrCls = mr > 0 ? "green" : (mr < 0 ? "red" : "muted");
+  document.getElementById("proj_div").innerHTML =
+    '<span class="' + mrCls + '">' + (mr>=0?"+":"") + mr.toFixed(2) + 'R avg</span>';
+  document.getElementById("proj_recent").innerHTML =
+    '<div class="position-row">'
+    + '<span class="green">target ' + (pp.n_target_hits || 0) + '</span> · '
+    + '<span class="red">stop ' + (pp.n_stop_hits || 0) + '</span> · '
+    + '<span class="muted">neither ' + (pp.n_neither || 0) + '</span>'
+    + '</div>';
+}
+function render_hedge(h) {
+  var hh = h || {};
+  document.getElementById("hedge_proposed").innerHTML =
+    hh.proposed ? '<span class="yellow">yes — review</span>' : '<span class="muted">no</span>';
+  document.getElementById("hedge_premium").textContent = "₹" + Number(hh.total_premium_rupees||0).toLocaleString("en-IN", {maximumFractionDigits: 0});
+  var rows = (hh.proposals || []).map(function(p){
+    return '<div class="position-row"><strong>' + (p.contract_label || p.label || "") + '</strong> '
+      + ' <span class="badge">' + (p.kind || p.side || "") + '</span>'
+      + ' <span class="muted">×' + (p.size_lots || 1) + 'L</span>'
+      + ' <span class="muted" style="float:right">@ ₹' + Number(p.entry_premium||p.premium||0).toFixed(2) + '</span></div>';
+  }).join("");
+  document.getElementById("hedge_proposals").innerHTML = rows || '<em class="muted">none</em>';
+  document.getElementById("hedge_reasons").textContent = (hh.reasons || []).join("\n");
+}
+function render_bootstrap(boot, regime) {
+  var b = boot || {}, r = regime || {};
+  document.getElementById("boot_ran").innerHTML =
+    b.ran ? '<span class="green">yes</span>' : '<span class="muted">no</span>';
+  document.getElementById("boot_days").textContent = b.days_loaded || 0;
+  document.getElementById("boot_obs").textContent = b.observations_replayed || 0;
+  document.getElementById("boot_upd").textContent = b.updates_applied || 0;
+  document.getElementById("reg_today").textContent = r.today_dominant_family || "—";
+  var adj = Number(r.today_confidence_adjustment || 0);
+  var adjCls = adj > 0 ? "red" : (adj < 0 ? "green" : "muted");
+  document.getElementById("reg_nudge").innerHTML =
+    '<span class="' + adjCls + '">' + (adj > 0 ? "+" : "") + adj.toFixed(2) + '</span>'
+    + ' <span class="muted">(positive = tighter floor; negative = looser)</span>';
+  var byFam = r.by_family || {};
+  var rows = Object.keys(byFam).map(function(fam){
+    var v = byFam[fam] || {};
+    var avgR = Number(v.avg_realized_r||0);
+    var avgCls = avgR > 0 ? "green" : (avgR < 0 ? "red" : "muted");
+    return '<div class="position-row"><strong>' + fam + '</strong>'
+      + ' <span class="muted">n=' + (v.n_trades||0) + ' wins=' + (v.wins||0) + '/' + (v.losses||0) + '</span>'
+      + ' <span class="muted">win-rate ' + ((v.win_rate||0)*100).toFixed(1) + '%</span>'
+      + ' <span class="' + avgCls + '" style="float:right">avgR ' + (avgR>=0?"+":"") + avgR.toFixed(2) + '</span></div>';
+  }).join("");
+  document.getElementById("reg_family_rows").innerHTML = rows || '<em class="muted">no history yet (first day)</em>';
+  document.getElementById("boot_notes").textContent =
+    ((b.notes || []).concat(r.notes || [])).join("\n");
 }
 function render(snap) {
   document.getElementById("ts").textContent = snap.ts || "—";
@@ -925,6 +1271,17 @@ function render(snap) {
     </div>`;
   }).join("");
   document.getElementById("attribution").innerHTML = attRows || "<em class='muted'>no closed trades yet</em>";
+  // ── Restoration panels (founder 2026-06-22) ──────────────────
+  var dod = snap.dod_heatmap_panel || {};
+  render_dod_heatmap(dod.values || [], dod.labels || []);
+  render_substrate(snap.substrate_panel || {});
+  render_mtf(snap.mtf_panel || {});
+  render_calibration(snap.calibration_panel || {});
+  render_weight_evolution(snap.weight_evolution_panel || {});
+  render_exit_decision(snap.exit_decision_panel || {});
+  render_projection(snap.projection_panel || {});
+  render_hedge(snap.hedge_panel || {});
+  render_bootstrap(snap.bootstrap_panel || {}, snap.regime_history_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {
