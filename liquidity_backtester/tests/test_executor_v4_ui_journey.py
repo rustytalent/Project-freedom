@@ -439,6 +439,17 @@ def test_e2e_api_key_plug_and_play_via_kite_factory():
                                   "order_id": "MOCK-1",
                                   "status": "submitted"})
             return self.placed[-1]
+        def place_limit_order(self, *, tradingsymbol, side, quantity,
+                                limit_price, exchange, product):
+            # Founder limit-only policy: a real Kite account adapter
+            # MUST expose place_limit_order. The mock now satisfies it.
+            self.placed.append({"tradingsymbol": tradingsymbol,
+                                  "side": side, "quantity": quantity,
+                                  "limit_price": limit_price,
+                                  "exchange": exchange,
+                                  "order_id": "MOCK-LMT-1",
+                                  "status": "submitted"})
+            return self.placed[-1]
         def positions(self):
             return {"net": []}
 

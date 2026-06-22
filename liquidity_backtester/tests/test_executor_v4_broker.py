@@ -116,6 +116,19 @@ class _MockKite:
         })
         return self.placed[-1]
 
+    def place_limit_order(self, *, tradingsymbol, side, quantity,
+                            limit_price, exchange, product):
+        # Founder policy (2026-06-22): the executor uses LIMIT orders;
+        # any account adapter must expose this. Test mock now satisfies
+        # the contract so the live-policy guard doesn't reject it.
+        order_id = f"KITE-LMT-{len(self.placed)}"
+        self.placed.append({
+            "tradingsymbol": tradingsymbol, "side": side,
+            "quantity": quantity, "limit_price": limit_price,
+            "order_id": order_id, "status": "submitted",
+        })
+        return self.placed[-1]
+
     def positions(self):
         return {"net": self._positions}
 

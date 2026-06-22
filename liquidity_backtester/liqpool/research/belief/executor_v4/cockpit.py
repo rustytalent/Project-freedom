@@ -60,6 +60,9 @@ class CockpitSnapshot:
     # Founder-requested live panels (2026-06-22)
     capital_panel: Dict[str, Any] = field(default_factory=dict)
     trades_panel: Dict[str, Any] = field(default_factory=dict)
+    # Workaround panels (2026-06-22)
+    latency_panel: Dict[str, Any] = field(default_factory=dict)
+    attribution_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -255,6 +258,26 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "trades": list(recent)[:15],
     }
 
+    # Latency panel (workaround — founder 2026-06-22).
+    lat = intent_dict.get("latency_summary") or {}
+    latency_panel = {
+        "n_samples": lat.get("n_samples", 0),
+        "total_ms_p50": (lat.get("total_ms") or {}).get("p50_ms"),
+        "total_ms_p95": (lat.get("total_ms") or {}).get("p95_ms"),
+        "total_ms_max": (lat.get("total_ms") or {}).get("max_ms"),
+        "manager_ms_p95": (lat.get("manager_evaluate") or {}).get("p95_ms"),
+        "broker_ms_p95": (lat.get("broker_routing") or {}).get("p95_ms"),
+        "persist_ms_p95": (lat.get("persistence") or {}).get("p95_ms"),
+    }
+
+    # Per-strategy attribution (workaround C).
+    attribution = summary.get("strategy_attribution") or {}
+    attribution_panel = {
+        "n_strategies_seen": attribution.get("n_strategies_seen", 0),
+        "rows": (attribution.get("rows") or [])[:12],
+        "slippage_tracker": summary.get("slippage_tracker") or {},
+    }
+
     explainer_text = explain_tick(intent_dict)
 
     return CockpitSnapshot(
@@ -273,4 +296,6 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         explainer_text=explainer_text,
         capital_panel=capital_panel,
         trades_panel=trades_panel,
+        latency_panel=latency_panel,
+        attribution_panel=attribution_panel,
     )

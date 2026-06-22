@@ -311,6 +311,19 @@ class PortfolioManager:
         # the cockpit's Live Trades panel.
         from collections import deque as _deque
         self._recent_trades: _deque = _deque(maxlen=30)
+        # Slippage feedback (workaround A): observed slippage feeds the
+        # EV gate so it stops underestimating real execution cost.
+        from .monday_bonuses import SlippageTracker
+        self.slippage_tracker = SlippageTracker()
+        # Per-strategy attribution memory (workaround C): rolling
+        # realized-rupees + win counts per strategy name. Built from
+        # closed-position outcomes; surfaced in portfolio_summary.
+        from collections import defaultdict as _ddict
+        self._strategy_stats: dict = _ddict(
+            lambda: {"n_trades": 0, "wins": 0, "losses": 0,
+                      "total_realized_rupees": 0.0, "total_fees_rupees": 0.0,
+                      "best_trade": 0.0, "worst_trade": 0.0,
+                      "avg_realized_r": 0.0, "running_r_sum": 0.0})
         # Sprint 3 layers
         self.manipulation_board = ManipulationBoard(self.cfg.manipulation_board)
         self.mm_mind = MarketMakerMind(self.cfg.market_maker_mind)
@@ -687,8 +700,17 @@ class PortfolioManager:
         # Provisional sizing — base buckets, then scaled by conviction.
         base_lots = self._size_lots(confidence, antithesis_score,
                                        mtf_alignment["alignment_score"])
+        # Confidence-gated sizer (workaround B): scale further by a
+        # strategy-specific multiplier derived from the rolling
+        # attribution. New strategies start at 1.0 (no haircut, but no
+        # bonus either). Strategies with a positive realized track record
+        # earn a bonus up to 1.25×; losing strategies are throttled to
+        # 0.4× until they either earn back the right or get pruned.
+        _action = str(decision.get("action") or "")
+        strat_multiplier = self._strategy_confidence_multiplier(_action)
         size_lots = max(1, int(round(base_lots
-                                       * conviction.size_multiplier)))
+                                       * conviction.size_multiplier
+                                       * strat_multiplier)))
 
         # Probabilities — Sprint-1 placeholder uses confidence + alignment.
         # Sprint 2's scenario_web replaces this with proper Bayesian priors.
@@ -774,9 +796,19 @@ class PortfolioManager:
             rupees_at_risk = abs(stop_premium - entry_premium) * cfg.economics.lot_size * size_lots
 
         rupees_at_target = abs(target_premium - entry_premium) * cfg.economics.lot_size * size_lots
+        # Workaround A: feed observed slippage (bps) into the gate when
+        # we have enough live samples. Falls back to the theoretical
+        # number transparently when the tracker is empty.
+        slip_summary = self.slippage_tracker.rolling_summary()
+        slip_n = int(slip_summary.get("n_records") or 0)
+        slip_mean = (float(slip_summary.get("mean_bps") or 0.0)
+                      if slip_n > 0 else None)
         slippage_est = estimate_slippage(
             lots=size_lots, friendliness=entry_friend,
             spread_state=entry_sstate, cfg=cfg.economics,
+            realized_mean_bps=slip_mean,
+            realized_n_samples=slip_n,
+            reference_premium=entry_premium,
         )
         fees_est = fees_for_round_trip(
             entry_premium=entry_premium, exit_premium=target_premium,
@@ -1342,11 +1374,21 @@ class PortfolioManager:
             entry_premium=h.entry_premium, exit_premium=exit_premium,
             lots=h.size_lots, is_long=is_long, cfg=self.cfg.economics,
         ).total
+        # Slippage realized at close: also blend in the observed
+        # tracker stats so post-close attribution matches the EV gate's
+        # ex-ante number.
+        _slip_summary = self.slippage_tracker.rolling_summary()
+        _slip_n = int(_slip_summary.get("n_records") or 0)
+        _slip_mean = (float(_slip_summary.get("mean_bps") or 0.0)
+                       if _slip_n > 0 else None)
         slippage = estimate_slippage(
             lots=h.size_lots,
             friendliness=getattr(held_read, "friendliness", 1.0) or 1.0,
             spread_state=getattr(held_read, "spread_state", "clean") or "clean",
             cfg=self.cfg.economics,
+            realized_mean_bps=_slip_mean,
+            realized_n_samples=_slip_n,
+            reference_premium=exit_premium,
         )
         side = 1 if is_long else -1
         shares = h.size_lots * self.cfg.economics.lot_size
@@ -1403,6 +1445,23 @@ class PortfolioManager:
             "realized_rupees": net,
             "exit_reason": (exit_reasons[0] if exit_reasons else ""),
         })
+
+        # Per-strategy attribution (workaround C).
+        strat = h.trigger_action or "unknown"
+        stats = self._strategy_stats[strat]
+        stats["n_trades"] += 1
+        stats["total_realized_rupees"] += float(net)
+        stats["total_fees_rupees"] += float(fees)
+        stats["running_r_sum"] += float(current_r)
+        if net > 0:
+            stats["wins"] += 1
+        else:
+            stats["losses"] += 1
+        stats["best_trade"] = max(stats["best_trade"], float(net))
+        stats["worst_trade"] = min(stats["worst_trade"], float(net))
+        stats["avg_realized_r"] = (
+            stats["running_r_sum"] / max(1, stats["n_trades"]))
+
         # Feed the projection tape with the realized outcome.
         target = (self.cfg.scalp_target_r if h.profile == PROFILE_SCALP
                   else self.cfg.intraday_target_r)
@@ -1589,7 +1648,61 @@ class PortfolioManager:
             "live_calibration": self._last_calibration,
             "weight_evolution": self._weight_evolution_summary(),
             "recent_trades": list(self._recent_trades)[:20],
+            "strategy_attribution": self._strategy_attribution_summary(),
+            "slippage_tracker": self.slippage_tracker.rolling_summary(),
         }
+
+    def _strategy_confidence_multiplier(self, strategy_name: str,
+                                            *, min_trades: int = 4,
+                                            ) -> float:
+        """Confidence-gated sizer (workaround B).
+
+        Returns 1.0 until the strategy has at least ``min_trades`` closed
+        trades. After that:
+          - positive avg realized R + win rate >= 0.45 → up to 1.25×
+            (rewards working strategies)
+          - negative avg R OR win rate < 0.30          → 0.40×
+            (throttles the bleeder until it earns back the right)
+          - otherwise                                     → 1.0×
+        """
+        stats = self._strategy_stats.get(strategy_name)
+        if stats is None or stats["n_trades"] < min_trades:
+            return 1.0
+        avg_r = stats["avg_realized_r"]
+        wr = stats["wins"] / max(1, stats["n_trades"])
+        if avg_r > 0.05 and wr >= 0.45:
+            # Map avg_r ∈ [0.05, 0.50] → [1.0, 1.25].
+            boost = min(1.25, 1.0 + (avg_r - 0.05) * 0.55)
+            return float(boost)
+        if avg_r < -0.05 or wr < 0.30:
+            return 0.40
+        return 1.0
+
+    def _strategy_attribution_summary(self) -> Dict[str, Any]:
+        """Surface per-strategy track record for the cockpit + post-mortem."""
+        rows = []
+        for name, s in self._strategy_stats.items():
+            n = s["n_trades"]
+            if n == 0:
+                continue
+            rows.append({
+                "strategy": name,
+                "n_trades": n,
+                "wins": s["wins"],
+                "losses": s["losses"],
+                "win_rate": round(s["wins"] / max(1, n), 3),
+                "total_realized_rupees": round(s["total_realized_rupees"], 2),
+                "total_fees_rupees": round(s["total_fees_rupees"], 2),
+                "avg_realized_r": round(s["avg_realized_r"], 3),
+                "best_trade_rupees": round(s["best_trade"], 2),
+                "worst_trade_rupees": round(s["worst_trade"], 2),
+                "size_multiplier_now": self._strategy_confidence_multiplier(
+                    name),
+            })
+        # Sort by total realized rupees descending so the cockpit shows
+        # the most-impactful first.
+        rows.sort(key=lambda r: r["total_realized_rupees"], reverse=True)
+        return {"n_strategies_seen": len(rows), "rows": rows}
 
     def _weight_evolution_summary(self) -> Dict[str, Any]:
         try:

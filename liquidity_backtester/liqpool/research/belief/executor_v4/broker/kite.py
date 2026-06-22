@@ -42,6 +42,10 @@ class KiteBrokerConfig:
     use_limit_orders: bool = True        # default to LIMIT (safer than MARKET)
     limit_buffer_bps: float = 5.0        # +/- 5bps above/below ask/bid
     fail_on_kite_exception: bool = True
+    # Founder hard policy (2026-06-22): never send MARKET orders unless
+    # the operator explicitly authorizes it for THIS session. MARKET kills
+    # via slippage. The whole executor is built around limit prices.
+    allow_market_orders: bool = False
 
 
 class KiteBrokerAdapter(BrokerAdapter):
@@ -129,13 +133,46 @@ class KiteBrokerAdapter(BrokerAdapter):
             self._submitted[broker_id] = result
             return result
 
+        # FOUNDER POLICY GUARD — MARKET orders are refused unless the
+        # config explicitly authorizes them.
+        if order.order_type == "MARKET" and not cfg.allow_market_orders:
+            return _reject(
+                order, ts_sub,
+                "MARKET orders disallowed by config "
+                "(set allow_market_orders=True only if you understand "
+                "slippage will cut into expected edge)")
+
         # Live placement.
         try:
-            response = self.kite_account.place_market_exit(
-                tradingsymbol=order.tradingsymbol,
-                side=order.side, quantity=order.quantity,
-                exchange=order.exchange,
-            )
+            if order.order_type == "LIMIT":
+                # Prefer a dedicated limit-order entry point if the
+                # account provides one; otherwise fall back to the
+                # generic placer.
+                if hasattr(self.kite_account, "place_limit_order"):
+                    response = self.kite_account.place_limit_order(
+                        tradingsymbol=order.tradingsymbol,
+                        side=order.side,
+                        quantity=order.quantity,
+                        limit_price=float(order.limit_price or 0.0),
+                        exchange=order.exchange,
+                        product=order.product,
+                    )
+                else:
+                    # The legacy KiteAccount only exposes place_market_exit
+                    # (a market-order helper). We REFUSE to fall through
+                    # to it for a LIMIT request — would silently send a
+                    # market order in production.
+                    return _reject(
+                        order, ts_sub,
+                        "Kite account does not expose place_limit_order; "
+                        "refusing to fall through to MARKET. Wire the "
+                        "limit-order helper and retry.")
+            else:
+                response = self.kite_account.place_market_exit(
+                    tradingsymbol=order.tradingsymbol,
+                    side=order.side, quantity=order.quantity,
+                    exchange=order.exchange,
+                )
         except Exception as exc:
             if cfg.fail_on_kite_exception:
                 return _reject(order, ts_sub, f"kite exception: {exc}")

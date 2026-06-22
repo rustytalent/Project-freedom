@@ -121,6 +121,11 @@ class V4Runner:
                                                    port=self.cfg.cockpit_server_port)
             self._cockpit_server.start()
         self._last_tick_ts: Optional[float] = None
+        # Latency tracker (founder ask 2026-06-22): per-tick wall-time
+        # per stage so the operator can SEE whether the brain is keeping
+        # up. Bounded ring buffer of the last 60 ticks' breakdowns.
+        from collections import deque as _deque
+        self._latency_samples: _deque = _deque(maxlen=60)
         # Try to restore from disk if a snapshot exists for today.
         snap = self.persistence.load_today()
         if snap is not None:
@@ -176,6 +181,9 @@ class V4Runner:
         cfg = self.cfg
         notes: List[str] = []
         self._last_tick_ts = time.time()
+        # Latency profiling — wall-time per stage.
+        _t0 = time.perf_counter()
+        timings_ms: Dict[str, float] = {}
 
         # 1. Engine upgrades (adaptive warmup, dirty-quote healing, etc.)
         snap_for_manager = dict(belief_snapshot)
@@ -185,14 +193,20 @@ class V4Runner:
             if upgrade_report.actions_taken:
                 notes.append("upgrades: "
                               + "; ".join(upgrade_report.actions_taken[:3]))
+        timings_ms["engine_upgrades"] = (time.perf_counter() - _t0) * 1000.0
+
         # 1b. Manager evaluation.
+        _t1 = time.perf_counter()
         if hasattr(self.broker, "begin_tick"):
             self.broker.begin_tick()
         intent = self.manager.evaluate(snap_for_manager,
                                          held_quotes=held_quotes)
+        timings_ms["manager_evaluate"] = (time.perf_counter() - _t1) * 1000.0
 
         # 2. Broker routing.
+        _t2 = time.perf_counter()
         broker_results = self._route_to_broker(intent)
+        timings_ms["broker_routing"] = (time.perf_counter() - _t2) * 1000.0
         # Keep the paper adapter's marks fresh for accurate unrealized P&L.
         if isinstance(self.broker, PaperBrokerAdapter):
             for slot in (belief_snapshot.get("slot_readings") or []):
@@ -210,15 +224,24 @@ class V4Runner:
                     self.broker.credit_realized_pnl(realized)
 
         # 3. Persistence.
+        _t3 = time.perf_counter()
         snap = capture_state(self.manager)
         persisted = self.persistence.write(snap)
+        timings_ms["persistence"] = (time.perf_counter() - _t3) * 1000.0
 
         # 4. Cockpit.
+        _t4 = time.perf_counter()
         intent_dict_for_cockpit = intent.to_dict()
         try:
             intent_dict_for_cockpit["broker_capital"] = self.broker.get_capital()
         except Exception:
             intent_dict_for_cockpit["broker_capital"] = {}
+        # Attach the latency self-report for the cockpit (this same tick).
+        # We've measured every prior stage; cockpit + emit will be
+        # totaled at the very end.
+        timings_ms["total_so_far_ms"] = (time.perf_counter() - _t0) * 1000.0
+        intent_dict_for_cockpit["latency_ms"] = dict(timings_ms)
+        intent_dict_for_cockpit["latency_summary"] = self.latency_summary()
         cockpit = build_cockpit_snapshot(intent_dict_for_cockpit)
         if self._cockpit_server is not None:
             try:
@@ -233,9 +256,40 @@ class V4Runner:
         if cfg.emit_explainer_to_log:
             log.info(cockpit.explainer_text)
 
+        # Final timing — total wall time end-to-end.
+        timings_ms["total_ms"] = (time.perf_counter() - _t0) * 1000.0
+        self._latency_samples.append(dict(timings_ms))
+
         return TickResult(intent=intent, cockpit=cockpit,
                            broker_results=broker_results,
                            persisted=persisted, notes=notes)
+
+    def latency_summary(self) -> Dict[str, Any]:
+        """Rolling latency stats across the last 60 ticks (founder ask
+        2026-06-22). Use this to verify the brain keeps up with a 1-sec
+        poll cycle."""
+        if not self._latency_samples:
+            return {"n_samples": 0}
+        samples = list(self._latency_samples)
+        # All possible keys across the window.
+        keys = set()
+        for s in samples:
+            keys.update(s.keys())
+        out: Dict[str, Any] = {"n_samples": len(samples)}
+        for k in sorted(keys):
+            vals = [float(s.get(k) or 0.0) for s in samples]
+            vals = [v for v in vals if v > 0]
+            if not vals:
+                continue
+            vals_sorted = sorted(vals)
+            n = len(vals_sorted)
+            out[k] = {
+                "mean_ms": round(sum(vals) / max(1, n), 3),
+                "p50_ms": round(vals_sorted[n // 2], 3),
+                "p95_ms": round(vals_sorted[min(n - 1, int(n * 0.95))], 3),
+                "max_ms": round(max(vals), 3),
+            }
+        return out
 
     def stop(self) -> None:
         """Clean shutdown (stops the cockpit server if running)."""
@@ -279,7 +333,9 @@ class V4Runner:
                         tag="ENTRY",
                         position_id=h.get("position_id"),
                     )
-                    results.append(self.broker.place_order(order))
+                    fill = self.broker.place_order(order)
+                    results.append(fill)
+                    self._record_slippage(order, fill)
         # Closures → opposite side.
         for closed in intent.closed_this_tick:
             pid = closed.get("position_id", "")
@@ -314,8 +370,30 @@ class V4Runner:
                 tag="EXIT",
                 position_id=pid,
             )
-            results.append(self.broker.place_order(order))
+            fill = self.broker.place_order(order)
+            results.append(fill)
+            self._record_slippage(order, fill)
         return results
+
+    def _record_slippage(self, order, fill) -> None:
+        """Workaround A: record predicted-vs-actual fill price for the
+        manager's slippage tracker. The EV gate consumes this on the
+        next entry attempt."""
+        try:
+            if not fill or not fill.is_filled:
+                return
+            predicted = float(order.limit_price or 0.0)
+            actual = float(fill.avg_fill_price or 0.0)
+            if predicted <= 0 or actual <= 0:
+                return
+            self.manager.slippage_tracker.record(
+                tradingsymbol=order.tradingsymbol,
+                side=order.side,
+                predicted=predicted,
+                actual=actual,
+            )
+        except Exception:
+            pass
 
     # ── Tradingsymbol construction ──────────────────────────────────
 

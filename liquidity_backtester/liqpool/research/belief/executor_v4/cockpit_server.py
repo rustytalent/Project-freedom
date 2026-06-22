@@ -602,6 +602,30 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <h2>ACTIVE PATTERNS</h2>
       <div id="patterns">—</div>
     </div>
+    <div class="panel">
+      <h2>LATENCY (rolling 60 ticks)</h2>
+      <div class="kv">
+        <div class="k">Total p50</div><div class="v" id="lat_p50">—</div>
+        <div class="k">Total p95</div><div class="v" id="lat_p95">—</div>
+        <div class="k">Total max</div><div class="v" id="lat_max">—</div>
+        <div class="k">Manager p95</div><div class="v" id="lat_mgr">—</div>
+        <div class="k">Broker p95</div><div class="v" id="lat_brk">—</div>
+        <div class="k">Persist p95</div><div class="v" id="lat_per">—</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>SLIPPAGE TRACKER</h2>
+      <div class="kv">
+        <div class="k">Records</div><div class="v" id="slip_n">—</div>
+        <div class="k">Mean bps</div><div class="v" id="slip_mean">—</div>
+        <div class="k">Median bps</div><div class="v" id="slip_med">—</div>
+        <div class="k">Worst bps</div><div class="v" id="slip_worst">—</div>
+      </div>
+    </div>
+    <div class="panel full">
+      <h2>STRATEGY ATTRIBUTION (closed trades)</h2>
+      <div id="attribution">—</div>
+    </div>
   </div>
   <div class="footer">SSE source: <code>/api/stream</code>. Latest snapshot: <span id="ts">—</span></div>
 <script>
@@ -745,6 +769,43 @@ function render(snap) {
     </div>`;
   }).join("");
   document.getElementById("trades").innerHTML = tradesHtml || "<em class='muted'>no recent trades</em>";
+  // ── Latency panel ──────────────────────────────────────────
+  var lat = snap.latency_panel || {};
+  function fmt_ms(v) {
+    if (v == null) return "—";
+    var n = Number(v);
+    var cls = n > 1000 ? "red" : (n > 500 ? "yellow" : "green");
+    return `<span class="${cls}">${n.toFixed(1)} ms</span>`;
+  }
+  document.getElementById("lat_p50").innerHTML = fmt_ms(lat.total_ms_p50);
+  document.getElementById("lat_p95").innerHTML = fmt_ms(lat.total_ms_p95);
+  document.getElementById("lat_max").innerHTML = fmt_ms(lat.total_ms_max);
+  document.getElementById("lat_mgr").innerHTML = fmt_ms(lat.manager_ms_p95);
+  document.getElementById("lat_brk").innerHTML = fmt_ms(lat.broker_ms_p95);
+  document.getElementById("lat_per").innerHTML = fmt_ms(lat.persist_ms_p95);
+  // ── Slippage tracker ───────────────────────────────────────
+  var slip = (snap.attribution_panel || {}).slippage_tracker || {};
+  document.getElementById("slip_n").textContent = slip.n_records || 0;
+  document.getElementById("slip_mean").textContent = slip.mean_bps != null ? Number(slip.mean_bps).toFixed(1) : "—";
+  document.getElementById("slip_med").textContent = slip.median_bps != null ? Number(slip.median_bps).toFixed(1) : "—";
+  document.getElementById("slip_worst").textContent = slip.worst_bps != null ? Number(slip.worst_bps).toFixed(1) : "—";
+  // ── Strategy attribution panel ─────────────────────────────
+  var att = snap.attribution_panel || {};
+  var attRows = (att.rows || []).slice(0, 10).map(r => {
+    var pnl = Number(r.total_realized_rupees || 0);
+    var pnlClass = pnl > 0 ? "green" : (pnl < 0 ? "red" : "muted");
+    var multClass = r.size_multiplier_now < 1 ? "red" : (r.size_multiplier_now > 1 ? "green" : "muted");
+    return `<div class="position-row">
+      <strong>${r.strategy}</strong>
+      <span class="muted">n=${r.n_trades} wins=${r.wins}/${r.losses}</span>
+      <span class="muted"> avgR ${(r.avg_realized_r||0).toFixed(2)}</span>
+      <span class="${pnlClass}" style="float:right">
+        ${pnl >= 0 ? "+" : ""}₹${pnl.toLocaleString("en-IN", {maximumFractionDigits: 0})}
+        <span class="${multClass}">[size × ${(r.size_multiplier_now||1).toFixed(2)}]</span>
+      </span>
+    </div>`;
+  }).join("");
+  document.getElementById("attribution").innerHTML = attRows || "<em class='muted'>no closed trades yet</em>";
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

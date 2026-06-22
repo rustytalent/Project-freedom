@@ -188,10 +188,20 @@ def estimate_slippage(*,
                       friendliness: float = 1.0,
                       spread_state: str = "clean",
                       cfg: Optional[ExecutionEconomicsConfig] = None,
+                      realized_mean_bps: Optional[float] = None,
+                      realized_n_samples: int = 0,
+                      reference_premium: float = 0.0,
                       ) -> float:
     """Estimate slippage cost in rupees for a round-trip.
 
     Worse friendliness / spread state → linearly higher slippage.
+
+    Adaptive override (Sun 2026-06-22 workaround A): when
+    ``realized_mean_bps`` is supplied with enough samples, blend it into
+    the theoretical estimate. Live execution slippage usually drifts
+    from the textbook number — once we have ≥ N real fills, we trust the
+    observed cost more than the prior. The blend weight grows with
+    sample size, saturating around n=30.
     """
     cfg = cfg or ExecutionEconomicsConfig()
     base = cfg.default_slippage_per_leg
@@ -204,7 +214,23 @@ def estimate_slippage(*,
     elif spread_state == "dangerous":
         mult_state = 3.0
     per_leg = base * mult_friend * mult_state
-    return 2.0 * per_leg * lots * cfg.lot_size
+    theoretical = 2.0 * per_leg * lots * cfg.lot_size
+
+    # ── Realized-slippage feedback (workaround A) ────────────────
+    if (realized_mean_bps is not None
+            and realized_n_samples > 0
+            and reference_premium > 0):
+        # Per-leg slippage in rupees implied by the realized bps.
+        realized_per_leg = (
+            abs(realized_mean_bps) / 10000.0
+            * reference_premium * lots * cfg.lot_size)
+        realized = 2.0 * realized_per_leg
+        # Blend weight: saturates at n=30 → trust observed when we have
+        # enough data, but always keep some prior to dampen noise.
+        weight = min(0.85, realized_n_samples / 30.0)
+        return (1.0 - weight) * theoretical + weight * realized
+
+    return theoretical
 
 
 def minimum_profitable_premium_delta(*,
