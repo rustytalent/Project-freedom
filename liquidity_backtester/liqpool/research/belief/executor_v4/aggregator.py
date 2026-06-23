@@ -37,11 +37,17 @@ AGGR_TIGHTEN_OPEN = "TIGHTEN_OPEN"     # accept-with-portfolio-guard
 class AggregatorConfig:
     """Knobs for the decision aggregator."""
     # Component weights — sum to 1.0.
-    w_base_score: float = 0.30
-    w_mtf_alignment: float = 0.25
-    w_projection: float = 0.20
-    w_fees_clearance: float = 0.15
-    w_portfolio_capacity: float = 0.10
+    w_base_score: float = 0.26
+    w_mtf_alignment: float = 0.22
+    w_projection: float = 0.18
+    w_fees_clearance: float = 0.13
+    w_portfolio_capacity: float = 0.09
+    # Founder 2026-06-22 Tier-2: rehearsal layer is the 6th component.
+    # Conditional-kNN off-policy evaluation produces a calibrated
+    # P(profit | current state, current entry params); when the
+    # ensemble is uncertain it emits 0.50 which behaves as a neutral
+    # prior and effectively yields the weight to the other components.
+    w_rehearsal: float = 0.12
     # Decision thresholds.
     accept_threshold: float = 0.58
     size_down_threshold: float = 0.50
@@ -53,6 +59,11 @@ class AggregatorConfig:
     # Projection.
     min_projection_samples: int = 20
     favorable_target_minus_stop: float = 0.10   # P(target hit) - P(stop hit) ≥ this
+    # Rehearsal layer escalations — when the rehearsal recommendation is
+    # DEFER and confidence is high enough, the aggregator refuses
+    # outright (rehearsal saw the analogue distribution telling us this
+    # state usually loses).
+    rehearsal_defer_min_confidence: float = 0.30
 
 
 @dataclass
@@ -72,6 +83,10 @@ class AggregatorDecision:
     recommended_size_multiplier: float    # 0..1
     refuse_reasons: List[str]             # populated when decision != ACCEPT
     component_explanations: List[str]
+    # Founder 2026-06-22 Tier-2: rehearsal score + confidence + action.
+    rehearsal_score: float = 0.50
+    rehearsal_confidence: float = 0.0
+    rehearsal_action: str = "PROCEED"
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -90,6 +105,9 @@ class AggregatorDecision:
             "recommended_size_multiplier": round(self.recommended_size_multiplier, 3),
             "refuse_reasons": list(self.refuse_reasons),
             "component_explanations": list(self.component_explanations),
+            "rehearsal_score": round(self.rehearsal_score, 3),
+            "rehearsal_confidence": round(self.rehearsal_confidence, 3),
+            "rehearsal_action": self.rehearsal_action,
             "notes": list(self.notes),
         }
 
@@ -106,7 +124,8 @@ class DecisionAggregator:
         # Sanity check the weight sum.
         total = (self.cfg.w_base_score + self.cfg.w_mtf_alignment
                  + self.cfg.w_projection + self.cfg.w_fees_clearance
-                 + self.cfg.w_portfolio_capacity)
+                 + self.cfg.w_portfolio_capacity
+                 + self.cfg.w_rehearsal)
         if abs(total - 1.0) > 0.05:
             raise ValueError(
                 f"Aggregator weights must sum to ~1.0; got {total:.3f}"
@@ -125,6 +144,7 @@ class DecisionAggregator:
                 max_open_positions: int,
                 daily_pnl_rupees: float,
                 max_daily_bleed: float,
+                rehearsal_decision: Any = None,
                 ) -> AggregatorDecision:
         """Apply the transparent decision rule. Returns AggregatorDecision."""
         cfg = self.cfg
@@ -259,6 +279,43 @@ class DecisionAggregator:
                     f"proposed direction {proposed_direction:+d}"
                 )
 
+        # ── Component 6: rehearsal (conditional-kNN off-policy eval) ──
+        # Founder 2026-06-22 Tier-2: the rehearsal ensemble looks at the
+        # K most-similar historical trades to the current state and
+        # reports P(profit | this state). When confidence is low (no
+        # history yet, or no analogues nearby) the ensemble emits 0.50
+        # which is a neutral prior — the aggregator effectively gets
+        # nothing from this weight in cold-start sessions but inherits
+        # institutional memory once the store accumulates.
+        rehearsal_score = 0.50
+        rehearsal_confidence = 0.0
+        rehearsal_action = "PROCEED"
+        if rehearsal_decision is not None:
+            rehearsal_score = float(getattr(rehearsal_decision,
+                                              "rehearsal_score", 0.50))
+            rehearsal_confidence = float(getattr(rehearsal_decision,
+                                                   "confidence", 0.0))
+            rehearsal_action = str(getattr(rehearsal_decision,
+                                              "recommended_action", "PROCEED"))
+            n_anal = int(getattr(rehearsal_decision,
+                                   "n_analogues_total", 0))
+            best_name = str(getattr(rehearsal_decision,
+                                       "best_perturbation_name", ""))
+            explanations.append(
+                f"rehearsal: score {rehearsal_score:.2f} "
+                f"(conf {rehearsal_confidence:.2f}, n={n_anal}, "
+                f"best='{best_name}', action {rehearsal_action})"
+            )
+            if (rehearsal_action == "DEFER"
+                    and rehearsal_confidence
+                    >= cfg.rehearsal_defer_min_confidence):
+                refuse_reasons.append(
+                    f"rehearsal DEFER (conf {rehearsal_confidence:.2f}): "
+                    f"P(profit) too low for analogues of this state")
+            # Append the top rehearsal notes as context.
+            for r in (getattr(rehearsal_decision, "notes", []) or [])[:2]:
+                notes.append(f"rehearsal: {r}")
+
         # ── Final composite score ───────────────────────────────────
         final_score = (
             cfg.w_base_score * base_score
@@ -266,6 +323,7 @@ class DecisionAggregator:
             + cfg.w_projection * projection_factor
             + cfg.w_fees_clearance * fees_score
             + cfg.w_portfolio_capacity * portfolio_score
+            + cfg.w_rehearsal * rehearsal_score
         )
         # Strategy class disagreement penalty.
         if web_strategy and web_strategy != "wait" \
@@ -322,5 +380,8 @@ class DecisionAggregator:
             recommended_size_multiplier=max(0.0, min(1.0, recommended_size)),
             refuse_reasons=refuse_reasons,
             component_explanations=explanations,
+            rehearsal_score=rehearsal_score,
+            rehearsal_confidence=rehearsal_confidence,
+            rehearsal_action=rehearsal_action,
             notes=notes,
         )

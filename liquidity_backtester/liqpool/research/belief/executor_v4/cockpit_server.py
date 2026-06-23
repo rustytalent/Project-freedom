@@ -725,6 +725,30 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
     </div>
     <div class="panel full">
+      <h2>REHEARSAL ENSEMBLE — conditional-kNN off-policy evaluation</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        At each entry consideration we look at the K most-similar past trades and ask
+        "what would the analogues say happens if we enter with these parameters?" Per-perturbation
+        rows show alternate entry variants — when a row's mean R is meaningfully higher than
+        as_proposed, the ensemble flags TUNE.
+      </div>
+      <div class="kv">
+        <div class="k">Booted?</div><div class="v" id="reh_boot">—</div>
+        <div class="k">Observations in ring</div><div class="v" id="reh_n">—</div>
+        <div class="k">History days loaded</div><div class="v" id="reh_days">—</div>
+        <div class="k">Rehearsal score</div><div class="v" id="reh_score">—</div>
+        <div class="k">Confidence</div><div class="v" id="reh_conf">—</div>
+        <div class="k">Analogues retrieved</div><div class="v" id="reh_anal">—</div>
+        <div class="k">Action</div><div class="v" id="reh_act">—</div>
+        <div class="k">Best perturbation</div><div class="v" id="reh_best">—</div>
+      </div>
+      <h2 style="margin-top:14px;">Per-perturbation outcome distribution</h2>
+      <div id="reh_perturbations">—</div>
+      <h2 style="margin-top:14px;">Top distance-metric weights</h2>
+      <div id="reh_weights">—</div>
+      <pre id="reh_notes" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel full">
       <h2>REGIME-AWARE CALIBRATION (yesterday → today)</h2>
       <div class="kv">
         <div class="k">Bootstrap ran?</div><div class="v" id="boot_ran">—</div>
@@ -1106,6 +1130,66 @@ function render_bootstrap(boot, regime) {
   document.getElementById("boot_notes").textContent =
     ((b.notes || []).concat(r.notes || [])).join("\n");
 }
+function render_rehearsal(rh) {
+  var r = rh || {};
+  document.getElementById("reh_boot").innerHTML =
+    r.booted ? '<span class="green">yes</span>' : '<span class="muted">no</span>';
+  document.getElementById("reh_n").textContent = r.n_observations_in_ring || 0;
+  document.getElementById("reh_days").textContent = r.history_days_loaded || 0;
+  if (!r.has_decision || !r.ran) {
+    document.getElementById("reh_score").innerHTML = '<span class="muted">no decision yet</span>';
+    document.getElementById("reh_conf").textContent = "—";
+    document.getElementById("reh_anal").textContent = "—";
+    document.getElementById("reh_act").textContent = r.deferral_reason || "—";
+    document.getElementById("reh_best").textContent = "—";
+    document.getElementById("reh_perturbations").innerHTML =
+      '<em class="muted">no rehearsal yet (need ≥ 12 observations + entry consideration)</em>';
+  } else {
+    var score = Number(r.rehearsal_score || 0.50);
+    var cls = score > 0.55 ? "green" : (score < 0.45 ? "red" : "muted");
+    document.getElementById("reh_score").innerHTML =
+      fmt_bar(score, 0, 1) + ' <span class="' + cls + '">' + score.toFixed(2) + '</span>';
+    document.getElementById("reh_conf").innerHTML = fmt_bar(r.confidence || 0, 0, 1) + " " + (r.confidence||0).toFixed(2);
+    document.getElementById("reh_anal").textContent = r.n_analogues_total + " (mean similarity " + (r.mean_similarity||0).toFixed(2) + ")";
+    var act = r.recommended_action || "PROCEED";
+    var actCls = act === "DEFER" ? "red" : (act === "TUNE" ? "yellow" : "green");
+    document.getElementById("reh_act").innerHTML = '<span class="' + actCls + '">' + act + '</span>';
+    document.getElementById("reh_best").innerHTML =
+      '<strong>' + (r.best_perturbation_name || "—") + '</strong>'
+      + ' <span class="muted">(current: ' + (r.current_perturbation_name || "as_proposed") + ')</span>';
+    // Per-perturbation rows.
+    var rows = (r.per_perturbation || []).map(function(p){
+      var mean = Number(p.mean_r||0);
+      var meanCls = mean > 0.10 ? "green" : (mean < -0.10 ? "red" : "muted");
+      var pProf = Number(p.p_profit||0);
+      var profCls = pProf > 0.55 ? "green" : (pProf < 0.45 ? "red" : "muted");
+      var isBest = p.name === r.best_perturbation_name;
+      var isCurr = p.name === r.current_perturbation_name;
+      var prefix = (isBest ? "★ " : "") + (isCurr ? "● " : "");
+      return '<div class="position-row">'
+        + '<strong>' + prefix + (p.name || "") + '</strong>'
+        + ' <span class="muted">n=' + (p.n_analogues||0) + '</span>'
+        + ' <span class="' + meanCls + '"> mean R ' + (mean>=0?"+":"") + mean.toFixed(2) + '</span>'
+        + ' <span class="muted"> ±' + Number(p.std_r||0).toFixed(2) + '</span>'
+        + ' <span class="' + profCls + '"> P(profit) ' + (pProf*100).toFixed(0) + '%</span>'
+        + ' <span class="muted" style="float:right">target ' + ((p.p_target||0)*100).toFixed(0) + '% / stop ' + ((p.p_stop||0)*100).toFixed(0) + '%</span>'
+        + (p.notes ? '<div class="muted" style="margin-left:18px;font-size:11px;">' + p.notes + '</div>' : '')
+        + '</div>';
+    }).join("");
+    document.getElementById("reh_perturbations").innerHTML = rows;
+  }
+  // Feature weights — show the top 8 by magnitude (most informative
+  // features under the current outcome correlation).
+  var fw = r.feature_weights || {};
+  var ents = Object.keys(fw).map(function(k){ return [k, Number(fw[k] || 0)]; });
+  ents.sort(function(a,b){ return b[1] - a[1]; });
+  var top = ents.slice(0, 8);
+  document.getElementById("reh_weights").innerHTML = top.map(function(kv){
+    return '<div class="position-row"><strong>' + kv[0] + '</strong>'
+      + ' <span class="muted" style="float:right">' + kv[1].toFixed(2) + '</span></div>';
+  }).join("") || '<em class="muted">weights not yet computed (needs ≥ 30 obs)</em>';
+  document.getElementById("reh_notes").textContent = (r.notes || []).join("\n");
+}
 function render(snap) {
   document.getElementById("ts").textContent = snap.ts || "—";
   document.getElementById("status").innerHTML = '<span class="status-dot"></span>live';
@@ -1282,6 +1366,7 @@ function render(snap) {
   render_projection(snap.projection_panel || {});
   render_hedge(snap.hedge_panel || {});
   render_bootstrap(snap.bootstrap_panel || {}, snap.regime_history_panel || {});
+  render_rehearsal(snap.rehearsal_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

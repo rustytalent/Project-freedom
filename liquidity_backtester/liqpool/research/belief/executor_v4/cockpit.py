@@ -75,6 +75,8 @@ class CockpitSnapshot:
     projection_panel: Dict[str, Any] = field(default_factory=dict)
     regime_history_panel: Dict[str, Any] = field(default_factory=dict)
     bootstrap_panel: Dict[str, Any] = field(default_factory=dict)
+    # Tier-2: Belief Rehearsal Ensemble — kNN off-policy evaluation.
+    rehearsal_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -425,6 +427,33 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "notes": list(boot.get("notes") or []),
     }
 
+    # Rehearsal panel (Tier-2): conditional-kNN off-policy evaluation.
+    # The most-recent rehearsal decision with per-perturbation outcome
+    # distribution + feature weights so the operator can SEE which
+    # features the ensemble considers important right now.
+    rh = summary.get("rehearsal_ensemble") or {}
+    last_dec = rh.get("last_decision") or {}
+    rehearsal_panel = {
+        "booted": rh.get("booted", False),
+        "n_observations_in_ring": rh.get("n_observations_in_ring", 0),
+        "history_days_loaded": rh.get("history_days_loaded", 0),
+        "feature_weights": dict(rh.get("feature_weights") or {}),
+        "has_decision": bool(last_dec),
+        "ran": last_dec.get("ran", False),
+        "rehearsal_score": last_dec.get("rehearsal_score", 0.50),
+        "confidence": last_dec.get("confidence", 0.0),
+        "n_analogues_total": last_dec.get("n_analogues_total", 0),
+        "mean_similarity": last_dec.get("mean_similarity", 0.0),
+        "recommended_action": last_dec.get("recommended_action", ""),
+        "best_perturbation_name": last_dec.get(
+            "best_perturbation_name", ""),
+        "current_perturbation_name": last_dec.get(
+            "current_perturbation_name", "as_proposed"),
+        "per_perturbation": list(last_dec.get("per_perturbation") or []),
+        "notes": list(last_dec.get("notes") or []),
+        "deferral_reason": last_dec.get("deferral_reason", ""),
+    }
+
     explainer_text = explain_tick(intent_dict)
 
     return CockpitSnapshot(
@@ -454,4 +483,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         projection_panel=projection_panel,
         regime_history_panel=regime_history_panel,
         bootstrap_panel=bootstrap_panel,
+        rehearsal_panel=rehearsal_panel,
     )

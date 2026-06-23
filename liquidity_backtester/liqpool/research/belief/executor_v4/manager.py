@@ -358,6 +358,23 @@ class PortfolioManager:
         )
         self._bootstrap_result: Optional[Dict[str, Any]] = None
         self._bootstrap_attempted: bool = False
+        # Belief Rehearsal Ensemble (founder 2026-06-22 Tier-2): the
+        # conditional-kNN off-policy evaluator. Lives under the same
+        # state directory; loads up to history_days of prior closures
+        # at the first tick (lazy boot), then rehearses every entry
+        # consideration against the analogue distribution.
+        from .belief_rehearsal import (
+            BeliefRehearsalEnsemble, RehearsalConfig,
+        )
+        if self.cfg.calibration_state_dir is not None:
+            self.rehearsal_ensemble: Optional[BeliefRehearsalEnsemble] = (
+                BeliefRehearsalEnsemble(
+                    state_dir=Path(self.cfg.calibration_state_dir),
+                    cfg=RehearsalConfig(),
+                ))
+        else:
+            self.rehearsal_ensemble = None
+        self._last_rehearsal_decision: Optional[Dict[str, Any]] = None
         # Recent-trades tape (last N opens + closes, newest first) — feeds
         # the cockpit's Live Trades panel.
         from collections import deque as _deque
@@ -435,6 +452,14 @@ class PortfolioManager:
                 self.regime_history.load_from_records(prior)
             except Exception:
                 self._bootstrap_result = None
+            # Boot the rehearsal ensemble (loads history into the ring +
+            # initialises feature-space statistics + recomputes the
+            # distance-metric weights from the loaded outcomes).
+            if self.rehearsal_ensemble is not None:
+                try:
+                    self.rehearsal_ensemble.boot()
+                except Exception:
+                    pass
 
         # 1. Information substrate update
         rich = self.substrate_state.observe(snapshot)
@@ -871,6 +896,49 @@ class PortfolioManager:
         proposed_strategy_class = (STRAT_LONG_CE if direction > 0
                                     else STRAT_LONG_PE)
 
+        # Gate G.5: Sprint-2 Tier-2 — rehearsal ensemble. Conditional-kNN
+        # off-policy evaluation over historical analogues. Returns
+        # P(profit | this state) plus a per-perturbation breakdown that
+        # tells us which entry-parameter variant the analogues say
+        # actually worked.
+        rehearsal_decision = None
+        if self.rehearsal_ensemble is not None:
+            try:
+                from .belief_rehearsal import build_query_features
+                from .learning_persistence import (
+                    regime_tag_from_web_snapshot,
+                )
+                web_dict = (web_snap.to_dict()
+                              if web_snap is not None else None)
+                qf = build_query_features(
+                    rich_context=rich.to_dict() if rich is not None else None,
+                    web_snapshot=web_dict,
+                    mm_posterior=(self._last_mm_posterior.to_dict()
+                                    if self._last_mm_posterior else None),
+                    crowd_report=(self._last_crowd_report.to_dict()
+                                    if self._last_crowd_report else None),
+                    portfolio_risk=(self._last_risk_report.to_dict()
+                                      if self._last_risk_report else None),
+                    iv_state=_map(snapshot.get("iv_state")),
+                    flow_event=flow_event.to_dict() if flow_event else None,
+                    n_open_positions=len(self._open_states),
+                )
+                proposed_params = {
+                    "entry_confidence": float(confidence),
+                    "size_lots": float(size_lots),
+                    "target_r": float(profile_target),
+                    "stop_r": 1.0,
+                    "profile_scalp": 1.0 if profile == PROFILE_SCALP else 0.0,
+                    "direction": float(direction),
+                }
+                rehearsal_decision = self.rehearsal_ensemble.rehearse(
+                    query_features=qf,
+                    proposed_params=proposed_params,
+                    regime_tag=regime_tag_from_web_snapshot(web_dict),
+                )
+            except Exception:
+                rehearsal_decision = None
+
         # Gate H: Sprint-2 decision aggregator — combines everything.
         agg = self.aggregator.decide(
             base_confidence=confidence,
@@ -885,6 +953,7 @@ class PortfolioManager:
             max_open_positions=cfg.economics.max_open_positions,
             daily_pnl_rupees=self.daily_pnl_rupees,
             max_daily_bleed=cfg.economics.max_daily_bleed,
+            rehearsal_decision=rehearsal_decision,
         )
         if agg.decision == AGGR_REFUSE:
             refuse.extend(agg.refuse_reasons[:3])
@@ -1698,6 +1767,67 @@ class PortfolioManager:
                     n_observations=len(
                         self.live_calibrator.learner.observations),
                 )
+            # Record into the rehearsal observation store. We rebuild the
+            # feature vector AT CLOSE TIME from the current manager state
+            # — this captures the *state at exit*, which is the right thing
+            # to do because every entry-time feature is also visible at
+            # close (markets move forward, not backward). The exit reason
+            # carries the closure label (target / stop / neither).
+            if self.rehearsal_ensemble is not None:
+                from .belief_rehearsal import (
+                    build_query_features, BeliefObservation, SCHEMA_VERSION,
+                )
+                import uuid as _uuid
+                feature_vector = build_query_features(
+                    rich_context=(self._last_rich.to_dict()
+                                    if self._last_rich is not None else None),
+                    web_snapshot=web_dict,
+                    mm_posterior=(self._last_mm_posterior.to_dict()
+                                    if self._last_mm_posterior else None),
+                    crowd_report=(self._last_crowd_report.to_dict()
+                                    if self._last_crowd_report else None),
+                    portfolio_risk=(self._last_risk_report.to_dict()
+                                      if self._last_risk_report else None),
+                    iv_state=_map((self._last_snapshot or {}).get("iv_state")),
+                    flow_event=None,
+                    n_open_positions=len(self._open_states),
+                )
+                exit_reason = (outcome.exit_reason
+                                if outcome is not None else "")
+                entry_params = {
+                    "entry_confidence": float(getattr(
+                        h, "entry_confidence", 0.0) or 0.0),
+                    "size_lots": float(getattr(h, "size_lots", 0) or 0),
+                    "target_r": float(getattr(
+                        h, "target_premium_r", 1.5) or 1.5),
+                    "stop_r": 1.0,
+                    "profile_scalp": 1.0 if str(
+                        getattr(h, "profile", "")).lower() == "scalp" else 0.0,
+                    "direction": float(getattr(h, "direction", 0) or 0),
+                }
+                outcome_payload = {
+                    "realized_r": float(current_r),
+                    "realized_rupees": realized_rupees,
+                    "bars_to_resolution": float(
+                        bar_index - getattr(state, "entry_bar", bar_index)),
+                    "exit_reason": str(exit_reason),
+                    "max_favorable_r": float(getattr(state, "best_r", 0.0)),
+                    "max_adverse_r": float(getattr(state, "worst_r", 0.0)),
+                }
+                self.rehearsal_ensemble.record_closure(BeliefObservation(
+                    obs_id=_uuid.uuid4().hex[:12],
+                    ts=str(self._last_snapshot.get("ts")
+                            if self._last_snapshot else ""),
+                    bar_index=int(bar_index),
+                    schema_version=SCHEMA_VERSION,
+                    feature_vector=feature_vector,
+                    entry_params=entry_params,
+                    outcome=outcome_payload,
+                    regime_tag=regime_tag,
+                    strategy=str(getattr(h, "strategy_class", "")
+                                   or getattr(h, "strategy", "")
+                                   or ""),
+                ))
         except Exception:
             pass
         # Forget the per-position counterfactual plan.
@@ -1930,6 +2060,12 @@ class PortfolioManager:
             "regime_win_history": self.regime_history.today_summary(
                 today_dominant_family=self._today_dominant_family(),
             ),
+            "rehearsal_ensemble": (self.rehearsal_ensemble.summary()
+                                      if self.rehearsal_ensemble is not None
+                                      else {"booted": False,
+                                             "n_observations_in_ring": 0,
+                                             "last_decision": None,
+                                             "feature_weights": {}}),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),
