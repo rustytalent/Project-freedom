@@ -32,9 +32,14 @@ from typing import Any, Dict, List, Optional
 from .calibrator import OutcomeCalibrator
 from .detectors.abnormal_acceptance import AbnormalAcceptanceDetector
 from .detectors.base import DetectorBase, DetectorPosterior
+from .detectors.cancel_rate import CancelRateDetector
 from .detectors.cross_rail import CrossRailAsymmetryDetector
+from .detectors.depth_pressure import DepthPressureDetector
 from .detectors.dod_signature import DodSignatureDetector
+from .detectors.iceberg import IcebergDetector
+from .detectors.layering import LayeringDetector
 from .detectors.mm_gamma_proxy import MMGammaProxyDetector
+from .detectors.oi_velocity import OIVelocityDetector
 from .detectors.pin_risk import PinRiskDetector
 from .detectors.sweep import SweepDetector
 from .detectors.trend_vs_range import TrendVsRangeDetector
@@ -67,6 +72,12 @@ class ManipulationEngineV2:
             "pin_risk": PinRiskDetector(),
             "mm_gamma_proxy": MMGammaProxyDetector(),
             "trend_vs_range": TrendVsRangeDetector(),
+            # Microstructure detectors (real L2 + OI from Kite).
+            "oi_velocity": OIVelocityDetector(),
+            "depth_pressure": DepthPressureDetector(),
+            "layering": LayeringDetector(),
+            "iceberg": IcebergDetector(),
+            "cancel_rate": CancelRateDetector(),
         }
         self.fusion = BayesianFusion()
         self.calibrator = OutcomeCalibrator(

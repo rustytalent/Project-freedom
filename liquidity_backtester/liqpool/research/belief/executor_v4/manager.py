@@ -445,6 +445,25 @@ class PortfolioManager:
         self.manipulation_v2 = ManipulationEngineV2(
             cfg=ManipulationEngineConfig())
         self._last_mm_intent: Optional[Dict[str, Any]] = None
+        # Rehearsal-based pre-calibration (founder 2026-06-22 follow-up):
+        # bootstrap the SelfCalibrator from analogue-distribution
+        # "virtual outcomes" so it starts learning from day one rather
+        # than waiting for 10+ real fills.
+        from .manipulation_v2.rehearsal_calibration import (
+            RehearsalCalibrator, RehearsalCalibrationConfig,
+        )
+        self.rehearsal_calibrator = RehearsalCalibrator(
+            cfg=RehearsalCalibrationConfig())
+        # ShadowLedger — full-tape persistence for offline calibration
+        # (founder 2026-06-22 follow-up: VPS state_dir).
+        from .shadow_ledger import ShadowLedger, ShadowLedgerConfig
+        if self.cfg.calibration_state_dir is not None:
+            self.shadow_ledger: Optional[ShadowLedger] = ShadowLedger(
+                state_dir=Path(self.cfg.calibration_state_dir),
+                cfg=ShadowLedgerConfig(),
+            )
+        else:
+            self.shadow_ledger = None
         self._last_mm_posterior: Optional[MMPosterior] = None
         self._last_tail_score: Optional[FatTailScore] = None
         self._last_crowd_report: Optional[CrowdMirrorReport] = None
@@ -574,6 +593,18 @@ class PortfolioManager:
         except Exception:
             mm_intent = None
             self._last_mm_intent = None
+        # Shadow-ledger tape: persist the snapshot + MMIntent for
+        # offline calibration. Cheap; failures silent.
+        if self.shadow_ledger is not None:
+            try:
+                self.shadow_ledger.record_tick(
+                    bar_index=bar_index, snapshot=snapshot)
+                if self._last_mm_intent is not None:
+                    self.shadow_ledger.record_mm_intent(
+                        bar_index=bar_index,
+                        mm_intent_dict=self._last_mm_intent)
+            except Exception:
+                pass
         crowd_report = self.crowd_mirror.inspect(
             [s.hypothesis for s in self._open_states.values()],
         )
@@ -1028,6 +1059,26 @@ class PortfolioManager:
             except Exception:
                 rehearsal_decision = None
 
+        # Rehearsal-based pre-calibration for the manipulation engine.
+        # Feeds the SelfCalibrator a soft "virtual outcome" derived from
+        # the rehearsal analogue distribution so detectors start
+        # learning from day one without waiting for real fills.
+        try:
+            mm_now = self._last_mm_intent or {}
+            self.rehearsal_calibrator.maybe_calibrate(
+                self_calibrator=(
+                    self.manipulation_v2.calibrator._self_calib),
+                per_detector_posteriors=(
+                    self.manipulation_v2
+                    ._last_per_detector_posteriors),
+                mm_intent_direction=int(mm_now.get("direction", 0) or 0),
+                mm_intent_confidence=float(mm_now.get("confidence", 0.0)
+                                                or 0.0),
+                rehearsal_decision=rehearsal_decision,
+            )
+        except Exception:
+            pass
+
         # Gate H: Sprint-2 decision aggregator — combines everything.
         # Tier-3 founder 2026-06-22: pull the AUTHORITATIVE MMIntent
         # from manipulation_v2. The aggregator's direction gate uses
@@ -1167,6 +1218,16 @@ class PortfolioManager:
             )
         except Exception:
             pass
+        # ShadowLedger open event for offline reconstruction.
+        if self.shadow_ledger is not None:
+            try:
+                self.shadow_ledger.record_open(
+                    bar_index=bar_index,
+                    position_id=hypothesis.position_id,
+                    hypothesis_dict=hypothesis.to_dict(),
+                )
+            except Exception:
+                pass
         self._open_states[hypothesis.position_id] = _OpenPositionState(
             hypothesis=hypothesis,
             entry_bar=bar_index,
@@ -1866,6 +1927,17 @@ class PortfolioManager:
                 )
             except Exception:
                 pass
+            # ShadowLedger close event.
+            if self.shadow_ledger is not None:
+                try:
+                    self.shadow_ledger.record_close(
+                        bar_index=bar_index,
+                        position_id=pos_id,
+                        outcome_dict=(outcome.to_dict()
+                                          if outcome is not None else {}),
+                    )
+                except Exception:
+                    pass
             self._last_calibration = calib.to_dict()
         except Exception:
             self._last_calibration = None
@@ -2616,6 +2688,11 @@ class PortfolioManager:
             ),
             "belief_web_v2": self.belief_web_v2.summary(),
             "manipulation_v2": self.manipulation_v2.summary(),
+            "manipulation_v2_rehearsal_calibrator":
+                self.rehearsal_calibrator.summary(),
+            "shadow_ledger": (self.shadow_ledger.summary()
+                                  if self.shadow_ledger is not None
+                                  else {"enabled": False}),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),

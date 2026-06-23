@@ -469,7 +469,7 @@ def test_engine_observe_runs_all_detectors():
     for i in range(15):
         intent = e.observe(snapshot=_snap(100 + i), bar_index=100 + i)
     assert isinstance(intent, MMIntent)
-    assert len(intent.per_detector) == 7
+    assert len(intent.per_detector) == 12
 
 
 def test_engine_override_makes_intent_authoritative():
@@ -604,7 +604,7 @@ def test_manager_creates_manipulation_v2_engine():
     tmp = Path(tempfile.mkdtemp(prefix="mv2_mgr_"))
     runner = _runner_with_state(tmp)
     assert runner.manager.manipulation_v2 is not None
-    assert len(runner.manager.manipulation_v2.detectors) == 7
+    assert len(runner.manager.manipulation_v2.detectors) == 12
 
 
 def test_cockpit_carries_manipulation_v2_panel():
@@ -617,8 +617,8 @@ def test_cockpit_carries_manipulation_v2_panel():
     for key in ["direction", "confidence", "fire_count", "regime",
                   "gamma_regime", "per_detector", "calibrator_weights"]:
         assert key in panel
-    assert len(panel["per_detector"]) == 7
-    assert len(panel["calibrator_weights"]) == 7
+    assert len(panel["per_detector"]) == 12
+    assert len(panel["calibrator_weights"]) == 12
 
 
 def test_manipulation_v2_override_flows_to_cockpit():

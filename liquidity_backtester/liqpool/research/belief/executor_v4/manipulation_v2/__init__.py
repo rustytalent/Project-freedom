@@ -60,6 +60,11 @@ from .detectors.abnormal_acceptance import AbnormalAcceptanceDetector
 from .detectors.pin_risk import PinRiskDetector
 from .detectors.mm_gamma_proxy import MMGammaProxyDetector
 from .detectors.trend_vs_range import TrendVsRangeDetector
+from .detectors.oi_velocity import OIVelocityDetector
+from .detectors.depth_pressure import DepthPressureDetector
+from .detectors.layering import LayeringDetector
+from .detectors.iceberg import IcebergDetector
+from .detectors.cancel_rate import CancelRateDetector
 from .fusion import BayesianFusion, MMIntent
 from .calibrator import OutcomeCalibrator
 from .engine import ManipulationEngineV2, ManipulationEngineConfig
@@ -71,6 +76,8 @@ __all__ = [
     "DodSignatureDetector", "AbnormalAcceptanceDetector",
     "PinRiskDetector", "MMGammaProxyDetector",
     "TrendVsRangeDetector",
+    "OIVelocityDetector", "DepthPressureDetector",
+    "LayeringDetector", "IcebergDetector", "CancelRateDetector",
     "BayesianFusion", "MMIntent",
     "OutcomeCalibrator",
     "ManipulationEngineV2", "ManipulationEngineConfig",

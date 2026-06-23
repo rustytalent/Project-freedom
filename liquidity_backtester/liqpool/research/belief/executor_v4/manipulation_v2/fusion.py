@@ -57,6 +57,7 @@ class MMIntent:
     per_detector: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     regime: str = "unknown"
     gamma_regime: str = "unknown"
+    spoof_regime: str = "unknown"
     fire_count: int = 0
     composite_score: float = 0.0
     notes: List[str] = field(default_factory=list)
@@ -73,6 +74,7 @@ class MMIntent:
             "per_detector": dict(self.per_detector),
             "regime": self.regime,
             "gamma_regime": self.gamma_regime,
+            "spoof_regime": self.spoof_regime,
             "fire_count": int(self.fire_count),
             "composite_score": round(self.composite_score, 4),
             "notes": list(self.notes),
@@ -96,9 +98,14 @@ class BayesianFusion:
 
         regime = "unknown"
         gamma_regime = "unknown"
+        spoof_regime = "unknown"
         trend_direction = 0
         trend_confidence = 0.0
         gamma_factor = 1.0
+        # Book-detector damping factor — applied to layering /
+        # depth_pressure / iceberg when CancelRateDetector says the book
+        # is spoof-heavy.
+        book_damp_factor = 1.0
 
         trend_post = posteriors.get("trend_vs_range")
         if trend_post is not None and trend_post.fire:
@@ -120,12 +127,31 @@ class BayesianFusion:
             notes.append(
                 f"gamma regime {gamma_regime} (factor={gamma_factor:.2f})")
 
+        cancel_post = posteriors.get("cancel_rate")
+        if cancel_post is not None and cancel_post.fire:
+            spoof_regime = cancel_post.classification or "unknown"
+            if spoof_regime == "spoofing_dominant":
+                book_damp_factor = max(0.0,
+                                            1.0 - 0.70 * cancel_post.confidence)
+                notes.append(
+                    f"spoof regime: damping book detectors × "
+                    f"{book_damp_factor:.2f}")
+            elif spoof_regime == "clean_book":
+                book_damp_factor = 1.0 + 0.15 * cancel_post.confidence
+                notes.append(
+                    f"clean book: book detectors × "
+                    f"{book_damp_factor:.2f}")
+
         composite = 0.0
         fire_count = 0
         targeted: List = []     # (strike, weight) for averaging
 
+        # Detectors that read the order book — damped when CancelRate
+        # says the book is spoof-dominant.
+        book_reading = {"layering", "depth_pressure", "iceberg"}
         for name, post in posteriors.items():
-            if not post.fire or name in ("trend_vs_range", "mm_gamma_proxy"):
+            if not post.fire or name in (
+                    "trend_vs_range", "mm_gamma_proxy", "cancel_rate"):
                 continue
             fire_count += 1
             weight = float(weights.get(name, 1.0))
@@ -143,12 +169,17 @@ class BayesianFusion:
                 notes.append(
                     f"flipped dod rail_tilt direction (trend "
                     f"{trend_direction:+d} overrides cheap-side trap)")
+            # Book-reading detectors get damped under spoof regime so a
+            # fake L2 picture doesn't trigger spurious intent.
+            detector_damp = (book_damp_factor
+                             if name in book_reading else 1.0)
             contribution = (direction * post.probability
-                             * post.confidence * weight)
+                             * post.confidence * weight * detector_damp)
             composite += contribution
             if post.targeted_strike is not None:
                 targeted.append((post.targeted_strike,
-                                  post.confidence * weight))
+                                  post.confidence * weight
+                                  * detector_damp))
 
         # Apply gamma factor + trend bias.
         composite *= gamma_factor
@@ -191,6 +222,7 @@ class BayesianFusion:
             horizon_bars=horizon, targeted_strike=target_strike,
             per_detector=per_detector,
             regime=regime, gamma_regime=gamma_regime,
+            spoof_regime=spoof_regime,
             fire_count=fire_count, composite_score=composite,
             notes=notes,
         )
