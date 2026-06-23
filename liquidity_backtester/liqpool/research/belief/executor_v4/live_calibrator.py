@@ -52,6 +52,11 @@ class LiveCalibratorConfig:
     auto_disable_after_n_rejections: int = 5      # rejection storm guard
     rollback_on_val_loss_spike: bool = True
     val_loss_spike_factor: float = 1.6            # val_loss > prev_val_loss * factor → rollback
+    # Founder 2026-06-22 Tier-2 part 3: contextual (regime-conditioned)
+    # learner upgrade. When enabled, a ContextualLearner runs alongside
+    # the base learner and is the one we APPLY to the aggregator. The
+    # base learner stays around as the legacy fallback path.
+    use_contextual_learner: bool = True
 
 
 # ── Outcome dataclass ─────────────────────────────────────────────
@@ -116,12 +121,27 @@ class LiveCalibrator:
         self.learner = OnlineLearner(
             initial_weights=initial_weights, cfg=learner_cfg,
         )
+        # Founder 2026-06-22 Tier-2 part 3: contextual learner. Built
+        # alongside the base learner; when enabled it is the authority
+        # for what weights actually land on the aggregator.
+        self.contextual_learner = None
+        if self.cfg.use_contextual_learner:
+            from .contextual_learner import (
+                ContextualLearner, ContextualLearnerConfig,
+            )
+            self.contextual_learner = ContextualLearner(
+                initial_weights=initial_weights,
+                cfg=ContextualLearnerConfig(
+                    base_cfg=learner_cfg or OnlineLearnerConfig(),
+                ),
+            )
         self.paused: bool = False
         self._consecutive_accepts: int = 0
         self._consecutive_rejections: int = 0
         self._last_applied_weights: Optional[Dict[str, float]] = None
         self._last_applied_at_bar: int = -1
         self._last_val_loss: Optional[float] = None
+        self._last_closure_report: Optional[Dict[str, Any]] = None
 
     # ── Operator controls (also exposed via cockpit UI) ────────────
 
@@ -138,12 +158,26 @@ class LiveCalibrator:
                               component_scores: Dict[str, float],
                               realized_r: float,
                               bar_index: int,
+                              regime_family: str = "",
                               ) -> CalibrationOutcome:
         """Manager calls this from its close handler.
 
         Returns a CalibrationOutcome capturing what happened.
         """
         pre = self._current_weights_dict()
+
+        # Feed the contextual learner FIRST so it has the closure
+        # available for its per-family Shapley + recency tracking.
+        if self.contextual_learner is not None:
+            try:
+                report = self.contextual_learner.observe_closure(
+                    component_scores=component_scores,
+                    realized_r=realized_r,
+                    regime_family=str(regime_family or "unknown"),
+                )
+                self._last_closure_report = report.to_dict()
+            except Exception:
+                self._last_closure_report = None
 
         if not self.cfg.enabled or self.paused:
             return CalibrationOutcome(
@@ -284,6 +318,42 @@ class LiveCalibrator:
             train_loss=update.train_loss, val_loss=update.val_loss,
             notes=notes,
         )
+
+    def apply_regime_specific_weights(self, current_family: str
+                                              ) -> Dict[str, float]:
+        """Push the contextual learner's per-regime weights into the
+        live AggregatorConfig. No-op when contextual learner is
+        disabled. Returns the weights applied (empty dict if no-op).
+
+        Calling pattern: the manager calls this every tick *before*
+        evaluating entries, so the aggregator's weights reflect what
+        each regime has actually learned. The safety rails (max_delta
+        cap, consecutive-accept gate) DO NOT apply here because we're
+        not learning a new vector — we're just switching to the
+        already-learned vector for this regime.
+        """
+        if self.paused or self.contextual_learner is None:
+            return {}
+        try:
+            return self.contextual_learner.apply_to_aggregator_config(
+                self.aggregator_cfg, current_family=current_family,
+            )
+        except Exception:
+            return {}
+
+    def contextual_summary(self, *,
+                                 current_family: str = "unknown",
+                                 ) -> Dict[str, Any]:
+        if self.contextual_learner is None:
+            return {"enabled": False}
+        try:
+            s = self.contextual_learner.summary(current_family=current_family)
+            s["enabled"] = True
+            if self._last_closure_report is not None:
+                s["last_closure_report"] = self._last_closure_report
+            return s
+        except Exception:
+            return {"enabled": False, "error": True}
 
     def rollback_last_applied(self) -> bool:
         """Operator emergency: undo the most recent applied step."""

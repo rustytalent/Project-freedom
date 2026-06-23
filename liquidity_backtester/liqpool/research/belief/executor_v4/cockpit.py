@@ -79,6 +79,8 @@ class CockpitSnapshot:
     rehearsal_panel: Dict[str, Any] = field(default_factory=dict)
     # Tier-2: Multi-leg structures (iron condor, jade lizard, ...).
     multi_leg_panel: Dict[str, Any] = field(default_factory=dict)
+    # Tier-2 part 3: Contextual learner panel.
+    contextual_learner_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -429,6 +431,27 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "notes": list(boot.get("notes") or []),
     }
 
+    # Contextual learner panel (Tier-2 part 3): per-regime conditional
+    # weights, Shapley attributions per recent closure, recency-weighted
+    # effective sample counts.
+    ctx = summary.get("contextual_learner") or {}
+    contextual_learner_panel = {
+        "enabled": ctx.get("enabled", False),
+        "current_family": ctx.get("current_family", "unknown"),
+        "applied_weights": dict(ctx.get("applied_weights") or {}),
+        "global_weights": dict(ctx.get("global_weights") or {}),
+        "per_family_weights": dict(ctx.get("per_family_weights") or {}),
+        "per_family_n_samples": dict(ctx.get("per_family_n_samples") or {}),
+        "per_family_effective_n": dict(
+            ctx.get("per_family_effective_n") or {}),
+        "recent_closure_reports": list(
+            ctx.get("recent_closure_reports") or []),
+        "min_samples_to_specialise": ctx.get(
+            "min_samples_to_specialise", 8),
+        "recency_half_life_days": ctx.get("recency_half_life_days", 4.0),
+        "last_closure_report": ctx.get("last_closure_report") or {},
+    }
+
     # Multi-leg bundles panel (Tier-2).
     ml = summary.get("multi_leg_bundles") or {}
     last_outcome = summary.get("last_bundle_outcome") or {}
@@ -502,4 +525,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         bootstrap_panel=bootstrap_panel,
         rehearsal_panel=rehearsal_panel,
         multi_leg_panel=multi_leg_panel,
+        contextual_learner_panel=contextual_learner_panel,
     )

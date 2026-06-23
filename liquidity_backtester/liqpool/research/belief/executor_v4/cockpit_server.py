@@ -725,6 +725,23 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
     </div>
     <div class="panel full">
+      <h2>CONTEXTUAL LEARNER — per-regime weights + Shapley attribution</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Per-family weight vectors learned from prior trades in the SAME regime, applied to the
+        aggregator on every tick. Last-closure attribution shows which component pulled the
+        prediction toward win (green) or loss (red).
+      </div>
+      <div class="kv">
+        <div class="k">Current family</div><div class="v" id="ctx_family">—</div>
+        <div class="k">Min to specialise</div><div class="v" id="ctx_min">—</div>
+        <div class="k">Recency half-life</div><div class="v" id="ctx_recency">—</div>
+      </div>
+      <h2 style="margin-top:14px;">Per-family weights vs global</h2>
+      <div id="ctx_weights_table">—</div>
+      <h2 style="margin-top:14px;">Last closure attribution (Shapley)</h2>
+      <div id="ctx_last_attribution">—</div>
+    </div>
+    <div class="panel full">
       <h2>MULTI-LEG BUNDLES (iron condor / jade lizard / butterfly / strangle / vertical)</h2>
       <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
         Structured option positions. Each bundle's combined R + premium tape lets the operator
@@ -1148,6 +1165,68 @@ function render_bootstrap(boot, regime) {
   document.getElementById("boot_notes").textContent =
     ((b.notes || []).concat(r.notes || [])).join("\n");
 }
+function render_contextual_learner(ctx) {
+  var c = ctx || {};
+  if (!c.enabled) {
+    document.getElementById("ctx_family").innerHTML = '<span class="muted">disabled</span>';
+    document.getElementById("ctx_min").textContent = "—";
+    document.getElementById("ctx_recency").textContent = "—";
+    document.getElementById("ctx_weights_table").innerHTML = '<em class="muted">contextual learner not enabled</em>';
+    document.getElementById("ctx_last_attribution").innerHTML = "";
+    return;
+  }
+  document.getElementById("ctx_family").innerHTML =
+    '<strong>' + (c.current_family || "unknown") + '</strong>';
+  document.getElementById("ctx_min").textContent = c.min_samples_to_specialise || 8;
+  document.getElementById("ctx_recency").textContent = Number(c.recency_half_life_days || 0).toFixed(1) + " days";
+  // Per-family weights table.
+  var families = ["directional", "chop", "fat_tail", "manipulation", "unknown"];
+  var components = ["w_base_score", "w_mtf_alignment", "w_projection", "w_fees_clearance", "w_portfolio_capacity"];
+  var perFam = c.per_family_weights || {};
+  var nSamp = c.per_family_n_samples || {};
+  var nEff = c.per_family_effective_n || {};
+  var gWeights = c.global_weights || {};
+  var html = '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+  html += '<tr style="color:#5a6172;text-align:left;"><th>family</th>';
+  components.forEach(function(k){ html += '<th>' + k.replace("w_", "") + '</th>'; });
+  html += '<th>n</th><th>eff_n</th></tr>';
+  html += '<tr><td><strong>GLOBAL</strong></td>';
+  components.forEach(function(k){ html += '<td>' + Number(gWeights[k]||0).toFixed(3) + '</td>'; });
+  html += '<td>—</td><td>—</td></tr>';
+  families.forEach(function(fam){
+    var w = perFam[fam] || {};
+    var rowCls = fam === c.current_family ? 'style="background:#1a2230;"' : '';
+    html += '<tr ' + rowCls + '><td><strong>' + fam + '</strong></td>';
+    components.forEach(function(k){ html += '<td>' + Number(w[k]||0).toFixed(3) + '</td>'; });
+    html += '<td>' + (nSamp[fam] || 0) + '</td>';
+    html += '<td>' + Number(nEff[fam]||0).toFixed(1) + '</td></tr>';
+  });
+  html += '</table>';
+  document.getElementById("ctx_weights_table").innerHTML = html;
+  // Last closure attribution.
+  var lcr = c.last_closure_report || {};
+  if (!lcr.realized_r && lcr.realized_r !== 0) {
+    document.getElementById("ctx_last_attribution").innerHTML = '<em class="muted">no closures yet</em>';
+    return;
+  }
+  var won = lcr.won;
+  var wonHtml = won ? '<span class="green">WIN</span>' : '<span class="red">LOSS</span>';
+  var attrRows = (lcr.component_attributions || []).map(function(a){
+    var contrib = Number(a.contribution || 0);
+    var cls = contrib > 0 ? "green" : (contrib < 0 ? "red" : "muted");
+    return '<div class="position-row">'
+      + '<strong>' + (a.component || "").replace("w_", "") + '</strong>'
+      + ' <span class="muted">score ' + Number(a.score||0).toFixed(2) + '</span>'
+      + ' <span class="muted">× w ' + Number(a.weight_used||0).toFixed(2) + '</span>'
+      + ' <span class="' + cls + '" style="float:right">' + (contrib>=0?"+":"") + contrib.toFixed(3) + '</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("ctx_last_attribution").innerHTML =
+    '<div style="margin-bottom:6px">' + wonHtml + ' '
+    + ' R ' + Number(lcr.realized_r||0).toFixed(2)
+    + ' <span class="muted">family ' + (lcr.regime_family || "") + '</span></div>'
+    + attrRows;
+}
 function render_multi_leg(ml) {
   var m = ml || {};
   document.getElementById("ml_open").textContent = m.n_open_bundles || 0;
@@ -1429,6 +1508,7 @@ function render(snap) {
   render_bootstrap(snap.bootstrap_panel || {}, snap.regime_history_panel || {});
   render_rehearsal(snap.rehearsal_panel || {});
   render_multi_leg(snap.multi_leg_panel || {});
+  render_contextual_learner(snap.contextual_learner_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

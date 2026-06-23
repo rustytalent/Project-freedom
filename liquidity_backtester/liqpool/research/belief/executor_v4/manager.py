@@ -487,6 +487,20 @@ class PortfolioManager:
         web_snap = self.web.observe(snapshot, rich, flow_event, mtf_views_dict)
         self._last_web_snapshot = web_snap
 
+        # 3a.1 — Apply regime-conditioned weights to the aggregator
+        # (founder 2026-06-22 Tier-2 part 3). The contextual learner
+        # holds per-family weight vectors learned from prior trades in
+        # the SAME regime; this call swaps the aggregator to use that
+        # family's vector. Safe to call every tick because no SGD step
+        # is performed here — only a constant-time vector swap.
+        try:
+            current_family = self._today_dominant_family()
+            if current_family:
+                self.live_calibrator.apply_regime_specific_weights(
+                    current_family=current_family)
+        except Exception:
+            pass
+
         # 3b. Sprint 3 — manipulation board + MM mind + fat-tail + crowd mirror.
         patterns = self.manipulation_board.scan(
             flow_memory=self.flow, rich_context=rich,
@@ -1741,10 +1755,18 @@ class PortfolioManager:
                     (h.expected_edge_multiple - 1.0) / 1.5 * 0.5 + 0.5)),
                 "portfolio_capacity_score": 0.7,
             }
+            # Pre-compute the regime family for contextual routing.
+            from .learning_persistence import regime_tag_from_web_snapshot
+            web_dict_for_family = (self._last_web_snapshot.to_dict()
+                                       if self._last_web_snapshot is not None
+                                       else None)
+            family_for_close = str(regime_tag_from_web_snapshot(
+                web_dict_for_family).get("dominant_family", "unknown"))
             calib = self.live_calibrator.on_position_closed(
                 component_scores=component_scores,
                 realized_r=float(current_r),
                 bar_index=bar_index,
+                regime_family=family_for_close,
             )
             self._last_calibration = calib.to_dict()
         except Exception:
@@ -2263,6 +2285,9 @@ class PortfolioManager:
                                              "feature_weights": {}}),
             "multi_leg_bundles": self.bundle_ledger.summary(),
             "last_bundle_outcome": self._last_bundle_outcome,
+            "contextual_learner": self.live_calibrator.contextual_summary(
+                current_family=self._today_dominant_family() or "unknown",
+            ),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),
