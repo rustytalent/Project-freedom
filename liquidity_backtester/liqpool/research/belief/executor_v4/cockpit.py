@@ -77,6 +77,8 @@ class CockpitSnapshot:
     bootstrap_panel: Dict[str, Any] = field(default_factory=dict)
     # Tier-2: Belief Rehearsal Ensemble — kNN off-policy evaluation.
     rehearsal_panel: Dict[str, Any] = field(default_factory=dict)
+    # Tier-2: Multi-leg structures (iron condor, jade lizard, ...).
+    multi_leg_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -427,6 +429,21 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "notes": list(boot.get("notes") or []),
     }
 
+    # Multi-leg bundles panel (Tier-2).
+    ml = summary.get("multi_leg_bundles") or {}
+    last_outcome = summary.get("last_bundle_outcome") or {}
+    multi_leg_panel = {
+        "n_open_bundles": ml.get("n_open_bundles", 0),
+        "n_closed_bundles": ml.get("n_closed_bundles", 0),
+        "open": list(ml.get("open") or []),
+        "closed_recent": list(ml.get("closed_recent") or []),
+        "wins": ml.get("wins", 0),
+        "losses": ml.get("losses", 0),
+        "total_realised_rupees": ml.get("total_realised_rupees", 0.0),
+        "win_rate": ml.get("win_rate", 0.0),
+        "last_bundle_outcome": dict(last_outcome) if last_outcome else {},
+    }
+
     # Rehearsal panel (Tier-2): conditional-kNN off-policy evaluation.
     # The most-recent rehearsal decision with per-perturbation outcome
     # distribution + feature weights so the operator can SEE which
@@ -484,4 +501,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         regime_history_panel=regime_history_panel,
         bootstrap_panel=bootstrap_panel,
         rehearsal_panel=rehearsal_panel,
+        multi_leg_panel=multi_leg_panel,
     )

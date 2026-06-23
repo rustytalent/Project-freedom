@@ -375,6 +375,17 @@ class PortfolioManager:
         else:
             self.rehearsal_ensemble = None
         self._last_rehearsal_decision: Optional[Dict[str, Any]] = None
+        # Multi-leg structures (founder 2026-06-22 Tier-2): the
+        # constructor + bundle ledger. When the scenario web's dominant
+        # strategy class is iron_condor / jade_lizard / butterfly /
+        # strangle / vertical_spread we route through this path instead
+        # of the single-leg pipeline.
+        from .multi_leg import StructureConstructor, BundleLedger
+        self.structure_constructor = StructureConstructor()
+        self.bundle_ledger = BundleLedger(
+            lot_size=self.cfg.economics.lot_size,
+        )
+        self._last_bundle_outcome: Optional[Dict[str, Any]] = None
         # Recent-trades tape (last N opens + closes, newest first) — feeds
         # the cockpit's Live Trades panel.
         from collections import deque as _deque
@@ -2006,6 +2017,190 @@ class PortfolioManager:
             "per_timeframe": per_tf,
         }
 
+    # ── Multi-leg structures (founder 2026-06-22 Tier-2) ───────────
+
+    def try_multi_leg_entry(self, *,
+                              structure_class: str,
+                              lots: int = 1,
+                              direction: int = 0,
+                              option_type: str = "CE",
+                              broker: Any = None,
+                              ) -> Optional[Dict[str, Any]]:
+        """Construct a structured-option bundle from the current snapshot
+        and submit it through the supplied broker.
+
+        Returns a dict describing the reconciliation outcome (or None if
+        the construction wasn't possible). Caller is V4Runner — it has
+        the broker handle and feeds the latest snapshot here every tick.
+
+        This is the public seam for now. The auto-routing path that
+        decouples it from the operator (web's dominant_strategy_class
+        → structure_class) lands in a follow-up commit once the bundle
+        ledger has accumulated track-record evidence we can trust.
+        """
+        if self._last_snapshot is None:
+            return None
+        from .learning_persistence import regime_tag_from_web_snapshot
+        snap = self._last_snapshot
+        spot = float(snap.get("spot") or 0.0)
+        if spot <= 0:
+            return None
+        slot_readings = list(snap.get("slot_readings") or [])
+        web_dict = (self._last_web_snapshot.to_dict()
+                      if self._last_web_snapshot is not None else None)
+        regime_tag = regime_tag_from_web_snapshot(web_dict)
+        bundle = self.structure_constructor.construct(
+            strategy_class=structure_class,
+            spot=spot, slot_readings=slot_readings,
+            lots=lots, direction=direction, option_type=option_type,
+            regime_tag=regime_tag,
+        )
+        if bundle is None:
+            self._last_bundle_outcome = {
+                "outcome": "NOT_CONSTRUCTED",
+                "structure_class": structure_class,
+                "notes": ["constructor returned None (missing strikes "
+                            "or invalid args)"],
+            }
+            return self._last_bundle_outcome
+        if broker is None:
+            self._last_bundle_outcome = {
+                "outcome": "NOT_SUBMITTED",
+                "structure_class": structure_class,
+                "bundle": bundle.to_dict(),
+                "notes": ["no broker supplied; bundle constructed but "
+                            "not placed"],
+            }
+            return self._last_bundle_outcome
+        outcome = broker.place_multi_leg_bundle(
+            bundle, lot_size=self.cfg.economics.lot_size,
+            position_id=bundle.bundle_id,
+        )
+        bar_index = int(_num(snap.get("bars_seen"), 0))
+        # Open the bundle in the ledger if the broker cleared it.
+        from .multi_leg.reconciliation import (
+            RECON_OK, RECON_ROLLED_BACK, RECON_REJECTED,
+        )
+        if outcome.outcome == RECON_OK:
+            # The reconciler updated bundle.net_credit_at_entry to the
+            # actual fills. Capture the realised leg fill prices.
+            fill_prices: List[float] = []
+            for leg in bundle.legs:
+                fill_prices.append(float(leg.estimated_premium or 0.0))
+            outcome.bundle.bar_opened = bar_index
+            self.bundle_ledger.open(outcome.bundle, fill_prices)
+        self._last_bundle_outcome = outcome.to_dict()
+        self._last_bundle_outcome["structure_class"] = structure_class
+        return self._last_bundle_outcome
+
+    def refresh_bundle_marks(self, *,
+                                 mark_lookup: Any,
+                                 bar_index: int,
+                                 ) -> None:
+        """Per-tick: refresh combined premium for every open bundle from
+        a tradingsymbol → premium callable.
+
+        ``mark_lookup(tradingsymbol)`` should return the current mid-mark
+        or None when unavailable. The bundle ledger updates combined R
+        only when every leg has a mark.
+        """
+        for entry in list(self.bundle_ledger.open_bundles()):
+            marks: List[float] = []
+            missing = False
+            for leg in entry.bundle.legs:
+                try:
+                    m = mark_lookup(leg.tradingsymbol)
+                except Exception:
+                    m = None
+                if m is None or float(m) <= 0:
+                    missing = True
+                    break
+                marks.append(float(m))
+            if missing:
+                continue
+            self.bundle_ledger.update_combined_marks(
+                entry.bundle.bundle_id,
+                leg_marks=marks, bar_index=bar_index,
+            )
+
+    def evaluate_bundle_exits(self, *,
+                                  broker: Any,
+                                  bar_index: int,
+                                  ) -> List[Dict[str, Any]]:
+        """Walk open bundles; close any that hit target/stop/max-bars.
+
+        Returns a list of closure dicts for the cockpit. Uses the
+        reverse-of-each-leg pattern: a closed bundle issues the
+        opposite side of every leg to flatten the structure.
+        """
+        out: List[Dict[str, Any]] = []
+        for entry in list(self.bundle_ledger.open_bundles()):
+            bundle = entry.bundle
+            reasons: List[str] = []
+            credit = bundle.net_credit_at_entry
+            current = entry.current_combined_premium
+            # Closure conditions for credit structures (short-vol).
+            if credit > 0:
+                target = credit * (1.0 - bundle.target_credit_pct)
+                if current <= target and current >= 0:
+                    reasons.append(
+                        f"target hit: credit decayed to ₹{current:.2f} "
+                        f"(threshold ₹{target:.2f})")
+                if current <= -credit * bundle.stop_loss_pct:
+                    reasons.append(
+                        f"stop hit: combined loss ₹{abs(current):.2f}")
+            else:
+                # Debit structure (long-vol) — close when realised
+                # combined R is favourable.
+                if entry.current_combined_r >= 1.0:
+                    reasons.append("target hit (debit structure)")
+                if entry.current_combined_r <= -1.0:
+                    reasons.append("stop hit (debit structure)")
+            if entry.bars_held >= bundle.max_bars_in_position:
+                reasons.append(
+                    f"max_bars ({bundle.max_bars_in_position}) reached")
+            if not reasons:
+                continue
+            # Build reverse legs and submit each one individually.
+            close_results: List[Any] = []
+            for leg in bundle.legs:
+                rev = leg.reversed()
+                client_id = broker._mk_client_id(
+                    bundle.bundle_id, tag="close")
+                from .broker.base import BrokerOrder
+                order = BrokerOrder(
+                    client_order_id=client_id,
+                    tradingsymbol=rev.tradingsymbol,
+                    exchange="NFO", side=rev.side,
+                    quantity=int(rev.lots * self.cfg.economics.lot_size),
+                    order_type="LIMIT", product="MIS",
+                    limit_price=float(rev.estimated_premium or 0.0),
+                    tag=f"bundle_close:{bundle.structure_class}:{rev.role}",
+                    position_id=bundle.bundle_id,
+                )
+                try:
+                    close_results.append(broker.place_order(order))
+                except Exception:
+                    pass
+            # Approximate realised: combined premium difference × lot_size.
+            realised_rupees = ((entry.current_combined_premium - credit)
+                               * -1.0 * self.cfg.economics.lot_size)
+            closure = self.bundle_ledger.close(
+                bundle.bundle_id,
+                realised_rupees=realised_rupees,
+                exit_reason="; ".join(reasons[:2]),
+                bars_held=entry.bars_held,
+            )
+            if closure is not None:
+                out.append({
+                    "bundle_id": bundle.bundle_id,
+                    "structure_class": bundle.structure_class,
+                    "realised_rupees": realised_rupees,
+                    "bars_held": entry.bars_held,
+                    "exit_reason": closure.exit_reason,
+                })
+        return out
+
     def _portfolio_summary(self) -> Dict[str, Any]:
         return {
             "n_open": len(self._open_states),
@@ -2066,6 +2261,8 @@ class PortfolioManager:
                                              "n_observations_in_ring": 0,
                                              "last_decision": None,
                                              "feature_weights": {}}),
+            "multi_leg_bundles": self.bundle_ledger.summary(),
+            "last_bundle_outcome": self._last_bundle_outcome,
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),

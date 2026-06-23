@@ -725,6 +725,24 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
     </div>
     <div class="panel full">
+      <h2>MULTI-LEG BUNDLES (iron condor / jade lizard / butterfly / strangle / vertical)</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Structured option positions. Each bundle's combined R + premium tape lets the operator
+        see how the structure is unfolding rather than chasing per-leg P&amp;L.
+      </div>
+      <div class="kv">
+        <div class="k">Open bundles</div><div class="v" id="ml_open">—</div>
+        <div class="k">Closed bundles</div><div class="v" id="ml_closed">—</div>
+        <div class="k">Win rate</div><div class="v" id="ml_winrate">—</div>
+        <div class="k">Total realised</div><div class="v" id="ml_realised">—</div>
+      </div>
+      <h2 style="margin-top:14px;">Open structures</h2>
+      <div id="ml_open_list">—</div>
+      <h2 style="margin-top:14px;">Recent closed (last 6)</h2>
+      <div id="ml_closed_list">—</div>
+      <pre id="ml_last_outcome" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel full">
       <h2>REHEARSAL ENSEMBLE — conditional-kNN off-policy evaluation</h2>
       <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
         At each entry consideration we look at the K most-similar past trades and ask
@@ -1130,6 +1148,49 @@ function render_bootstrap(boot, regime) {
   document.getElementById("boot_notes").textContent =
     ((b.notes || []).concat(r.notes || [])).join("\n");
 }
+function render_multi_leg(ml) {
+  var m = ml || {};
+  document.getElementById("ml_open").textContent = m.n_open_bundles || 0;
+  document.getElementById("ml_closed").textContent = m.n_closed_bundles || 0;
+  document.getElementById("ml_winrate").innerHTML = fmt_pct(m.win_rate);
+  var realised = Number(m.total_realised_rupees || 0);
+  var rCls = realised > 0 ? "green" : (realised < 0 ? "red" : "muted");
+  document.getElementById("ml_realised").innerHTML =
+    '<span class="' + rCls + '">' + (realised >= 0 ? "+" : "") + '₹' + realised.toLocaleString("en-IN", {maximumFractionDigits: 0}) + '</span>';
+  var openRows = (m.open || []).map(function(e){
+    var b = e.bundle || {};
+    var r = Number(e.current_combined_r || 0);
+    var rCls = r > 0 ? "green" : (r < 0 ? "red" : "muted");
+    var legs = (b.legs || []).map(function(l){
+      var sCls = l.side === "BUY" ? "green" : "red";
+      return '<span class="' + sCls + '">' + l.side + '</span>' + ' ' + (l.strike || "") + ' ' + (l.option_type || "");
+    }).join(" / ");
+    return '<div class="position-row">'
+      + '<strong>' + (b.structure_class || "") + '</strong>'
+      + ' <span class="muted">' + (b.bundle_id || "").slice(0, 10) + '</span>'
+      + ' <span class="muted"> credit ₹' + Number(b.net_credit_at_entry||0).toFixed(2) + '/lot</span>'
+      + ' <span class="' + rCls + '"> R ' + (r>=0?"+":"") + r.toFixed(2) + '</span>'
+      + ' <span class="muted"> bars ' + (e.bars_held||0) + '/' + (b.max_bars_in_position||0) + '</span>'
+      + '<div class="muted" style="font-size:11px;margin-left:18px;">' + legs + '</div>'
+      + '</div>';
+  }).join("");
+  document.getElementById("ml_open_list").innerHTML = openRows || '<em class="muted">no open bundles</em>';
+  var closedRows = (m.closed_recent || []).slice(-6).map(function(e){
+    var b = e.bundle || {};
+    var pnl = Number(e.realised_rupees || 0);
+    var pCls = pnl > 0 ? "green" : (pnl < 0 ? "red" : "muted");
+    return '<div class="position-row">'
+      + '<strong>' + (b.structure_class || "") + '</strong>'
+      + ' <span class="muted">' + (e.exit_reason || "").slice(0, 60) + '</span>'
+      + ' <span class="' + pCls + '" style="float:right">' + (pnl>=0?"+":"") + '₹' + pnl.toLocaleString("en-IN", {maximumFractionDigits: 0}) + '</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("ml_closed_list").innerHTML = closedRows || '<em class="muted">no closed bundles yet</em>';
+  document.getElementById("ml_last_outcome").textContent =
+    m.last_bundle_outcome && m.last_bundle_outcome.outcome
+      ? "last submit: " + JSON.stringify(m.last_bundle_outcome).slice(0, 220)
+      : "";
+}
 function render_rehearsal(rh) {
   var r = rh || {};
   document.getElementById("reh_boot").innerHTML =
@@ -1367,6 +1428,7 @@ function render(snap) {
   render_hedge(snap.hedge_panel || {});
   render_bootstrap(snap.bootstrap_panel || {}, snap.regime_history_panel || {});
   render_rehearsal(snap.rehearsal_panel || {});
+  render_multi_leg(snap.multi_leg_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

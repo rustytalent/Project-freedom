@@ -134,6 +134,120 @@ class BrokerAdapter:
             "current_total_rupees": 0.0,
         }
 
+    # ── Multi-leg bundle support (founder 2026-06-22 Tier-2) ─────────
+
+    def place_multi_leg_bundle(self, bundle: Any, *,
+                                  lot_size: int,
+                                  position_id: Optional[str] = None,
+                                  ) -> Any:
+        """Submit every leg of a MultiLegBundle and reconcile partial
+        fills.
+
+        The default implementation fans the legs out through
+        ``place_order`` sequentially: each leg becomes a LIMIT order
+        using the leg's ``limit_price`` (or its ``estimated_premium`` as
+        a fallback). After all results are in, partial-fill
+        reconciliation is invoked — if any leg failed, the legs that
+        successfully filled are reversed.
+
+        Returns a ``BundleReconciliationOutcome`` dataclass; the manager
+        reads ``outcome.outcome`` (OK / ROLLED_BACK / REJECTED) to
+        decide whether the bundle is OPEN or needs to be discarded.
+        """
+        # Local imports keep the broker.base file free of multi_leg
+        # cross-deps at import time. The broker symbols are local to
+        # this module, so we use them directly.
+        from ..multi_leg.reconciliation import (
+            BundleReconciliationOutcome, RECON_REJECTED,
+            reconcile_partial_fills,
+        )
+
+        if self.killed:
+            return BundleReconciliationOutcome(
+                outcome=RECON_REJECTED, bundle=bundle,
+                filled_legs=[], rejected_legs=list(range(len(bundle.legs))),
+                notes=["broker kill switch active"],
+            )
+
+        results: List[BrokerOrderResult] = []
+        for i, leg in enumerate(bundle.legs):
+            client_id = self._mk_client_id(
+                position_id or bundle.bundle_id,
+                tag=f"leg{i}",
+            )
+            limit = (leg.limit_price if leg.limit_price is not None
+                     else leg.estimated_premium)
+            if limit is None or limit <= 0:
+                results.append(BrokerOrderResult(
+                    client_order_id=client_id,
+                    broker_order_id="",
+                    state=STATE_REJECTED,
+                    filled_quantity=0, avg_fill_price=0.0,
+                    rejection_reason="leg missing limit/estimated_premium",
+                ))
+                continue
+            order = BrokerOrder(
+                client_order_id=client_id,
+                tradingsymbol=leg.tradingsymbol,
+                exchange="NFO",
+                side=leg.side,
+                quantity=int(leg.lots * lot_size),
+                order_type="LIMIT",
+                product="MIS",
+                limit_price=float(limit),
+                tag=f"bundle:{bundle.structure_class}:{leg.role}",
+                position_id=position_id or bundle.bundle_id,
+            )
+            try:
+                r = self.place_order(order)
+            except Exception as exc:
+                r = BrokerOrderResult(
+                    client_order_id=client_id,
+                    broker_order_id="",
+                    state=STATE_REJECTED,
+                    filled_quantity=0, avg_fill_price=0.0,
+                    rejection_reason=f"adapter exception: {exc}",
+                )
+            results.append(r)
+
+        outcome = reconcile_partial_fills(
+            bundle=bundle, results=results, lot_size=lot_size,
+        )
+        # If we need to roll back, submit the reverse orders now.
+        if outcome.reverse_orders:
+            for rl in outcome.reverse_orders:
+                limit = (rl.limit_price if rl.limit_price is not None
+                         else rl.estimated_premium)
+                if limit is None or limit <= 0:
+                    outcome.notes.append(
+                        f"reverse leg {rl.role} skipped: no limit price")
+                    continue
+                client_id = self._mk_client_id(
+                    position_id or bundle.bundle_id,
+                    tag=f"reverse_{rl.role}",
+                )
+                rev_order = BrokerOrder(
+                    client_order_id=client_id,
+                    tradingsymbol=rl.tradingsymbol,
+                    exchange="NFO",
+                    side=rl.side,
+                    quantity=int(rl.lots * lot_size),
+                    order_type="LIMIT",
+                    product="MIS",
+                    limit_price=float(limit),
+                    tag=f"bundle_reverse:{bundle.structure_class}:{rl.role}",
+                    position_id=position_id or bundle.bundle_id,
+                )
+                try:
+                    rev_result = self.place_order(rev_order)
+                    outcome.notes.append(
+                        f"reverse {rl.role}: state={rev_result.state}")
+                except Exception as exc:
+                    outcome.notes.append(
+                        f"reverse {rl.role} EXCEPTION: {exc} — "
+                        f"OPEN ALERT: partial bundle position remains!")
+        return outcome
+
     # ── Optional helpers ─────────────────────────────────────────────
 
     def kill_switch(self, reason: str = "operator triggered") -> None:
