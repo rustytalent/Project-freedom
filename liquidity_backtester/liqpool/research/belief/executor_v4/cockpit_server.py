@@ -725,6 +725,37 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
     </div>
     <div class="panel full">
+      <h2>BELIEF WEB v2 — Bayesian scenarios with confidence intervals + causal graph</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Each scenario is a Beta(α, β) posterior. Confidence intervals quantify how much we
+        KNOW vs how variable the scenario itself is. The causal graph shows learned and
+        seeded relationships between scenarios. Information gain shows which scenarios
+        moved most this tick — that&rsquo;s where the evidence flowed.
+      </div>
+      <div class="kv">
+        <div class="k">Active scenarios</div><div class="v" id="bw2_n">—</div>
+        <div class="k">Total info gain</div><div class="v" id="bw2_info">—</div>
+        <div class="k">Coherence</div><div class="v" id="bw2_coh">—</div>
+        <div class="k">Surprise</div><div class="v" id="bw2_surp">—</div>
+        <div class="k">Causal edges</div><div class="v" id="bw2_edges">—</div>
+        <div class="k">MI ticks observed</div><div class="v" id="bw2_mi_n">—</div>
+      </div>
+      <h2 style="margin-top:14px;">Top scenarios — posterior mean + 95% CI</h2>
+      <div id="bw2_scenarios">—</div>
+      <h2 style="margin-top:14px;">Lifecycle distribution</h2>
+      <div id="bw2_lifecycle">—</div>
+      <h2 style="margin-top:14px;">Most informative this tick</h2>
+      <div id="bw2_info_feed">—</div>
+      <h2 style="margin-top:14px;">Causal graph (sample)</h2>
+      <svg id="bw2_graph_svg" width="100%" height="280" viewBox="0 0 1000 280"
+           style="background: radial-gradient(circle at 50% 50%, #0c1320 0%, #050810 100%); border-radius: 6px;"></svg>
+      <h2 style="margin-top:14px;">Top mutual-information pairs</h2>
+      <div id="bw2_mi_pairs">—</div>
+      <h2 style="margin-top:14px;">Predicted resolutions (next horizon bars)</h2>
+      <div id="bw2_predicted">—</div>
+      <pre id="bw2_notes" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel full">
       <h2>CONTEXTUAL LEARNER — per-regime weights + Shapley attribution</h2>
       <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
         Per-family weight vectors learned from prior trades in the SAME regime, applied to the
@@ -1165,6 +1196,204 @@ function render_bootstrap(boot, regime) {
   document.getElementById("boot_notes").textContent =
     ((b.notes || []).concat(r.notes || [])).join("\n");
 }
+function render_belief_web_v2(b) {
+  var bw = b || {};
+  if (!bw.ready) {
+    document.getElementById("bw2_n").innerHTML = '<span class="muted">warming up...</span>';
+    document.getElementById("bw2_info").textContent = "—";
+    document.getElementById("bw2_coh").textContent = "—";
+    document.getElementById("bw2_surp").textContent = "—";
+    document.getElementById("bw2_edges").textContent = "—";
+    document.getElementById("bw2_mi_n").textContent = "—";
+    document.getElementById("bw2_scenarios").innerHTML = "";
+    document.getElementById("bw2_lifecycle").innerHTML = "";
+    document.getElementById("bw2_info_feed").innerHTML = "";
+    document.getElementById("bw2_mi_pairs").innerHTML = "";
+    document.getElementById("bw2_predicted").innerHTML = "";
+    return;
+  }
+  document.getElementById("bw2_n").textContent = bw.n_active || 0;
+  var info = Number(bw.total_information_gain || 0);
+  var iCls = info > 0.1 ? "green" : (info > 0.01 ? "yellow" : "muted");
+  document.getElementById("bw2_info").innerHTML = '<span class="' + iCls + '">' + info.toFixed(4) + '</span>';
+  var coh = Number(bw.coherence_score || 0);
+  var cCls = coh > 0.05 ? "green" : "muted";
+  document.getElementById("bw2_coh").innerHTML = '<span class="' + cCls + '">' + coh.toFixed(3) + '</span>';
+  var surp = Number(bw.surprise_score || 0);
+  var sCls = surp > 1.0 ? "red" : (surp > 0.5 ? "yellow" : "muted");
+  document.getElementById("bw2_surp").innerHTML = '<span class="' + sCls + '">' + surp.toFixed(2) + '</span>';
+  var graph = bw.causal_graph || {};
+  document.getElementById("bw2_edges").textContent = graph.n_edges || 0;
+  var ct = bw.conditional_table || {};
+  document.getElementById("bw2_mi_n").textContent = ct.n_ticks || 0;
+  // Scenarios with CI — render as bars showing posterior mean + CI bracket.
+  var scRows = (bw.scenarios_with_ci || []).slice(0, 8).map(function(sc){
+    var p = Number(sc.current_probability || 0);
+    var ci = sc.confidence_interval_95 || [p, p];
+    var lo = Number(ci[0] || 0), hi = Number(ci[1] || 0);
+    var lifecycle = sc.lifecycle_phase || "";
+    var lifecycleColor = {
+      "incubating": "muted", "growing": "green", "peak": "yellow",
+      "decaying": "yellow", "dying": "red", "retired": "muted"
+    }[lifecycle] || "muted";
+    var dir = sc.implied_direction || 0;
+    var dirBadge = dir > 0 ? '<span class="badge bull">↑</span>'
+                  : (dir < 0 ? '<span class="badge bear">↓</span>'
+                  : '<span class="badge">·</span>');
+    // SVG CI bar: track from 0..1; CI segment highlighted.
+    var ciSvg = '<svg width="180" height="14" style="vertical-align:middle;">'
+      + '<rect x="0" y="6" width="180" height="2" fill="#1c2330"/>'
+      + '<rect x="' + (lo*180).toFixed(0) + '" y="4" width="' + ((hi-lo)*180).toFixed(0) + '" height="6" fill="#5dffd0" opacity="0.4"/>'
+      + '<circle cx="' + (p*180).toFixed(0) + '" cy="7" r="3" fill="#5dffd0"/>'
+      + '</svg>';
+    return '<div class="position-row">'
+      + '<strong>' + (sc.name || "") + '</strong>'
+      + ' ' + dirBadge
+      + ' <span class="' + lifecycleColor + '">[' + lifecycle + ']</span>'
+      + ' ' + ciSvg + ' <span class="muted">' + p.toFixed(3) + ' (95% CI ' + lo.toFixed(2) + '..' + hi.toFixed(2) + ')</span>'
+      + ' <span class="muted" style="float:right">info ' + Number(sc.last_information_gain||0).toFixed(4) + '</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("bw2_scenarios").innerHTML = scRows || '<em class="muted">no active scenarios</em>';
+  // Lifecycle distribution: small horizontal stacked bar.
+  var lc = bw.lifecycle_distribution || {};
+  var lcOrder = ["incubating", "growing", "peak", "decaying", "dying"];
+  var lcColors = {"incubating": "#5a6172", "growing": "#7dff8e",
+                    "peak": "#fff19a", "decaying": "#c78aff",
+                    "dying": "#ff7d8e"};
+  var total = lcOrder.reduce(function(s,k){ return s + (lc[k]||0); }, 0) || 1;
+  var bar = lcOrder.map(function(k){
+    var pct = ((lc[k]||0) / total * 100).toFixed(0);
+    return '<div style="display:inline-block;width:' + pct + '%;background:' + lcColors[k] + ';height:14px;"></div>';
+  }).join("");
+  var lbl = lcOrder.map(function(k){
+    return '<span style="color:' + lcColors[k] + ';">' + k + ': ' + (lc[k]||0) + '</span>';
+  }).join(" · ");
+  document.getElementById("bw2_lifecycle").innerHTML =
+    '<div style="background:#0a0e14;border-radius:3px;overflow:hidden;font-size:0;">' + bar + '</div>'
+    + '<div style="margin-top:4px;font-size:11px;">' + lbl + '</div>';
+  // Most informative this tick.
+  var feed = (bw.most_informative_this_tick || []).map(function(r){
+    var g = Number(r.information_gain || 0);
+    return '<div class="position-row">'
+      + '<strong>' + (r.scenario_id || "") + '</strong>'
+      + ' <span class="muted" style="float:right">' + g.toFixed(4) + '</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("bw2_info_feed").innerHTML = feed || '<em class="muted">no movement this tick</em>';
+  // Top MI pairs.
+  var miPairs = (ct.top_mutual_information_pairs || []).slice(0, 8).map(function(p){
+    return '<div class="position-row">'
+      + '<strong>' + (p.a || "") + '</strong>'
+      + ' <span class="muted">↔</span> '
+      + '<strong>' + (p.b || "") + '</strong>'
+      + ' <span class="green" style="float:right">MI ' + Number(p.mi||0).toFixed(3) + '</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("bw2_mi_pairs").innerHTML = miPairs || '<em class="muted">no co-occurrence data yet</em>';
+  // Predicted resolutions.
+  var preds = (bw.predicted_resolutions || []).slice(0, 6).map(function(p){
+    var mean = Number(p.predicted_realisation_mean || 0);
+    var meanCls = mean > 0.1 ? "green" : (mean < -0.1 ? "red" : "muted");
+    var pProf = Number(p.predicted_p_realised || 0);
+    return '<div class="position-row">'
+      + '<strong>' + (p.name || p.scenario_id || "") + '</strong>'
+      + ' <span class="muted">[' + (p.family || "") + '/' + (p.horizon_bars || 0) + 'b]</span>'
+      + ' <span class="' + meanCls + '"> E[R] ' + (mean>=0?"+":"") + mean.toFixed(2) + '</span>'
+      + ' <span class="muted"> ±' + Number(p.predicted_realisation_std||0).toFixed(2) + '</span>'
+      + ' <span class="muted" style="float:right">P(profit) ' + (pProf*100).toFixed(0) + '%</span>'
+      + '</div>';
+  }).join("");
+  document.getElementById("bw2_predicted").innerHTML = preds || '<em class="muted">resolution memory empty</em>';
+  // Causal graph SVG.
+  render_belief_graph(bw.scenarios_with_ci || [], graph.edges || []);
+  document.getElementById("bw2_notes").textContent = (bw.notes || []).join("\n");
+}
+function render_belief_graph(scenarios, edges) {
+  var svg = document.getElementById("bw2_graph_svg");
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!scenarios || scenarios.length === 0) {
+    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", 500); t.setAttribute("y", 140);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("fill", "#5a6172");
+    t.textContent = "no scenarios";
+    svg.appendChild(t);
+    return;
+  }
+  // Layout: top scenarios on a circle, edges as straight lines.
+  var top = scenarios.slice(0, 10);
+  var cx = 500, cy = 140;
+  var radius = 100;
+  var positions = {};
+  for (var i = 0; i < top.length; i++) {
+    var angle = -Math.PI / 2 + i * (2 * Math.PI / Math.max(1, top.length));
+    var x = cx + radius * Math.cos(angle);
+    var y = cy + radius * Math.sin(angle);
+    positions[top[i].scenario_id || top[i].name] = {x: x, y: y, sc: top[i]};
+  }
+  // Edges first so nodes overlay.
+  var edgeColors = {"support": "#7dff8e", "imply": "#5dffd0",
+                      "inhibit": "#ff7d8e", "compete": "#c78aff"};
+  (edges || []).forEach(function(e){
+    var a = positions[e.from_id];
+    var b = positions[e.to_id];
+    if (!a || !b) return;
+    var color = edgeColors[e.edge_type] || "#5a6172";
+    var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", Math.max(0.5, Math.min(3, e.weight * 3)));
+    line.setAttribute("opacity", Math.min(0.8, 0.2 + e.confidence * 0.6));
+    svg.appendChild(line);
+  });
+  // Nodes.
+  Object.keys(positions).forEach(function(sid){
+    var pos = positions[sid];
+    var sc = pos.sc;
+    var p = Number(sc.current_probability || 0);
+    var r = Math.max(6, Math.min(28, 6 + p * 32));
+    var dir = sc.implied_direction || 0;
+    var fam = sc.family || "";
+    var color = "#cad3df";
+    if (fam === "directional") color = dir > 0 ? "#7dff8e" : (dir < 0 ? "#ff7d8e" : "#cad3df");
+    else if (fam === "chop") color = "#9ca8c0";
+    else if (fam === "fat_tail") color = "#c78aff";
+    else if (fam === "manipulation") color = "#fff19a";
+    var circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", pos.x); circle.setAttribute("cy", pos.y);
+    circle.setAttribute("r", r);
+    circle.setAttribute("fill", color);
+    circle.setAttribute("opacity", 0.45 + 0.45 * p);
+    svg.appendChild(circle);
+    if (r >= 12) {
+      var lbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      lbl.setAttribute("x", pos.x); lbl.setAttribute("y", pos.y + 3);
+      lbl.setAttribute("text-anchor", "middle"); lbl.setAttribute("fill", "#0a0e14");
+      lbl.setAttribute("font-size", "9"); lbl.setAttribute("font-weight", "bold");
+      lbl.textContent = (sc.name || sid || "").slice(0, 8);
+      svg.appendChild(lbl);
+    }
+  });
+  // Legend.
+  var legendY = 260;
+  var legendItems = [["support", "#7dff8e"], ["imply", "#5dffd0"],
+                       ["inhibit", "#ff7d8e"], ["compete", "#c78aff"]];
+  legendItems.forEach(function(li, i){
+    var x = 20 + i * 110;
+    var ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    ln.setAttribute("x1", x); ln.setAttribute("x2", x + 16);
+    ln.setAttribute("y1", legendY); ln.setAttribute("y2", legendY);
+    ln.setAttribute("stroke", li[1]); ln.setAttribute("stroke-width", 2);
+    svg.appendChild(ln);
+    var lt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    lt.setAttribute("x", x + 22); lt.setAttribute("y", legendY + 3);
+    lt.setAttribute("fill", "#5a6172"); lt.setAttribute("font-size", "10");
+    lt.textContent = li[0];
+    svg.appendChild(lt);
+  });
+}
 function render_contextual_learner(ctx) {
   var c = ctx || {};
   if (!c.enabled) {
@@ -1509,6 +1738,7 @@ function render(snap) {
   render_rehearsal(snap.rehearsal_panel || {});
   render_multi_leg(snap.multi_leg_panel || {});
   render_contextual_learner(snap.contextual_learner_panel || {});
+  render_belief_web_v2(snap.belief_web_v2_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {

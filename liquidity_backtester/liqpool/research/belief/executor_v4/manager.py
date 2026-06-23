@@ -386,6 +386,16 @@ class PortfolioManager:
             lot_size=self.cfg.economics.lot_size,
         )
         self._last_bundle_outcome: Optional[Dict[str, Any]] = None
+        # Belief Web v2 (founder 2026-06-22 Tier-3): the sophisticated
+        # layer over the legacy ScenarioWeb. Mirrors the legacy
+        # scenarios into a Bayesian model with confidence intervals,
+        # lifecycle phases, particle filtering, a causal graph,
+        # conditional probabilities, Markov transition tables, and
+        # information-gain metrics. Purely ADDITIVE — the legacy web
+        # still drives the decision pipeline; this layer surfaces
+        # sophistication to the cockpit and downstream observers.
+        from .belief_web_v2 import BeliefWebV2, BeliefWebV2Config
+        self.belief_web_v2 = BeliefWebV2(cfg=BeliefWebV2Config())
         # Recent-trades tape (last N opens + closes, newest first) — feeds
         # the cockpit's Live Trades panel.
         from collections import deque as _deque
@@ -486,6 +496,20 @@ class PortfolioManager:
         self._last_mtf_views = mtf_views_dict
         web_snap = self.web.observe(snapshot, rich, flow_event, mtf_views_dict)
         self._last_web_snapshot = web_snap
+
+        # 3a.0 — Belief Web v2 (founder 2026-06-22 Tier-3). Mirrors the
+        # legacy scenarios into a Bayesian model with confidence
+        # intervals + causal graph + conditional probabilities +
+        # lifecycle phases + particle filtering + predicted-resolution
+        # distributions. Runs every tick; failures are silent so the
+        # decision pipeline is never impacted.
+        try:
+            self.belief_web_v2.observe(
+                legacy_scenarios=self.web.scenarios,
+                bar_index=bar_index,
+            )
+        except Exception:
+            pass
 
         # 3a.1 — Apply regime-conditioned weights to the aggregator
         # (founder 2026-06-22 Tier-2 part 3). The contextual learner
@@ -1785,6 +1809,17 @@ class PortfolioManager:
                 realized_r=float(current_r),
                 realized_rupees=realized_rupees,
             )
+            # Tier-3: feed the resolution memory so BeliefWeb v2 can
+            # build empirical predicted-resolution distributions per
+            # scenario family.
+            try:
+                self.belief_web_v2.record_resolution(
+                    family=str(regime_tag.get("dominant_family")
+                                  or "unknown"),
+                    realised_r=float(current_r),
+                )
+            except Exception:
+                pass
             if self.calibration_store is not None:
                 self.calibration_store.record_closure(
                     component_scores=component_scores,
@@ -2288,6 +2323,7 @@ class PortfolioManager:
             "contextual_learner": self.live_calibrator.contextual_summary(
                 current_family=self._today_dominant_family() or "unknown",
             ),
+            "belief_web_v2": self.belief_web_v2.summary(),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),

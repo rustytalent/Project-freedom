@@ -81,6 +81,9 @@ class CockpitSnapshot:
     multi_leg_panel: Dict[str, Any] = field(default_factory=dict)
     # Tier-2 part 3: Contextual learner panel.
     contextual_learner_panel: Dict[str, Any] = field(default_factory=dict)
+    # Tier-3: BeliefWebV2 — confidence intervals + causal graph +
+    # lifecycle phases + information gain.
+    belief_web_v2_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -431,6 +434,31 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         "notes": list(boot.get("notes") or []),
     }
 
+    # Belief Web v2 panel (Tier-3): confidence intervals + causal graph
+    # + lifecycle phases + information gain + predicted resolutions.
+    bw2 = summary.get("belief_web_v2") or {}
+    belief_web_v2_panel = {
+        "ready": bw2.get("ready", False),
+        "bar_index": bw2.get("bar_index", 0),
+        "n_active": bw2.get("n_active", 0),
+        "scenarios_with_ci": list(bw2.get("scenarios_with_ci") or [])[:10],
+        "causal_graph": dict(bw2.get("causal_graph") or {}),
+        "conditional_table": dict(bw2.get("conditional_table") or {}),
+        "markov_table": dict(bw2.get("markov_table") or {}),
+        "lifecycle_distribution": dict(
+            bw2.get("lifecycle_distribution") or {}),
+        "most_informative_this_tick": list(
+            bw2.get("most_informative_this_tick") or []),
+        "total_information_gain": bw2.get("total_information_gain", 0.0),
+        "coherence_score": bw2.get("coherence_score", 0.0),
+        "surprise_score": bw2.get("surprise_score", 0.0),
+        "predicted_resolutions": list(
+            bw2.get("predicted_resolutions") or [])[:8],
+        "propagation_deltas": dict(bw2.get("propagation_deltas") or {}),
+        "resolution_memory": dict(bw2.get("resolution_memory") or {}),
+        "notes": list(bw2.get("notes") or []),
+    }
+
     # Contextual learner panel (Tier-2 part 3): per-regime conditional
     # weights, Shapley attributions per recent closure, recency-weighted
     # effective sample counts.
@@ -526,4 +554,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         rehearsal_panel=rehearsal_panel,
         multi_leg_panel=multi_leg_panel,
         contextual_learner_panel=contextual_learner_panel,
+        belief_web_v2_panel=belief_web_v2_panel,
     )
