@@ -84,6 +84,8 @@ class CockpitSnapshot:
     # Tier-3: BeliefWebV2 — confidence intervals + causal graph +
     # lifecycle phases + information gain.
     belief_web_v2_panel: Dict[str, Any] = field(default_factory=dict)
+    # Memory diagnostics (RAM-leak triage 2026-06-22).
+    memory_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -555,4 +557,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         multi_leg_panel=multi_leg_panel,
         contextual_learner_panel=contextual_learner_panel,
         belief_web_v2_panel=belief_web_v2_panel,
+        memory_panel=dict(intent_dict.get("memory_summary") or {}),
     )

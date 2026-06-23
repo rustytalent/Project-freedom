@@ -136,6 +136,19 @@ class V4Runner:
         # up. Bounded ring buffer of the last 60 ticks' breakdowns.
         from collections import deque as _deque
         self._latency_samples: _deque = _deque(maxlen=60)
+        # Memory guard (founder ask 2026-06-22 RAM-leak triage). Samples
+        # RSS at most every 5 seconds; raises MemoryCeilingExceeded
+        # when RSS crosses the hard ceiling so the live loop can shut
+        # down cleanly instead of getting OOM-killed.
+        from .memory_guard import MemoryGuard, MemoryGuardConfig
+        self.memory_guard = MemoryGuard(MemoryGuardConfig())
+        # Cockpit publish throttle (founder ask 2026-06-22): the live
+        # tick loop runs at ~1 Hz but we don't need to ship a full
+        # cockpit payload every tick to subscribers. Throttle to 2 Hz
+        # so the dashboard stays responsive without overloading the
+        # SSE channel + serialiser.
+        self._cockpit_publish_min_interval_s: float = 0.5
+        self._last_cockpit_publish_ts: float = 0.0
         # Try to restore from disk if a snapshot exists for today.
         snap = self.persistence.load_today()
         if snap is not None:
@@ -297,12 +310,30 @@ class V4Runner:
         timings_ms["total_so_far_ms"] = (time.perf_counter() - _t0) * 1000.0
         intent_dict_for_cockpit["latency_ms"] = dict(timings_ms)
         intent_dict_for_cockpit["latency_summary"] = self.latency_summary()
+        # Memory diagnostics — sample RSS at most every 5s; raises if
+        # the hard ceiling is crossed.
+        try:
+            self.memory_guard.check()
+        except Exception:
+            # MemoryCeilingExceeded propagates as a structured note so
+            # the live runner can flush + shut down cleanly. We don't
+            # silently swallow it.
+            raise
+        intent_dict_for_cockpit["memory_summary"] = (
+            self.memory_guard.summary())
         cockpit = build_cockpit_snapshot(intent_dict_for_cockpit)
+        # Throttle cockpit publish to 2 Hz. The build_cockpit_snapshot
+        # call is cheap; the publish path involves SSE serialisation
+        # and waking subscribers which is the expensive part.
         if self._cockpit_server is not None:
-            try:
-                self._cockpit_server.publish(cockpit.to_dict())
-            except Exception:
-                pass    # never let UI plumbing break the trading loop
+            _now = time.time()
+            if (_now - self._last_cockpit_publish_ts
+                    >= self._cockpit_publish_min_interval_s):
+                try:
+                    self._cockpit_server.publish(cockpit.to_dict())
+                    self._last_cockpit_publish_ts = _now
+                except Exception:
+                    pass    # never let UI plumbing break the trading loop
 
         # 5. Emit to JSONL if configured.
         if cfg.write_cockpit_to_jsonl is not None:

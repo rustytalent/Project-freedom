@@ -80,10 +80,19 @@ class LedgerOutcome:
 
 @dataclass
 class PositionLedger:
-    """The full audit trail for one position."""
+    """The full audit trail for one position.
+
+    ``bar_records`` is capped to ``max_bar_records`` so a position held
+    for hours of 1-second ticks doesn't accumulate into a memory leak.
+    Default (1200) gives 20 minutes of full resolution at 1-second
+    ticks. When the cap fires, the oldest records are dropped — the
+    post_mortem analytics still work because they aggregate over
+    whatever survives.
+    """
     hypothesis: PositionHypothesis
     bar_records: List[BarRecord] = field(default_factory=list)
     outcome: Optional[LedgerOutcome] = None
+    max_bar_records: int = 1200
 
     @property
     def is_open(self) -> bool:
@@ -99,6 +108,13 @@ class PositionLedger:
 
     def append_bar(self, record: BarRecord) -> None:
         self.bar_records.append(record)
+        # Cap the in-memory bar record history. The persistence layer
+        # writes everything to disk before this point, so dropping the
+        # oldest records doesn't lose audit data — it just keeps RAM
+        # bounded.
+        cap = max(50, int(self.max_bar_records))
+        if len(self.bar_records) > cap:
+            self.bar_records = self.bar_records[-cap:]
 
     def close(self, outcome: LedgerOutcome) -> None:
         self.outcome = outcome
@@ -173,11 +189,27 @@ class PositionLedger:
 
 class LedgerStore:
     """In-memory store of ledgers. Persistence is a serialization concern
-    handled by callers (write to JSONL, parquet, sqlite, whatever)."""
+    handled by callers (write to JSONL, parquet, sqlite, whatever).
 
-    def __init__(self) -> None:
+    ``max_closed_in_memory`` caps the closed-position list to keep RAM
+    bounded across long live sessions. Older closed positions are
+    dropped from memory; the JSONL on disk (written by the persistence
+    layer) is still authoritative for post-mortem and overnight
+    analysis.
+
+    On close, each ledger's ``bar_records`` are trimmed to the most
+    recent ``trim_bar_records_on_close`` entries since the realised
+    R + post-mortem aggregates we summarise from a closed ledger only
+    need the tail of the trajectory.
+    """
+
+    def __init__(self, *,
+                  max_closed_in_memory: int = 250,
+                  trim_bar_records_on_close: int = 60) -> None:
         self._open: Dict[str, PositionLedger] = {}
         self._closed: List[PositionLedger] = []
+        self.max_closed_in_memory = int(max_closed_in_memory)
+        self.trim_bar_records_on_close = int(trim_bar_records_on_close)
 
     def open(self, ledger: PositionLedger) -> None:
         self._open[ledger.position_id] = ledger
@@ -189,7 +221,19 @@ class LedgerStore:
         ledger = self._open.pop(position_id, None)
         if ledger is not None:
             ledger.close(outcome)
+            # Trim the tape on the closed ledger — the post-mortem
+            # aggregates over what's left and we don't need every tick
+            # forever.
+            trim = max(10, self.trim_bar_records_on_close)
+            if len(ledger.bar_records) > trim:
+                ledger.bar_records = ledger.bar_records[-trim:]
             self._closed.append(ledger)
+            # Bound the closed list — drop the oldest closed positions
+            # when the cap fires. Floor is intentionally tiny so tests
+            # can use small caps; production uses the default 250.
+            cap = max(5, self.max_closed_in_memory)
+            if len(self._closed) > cap:
+                self._closed = self._closed[-cap:]
         return ledger
 
     def open_positions(self) -> List[PositionLedger]:

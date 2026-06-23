@@ -83,8 +83,13 @@ class ModificationBudget:
     cfg: ModificationBudgetConfig = field(
         default_factory=ModificationBudgetConfig)
     used: Dict[str, int] = field(default_factory=dict)
+    # History rings — bounded to keep live RAM flat across long sessions.
+    # We only ever read the last few entries for cockpit display, so a
+    # small cap is fine. The persistence layer captures everything to
+    # disk before this.
     history: List[ModificationRequest] = field(default_factory=list)
     rejected_history: List[ModificationRequest] = field(default_factory=list)
+    history_cap: int = 64
 
     def __post_init__(self) -> None:
         if not self.used:
@@ -132,10 +137,13 @@ class ModificationBudget:
         is True (used by KILL mode), falls back to the emergency reserve.
         Returns the granted ModificationRequest, or None if refused.
         """
+        cap = max(8, int(self.history_cap))
         if self.can_spend(bucket):
             self.used[bucket] = self.used.get(bucket, 0) + 1
             req = ModificationRequest(bucket=bucket, reason=reason)
             self.history.append(req)
+            if len(self.history) > cap:
+                self.history = self.history[-cap:]
             return req
         # Fallback: KILL mode can dip into emergency reserve.
         if (fallback_to_emergency_on_kill
@@ -148,11 +156,15 @@ class ModificationBudget:
                 reason=f"KILL fallback for {reason}",
             )
             self.history.append(req)
+            if len(self.history) > cap:
+                self.history = self.history[-cap:]
             return req
         # Refused.
         rej = ModificationRequest(bucket=bucket,
                                      reason=f"REJECTED: {reason}")
         self.rejected_history.append(rej)
+        if len(self.rejected_history) > cap:
+            self.rejected_history = self.rejected_history[-cap:]
         return None
 
     # ── Serialization ──────────────────────────────────────────────

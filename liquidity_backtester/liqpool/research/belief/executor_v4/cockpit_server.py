@@ -516,6 +516,7 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
     <button id="btn-calib-toggle" class="btn btn-neutral">CALIB: …</button>
     <button id="btn-rollback" class="btn btn-neutral">↩ ROLLBACK</button>
     <span id="control-status" class="muted" style="margin-left: 12px;"></span>
+    <span id="memory-status" class="muted" style="margin-left: 12px;"></span>
   </div>
   <div class="grid" style="margin-top: 12px">
     <div class="panel">
@@ -1562,6 +1563,15 @@ function render_rehearsal(rh) {
 function render(snap) {
   document.getElementById("ts").textContent = snap.ts || "—";
   document.getElementById("status").innerHTML = '<span class="status-dot"></span>live';
+  // Memory diagnostics — always-visible RSS readout in the control bar.
+  var mem = snap.memory_panel || {};
+  if (mem.rss_now_mb) {
+    var trend = Number(mem.rss_trend_recent_mb || 0);
+    var cls = mem.above_soft_warn ? "red" : (trend > 5 ? "yellow" : "muted");
+    var trendLbl = (trend > 0 ? "+" : "") + trend.toFixed(1) + " MB recent";
+    document.getElementById("memory-status").innerHTML =
+      '<span class="' + cls + '">RSS ' + Number(mem.rss_now_mb).toFixed(0) + ' MB · ' + trendLbl + '</span>';
+  }
   // Action card
   var ac = snap.action_card || {};
   var headline = ac.headline || "—";
