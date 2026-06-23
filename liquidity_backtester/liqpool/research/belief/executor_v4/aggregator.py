@@ -64,6 +64,22 @@ class AggregatorConfig:
     # outright (rehearsal saw the analogue distribution telling us this
     # state usually loses).
     rehearsal_defer_min_confidence: float = 0.30
+    # ── ManipulationV2 AUTHORITATIVE direction gate (founder 2026-06-22
+    # Tier-3): when manipulation_v2 says MM intent is OPPOSITE the
+    # proposed direction with confidence ≥ this threshold, REFUSE
+    # outright. This is a hard gate — no soft penalty, no neutral
+    # prior. It is the "stop bleeding into MM" lever.
+    mm_intent_contra_refuse_confidence: float = 0.60
+    # When MM intent ALIGNS with proposed direction, multiply position
+    # size by up to this much (capped). Default 1.0× = no boost; raise
+    # to 1.5–2.0× to ride alignment harder.
+    mm_intent_aligned_size_boost_max: float = 1.50
+    # When MM intent partially contradicts (confidence between
+    # alignment_floor and contra_refuse), size DOWN by this factor.
+    mm_intent_partial_contra_size_haircut: float = 0.55
+    # MM intent gets its own weight in the composite final score
+    # (its directional vote weighted by confidence).
+    w_mm_intent: float = 0.00     # Default 0 — pure direction gate; flip on for blended.
 
 
 @dataclass
@@ -87,6 +103,13 @@ class AggregatorDecision:
     rehearsal_score: float = 0.50
     rehearsal_confidence: float = 0.0
     rehearsal_action: str = "PROCEED"
+    # Founder 2026-06-22 Tier-3: ManipulationV2 size multiplier (applied
+    # by the manager AFTER recommended_size_multiplier — boost when
+    # aligned, haircut when partial contra). REFUSE is handled via
+    # refuse_reasons, not this field.
+    mm_intent_size_multiplier: float = 1.0
+    mm_intent_direction: int = 0
+    mm_intent_confidence: float = 0.0
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -108,6 +131,11 @@ class AggregatorDecision:
             "rehearsal_score": round(self.rehearsal_score, 3),
             "rehearsal_confidence": round(self.rehearsal_confidence, 3),
             "rehearsal_action": self.rehearsal_action,
+            "mm_intent_size_multiplier": round(
+                self.mm_intent_size_multiplier, 3),
+            "mm_intent_direction": int(self.mm_intent_direction),
+            "mm_intent_confidence": round(
+                self.mm_intent_confidence, 3),
             "notes": list(self.notes),
         }
 
@@ -145,6 +173,7 @@ class DecisionAggregator:
                 daily_pnl_rupees: float,
                 max_daily_bleed: float,
                 rehearsal_decision: Any = None,
+                mm_intent: Optional[Dict[str, Any]] = None,
                 ) -> AggregatorDecision:
         """Apply the transparent decision rule. Returns AggregatorDecision."""
         cfg = self.cfg
@@ -316,6 +345,63 @@ class DecisionAggregator:
             for r in (getattr(rehearsal_decision, "notes", []) or [])[:2]:
                 notes.append(f"rehearsal: {r}")
 
+        # ── ManipulationV2 AUTHORITATIVE direction gate (Tier-3) ────
+        # When MMIntent contradicts the proposed direction with
+        # confidence above mm_intent_contra_refuse_confidence, we
+        # REFUSE outright. This is the founder's "stop bleeding into
+        # MM" lever — no soft penalty, hard gate.
+        mm_intent_size_multiplier = 1.0
+        if mm_intent is not None and isinstance(mm_intent, dict):
+            mm_dir = int(mm_intent.get("direction", 0) or 0)
+            mm_conf = float(mm_intent.get("confidence", 0.0) or 0.0)
+            mm_regime = str(mm_intent.get("regime") or "")
+            mm_gamma = str(mm_intent.get("gamma_regime") or "")
+            mm_fires = int(mm_intent.get("fire_count", 0) or 0)
+            mm_target = mm_intent.get("targeted_strike")
+            override = mm_intent.get("operator_override")
+            explanations.append(
+                f"mm_intent: dir={mm_dir:+d} conf={mm_conf:.2f} "
+                f"fires={mm_fires} regime={mm_regime} gamma={mm_gamma}"
+                + (" [OVERRIDE]" if override else ""))
+            if mm_dir != 0 and proposed_direction != 0:
+                if (mm_dir == -proposed_direction
+                        and mm_conf >= cfg.mm_intent_contra_refuse_confidence):
+                    refuse_reasons.append(
+                        f"manipulation_v2: MM intent {mm_dir:+d} "
+                        f"contradicts proposed {proposed_direction:+d} "
+                        f"with confidence {mm_conf:.2f} ≥ "
+                        f"{cfg.mm_intent_contra_refuse_confidence:.2f} "
+                        f"— authoritative refuse"
+                        + (f" (regime: {mm_regime})" if mm_regime else "")
+                    )
+                elif (mm_dir == -proposed_direction
+                      and mm_conf >= 0.30):
+                    mm_intent_size_multiplier *= (
+                        cfg.mm_intent_partial_contra_size_haircut)
+                    notes.append(
+                        f"mm_intent partial contra (conf {mm_conf:.2f}) — "
+                        f"sizing × "
+                        f"{cfg.mm_intent_partial_contra_size_haircut:.2f}")
+                elif mm_dir == proposed_direction and mm_conf >= 0.40:
+                    boost = 1.0 + min(
+                        cfg.mm_intent_aligned_size_boost_max - 1.0,
+                        (mm_conf - 0.40) * 1.5)
+                    mm_intent_size_multiplier *= boost
+                    notes.append(
+                        f"mm_intent aligned (conf {mm_conf:.2f}) — "
+                        f"sizing × {boost:.2f}"
+                        + (f" → targeting strike {mm_target:.0f}"
+                            if mm_target else ""))
+            # Optional blended weight — disabled by default
+            # (mm_intent_contra_refuse + size haircut is the primary
+            # mechanism).
+            mm_signed = (mm_dir * mm_conf if (mm_dir == proposed_direction
+                                                 and proposed_direction != 0)
+                          else (-mm_conf if mm_dir == -proposed_direction
+                                  else 0.0))
+        else:
+            mm_signed = 0.0
+
         # ── Final composite score ───────────────────────────────────
         final_score = (
             cfg.w_base_score * base_score
@@ -324,6 +410,7 @@ class DecisionAggregator:
             + cfg.w_fees_clearance * fees_score
             + cfg.w_portfolio_capacity * portfolio_score
             + cfg.w_rehearsal * rehearsal_score
+            + cfg.w_mm_intent * (mm_signed + 0.5)
         )
         # Strategy class disagreement penalty.
         if web_strategy and web_strategy != "wait" \
@@ -383,5 +470,12 @@ class DecisionAggregator:
             rehearsal_score=rehearsal_score,
             rehearsal_confidence=rehearsal_confidence,
             rehearsal_action=rehearsal_action,
+            mm_intent_size_multiplier=float(mm_intent_size_multiplier),
+            mm_intent_direction=int(
+                mm_intent.get("direction", 0) if isinstance(mm_intent, dict)
+                else 0),
+            mm_intent_confidence=float(
+                mm_intent.get("confidence", 0.0) if isinstance(mm_intent, dict)
+                else 0.0),
             notes=notes,
         )

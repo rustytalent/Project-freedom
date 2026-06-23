@@ -433,6 +433,18 @@ class PortfolioManager:
         self.mm_mind = MarketMakerMind(self.cfg.market_maker_mind)
         self.fat_tail_amp = FatTailAmplifier(self.cfg.fat_tail_amplifier)
         self.crowd_mirror = CrowdMirror(self.cfg.crowd_mirror)
+        # ── ManipulationV2 (founder 2026-06-22 Tier-3): the 95%+ engine.
+        # Replaces the legacy manipulation_board + mm_mind as the
+        # AUTHORITATIVE source of MM intent for the aggregator. The
+        # legacy engines stay alive only for backward-compat reads from
+        # downstream code (cockpit historical panels, replay tooling)
+        # — they no longer drive entry decisions.
+        from .manipulation_v2 import (
+            ManipulationEngineV2, ManipulationEngineConfig,
+        )
+        self.manipulation_v2 = ManipulationEngineV2(
+            cfg=ManipulationEngineConfig())
+        self._last_mm_intent: Optional[Dict[str, Any]] = None
         self._last_mm_posterior: Optional[MMPosterior] = None
         self._last_tail_score: Optional[FatTailScore] = None
         self._last_crowd_report: Optional[CrowdMirrorReport] = None
@@ -549,6 +561,19 @@ class PortfolioManager:
         mm_posterior = self.mm_mind.infer(patterns=patterns,
                                             flow_event=flow_event)
         self._last_mm_posterior = mm_posterior
+        # 3b.0 — ManipulationV2 (founder 2026-06-22 Tier-3 AUTHORITATIVE
+        # engine). Computes the fused MMIntent that the aggregator uses
+        # for direction-gating + sizing. Runs alongside the legacy
+        # board/mind so cockpit historical panels stay populated.
+        try:
+            mm_intent = self.manipulation_v2.observe(
+                snapshot=snapshot, rich_context=rich,
+                web_snapshot=web_snap, bar_index=bar_index,
+            )
+            self._last_mm_intent = mm_intent.to_dict()
+        except Exception:
+            mm_intent = None
+            self._last_mm_intent = None
         crowd_report = self.crowd_mirror.inspect(
             [s.hypothesis for s in self._open_states.values()],
         )
@@ -1004,6 +1029,11 @@ class PortfolioManager:
                 rehearsal_decision = None
 
         # Gate H: Sprint-2 decision aggregator — combines everything.
+        # Tier-3 founder 2026-06-22: pull the AUTHORITATIVE MMIntent
+        # from manipulation_v2. The aggregator's direction gate uses
+        # it to REFUSE the trade when MM intent contradicts our
+        # proposed direction with confidence above threshold.
+        mm_intent_dict = self._last_mm_intent
         agg = self.aggregator.decide(
             base_confidence=confidence,
             mtf_alignment=mtf_alignment,
@@ -1017,6 +1047,7 @@ class PortfolioManager:
             max_open_positions=cfg.economics.max_open_positions,
             daily_pnl_rupees=self.daily_pnl_rupees,
             max_daily_bleed=cfg.economics.max_daily_bleed,
+            mm_intent=mm_intent_dict,
             rehearsal_decision=rehearsal_decision,
         )
         if agg.decision == AGGR_REFUSE:
@@ -1027,6 +1058,15 @@ class PortfolioManager:
             new_lots = max(1, int(round(size_lots * size_multiplier)))
             if new_lots != size_lots:
                 size_lots = new_lots
+        # ManipulationV2 size boost / haircut on top of base size
+        # (founder 2026-06-22 Tier-3 AUTHORITATIVE engine).
+        mm_mult = float(getattr(agg, "mm_intent_size_multiplier", 1.0))
+        if mm_mult != 1.0:
+            cap = float(
+                cfg.aggregator.mm_intent_aligned_size_boost_max)
+            mm_mult = max(0.0, min(cap, mm_mult))
+            new_lots = max(1, int(round(size_lots * mm_mult)))
+            size_lots = new_lots
 
         # Gate I: counterfactual — generate position-specific kill plan.
         cf_plan = self.counterfactual.generate(
@@ -1117,6 +1157,16 @@ class PortfolioManager:
 
         ledger = PositionLedger(hypothesis=hypothesis)
         self.ledger_store.open(ledger)
+        # ManipulationV2: snapshot the per-detector posteriors at entry
+        # so we can attribute the realised R back to the right detectors
+        # at close time. Drives the SelfCalibrator's weight updates.
+        try:
+            self.manipulation_v2.snapshot_at_entry(
+                position_id=hypothesis.position_id,
+                bar_index=bar_index,
+            )
+        except Exception:
+            pass
         self._open_states[hypothesis.position_id] = _OpenPositionState(
             hypothesis=hypothesis,
             entry_bar=bar_index,
@@ -1807,6 +1857,15 @@ class PortfolioManager:
                 bar_index=bar_index,
                 regime_family=family_for_close,
             )
+            # ManipulationV2 attribution — feeds the SelfCalibrator
+            # so detector weights drift toward what works.
+            try:
+                self.manipulation_v2.attribute_close(
+                    position_id=pos_id,
+                    realised_r=float(current_r),
+                )
+            except Exception:
+                pass
             self._last_calibration = calib.to_dict()
         except Exception:
             self._last_calibration = None
@@ -2556,6 +2615,7 @@ class PortfolioManager:
                 current_family=self._today_dominant_family() or "unknown",
             ),
             "belief_web_v2": self.belief_web_v2.summary(),
+            "manipulation_v2": self.manipulation_v2.summary(),
             "recent_trades": list(self._recent_trades)[:20],
             "strategy_attribution": self._strategy_attribution_summary(),
             "slippage_tracker": self.slippage_tracker.rolling_summary(),

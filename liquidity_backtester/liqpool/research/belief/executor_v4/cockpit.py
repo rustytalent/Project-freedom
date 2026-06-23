@@ -86,9 +86,35 @@ class CockpitSnapshot:
     belief_web_v2_panel: Dict[str, Any] = field(default_factory=dict)
     # Memory diagnostics (RAM-leak triage 2026-06-22).
     memory_panel: Dict[str, Any] = field(default_factory=dict)
+    # ManipulationV2 — Tier-3 authoritative manipulation engine.
+    manipulation_v2_panel: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
+
+
+def _build_manipulation_v2_panel(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Project manipulation_v2 summary into the cockpit panel shape."""
+    mv2 = summary.get("manipulation_v2") or {}
+    last = mv2.get("last_intent") or {}
+    calib = mv2.get("calibrator") or {}
+    return {
+        "fire_count": last.get("fire_count", 0),
+        "direction": last.get("direction", 0),
+        "confidence": last.get("confidence", 0.0),
+        "regime": last.get("regime", "unknown"),
+        "gamma_regime": last.get("gamma_regime", "unknown"),
+        "horizon_bars": last.get("horizon_bars", 0),
+        "targeted_strike": last.get("targeted_strike"),
+        "composite_score": last.get("composite_score", 0.0),
+        "per_detector": dict(last.get("per_detector") or {}),
+        "notes": list(last.get("notes") or []),
+        "operator_override": last.get("operator_override"),
+        "calibrator_weights": dict(calib.get("weights") or {}),
+        "calibrator_per_detector": dict(calib.get("per_detector") or {}),
+        "n_recent_outcomes": calib.get("n_recent_outcomes", 0),
+        "n_snapshots_held": calib.get("snapshots_held", 0),
+    }
 
 
 def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
@@ -558,4 +584,5 @@ def build_cockpit_snapshot(intent_dict: Dict[str, Any]) -> CockpitSnapshot:
         contextual_learner_panel=contextual_learner_panel,
         belief_web_v2_panel=belief_web_v2_panel,
         memory_panel=dict(intent_dict.get("memory_summary") or {}),
+        manipulation_v2_panel=_build_manipulation_v2_panel(summary),
     )

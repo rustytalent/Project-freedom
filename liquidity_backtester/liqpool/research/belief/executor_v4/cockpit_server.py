@@ -165,6 +165,12 @@ def _make_handler(feed: CockpitFeed, runner_ref: Callable[[], Any]):
                 if self.path == "/api/calibrator/rollback":
                     self._control_calibrator_rollback(body)
                     return
+                if self.path == "/api/manipulation/override":
+                    self._control_manipulation_override(body)
+                    return
+                if self.path == "/api/manipulation/override/clear":
+                    self._control_manipulation_override_clear(body)
+                    return
                 self._send_text(404, "control endpoint not found\n")
             except Exception as exc:
                 log.exception("control handler error: %s", exc)
@@ -277,6 +283,51 @@ def _make_handler(feed: CockpitFeed, runner_ref: Callable[[], Any]):
             try:
                 ok = runner.manager.live_calibrator.rollback_last_applied()
                 self._send_json(200, {"ok": ok})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+
+        def _control_manipulation_override(self, body: str) -> None:
+            """Operator AUTHORITATIVE override for the manipulation
+            engine. Logged + decays after horizon_bars. Use only when
+            the operator sees something the model doesn't."""
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                data = self._parse_body(body)
+                direction = int(data.get("direction", 0))
+                horizon = int(data.get("horizon_bars", 10))
+                reason = str(data.get("reason", ""))
+                confidence = float(data.get("confidence", 0.75))
+                if direction not in (-1, 1):
+                    self._send_json(400, {
+                        "error": "direction must be +1 or -1"})
+                    return
+                if horizon < 1 or horizon > 240:
+                    self._send_json(400, {
+                        "error": "horizon_bars must be in [1, 240]"})
+                    return
+                payload = runner.manager.manipulation_v2.set_operator_override(
+                    direction=direction, horizon_bars=horizon,
+                    reason=reason, confidence=confidence,
+                )
+                log.warning(
+                    "manipulation_v2 OPERATOR OVERRIDE: %s", payload)
+                self._send_json(200, {"ok": True, "override": payload})
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+
+        def _control_manipulation_override_clear(self, body: str) -> None:
+            runner = runner_ref()
+            if runner is None:
+                self._send_json(503, {"error": "runner not attached"})
+                return
+            try:
+                had = runner.manager.manipulation_v2.clear_operator_override()
+                log.warning(
+                    "manipulation_v2 OVERRIDE CLEARED (had=%s)", had)
+                self._send_json(200, {"ok": True, "had_override": had})
             except Exception as exc:
                 self._send_json(500, {"error": str(exc)})
 
@@ -724,6 +775,32 @@ _DEFAULT_VIEWER_HTML = r"""<!doctype html>
       </div>
       <div id="hedge_proposals" style="margin-top: 6px;">—</div>
       <pre id="hedge_reasons" class="muted" style="margin-top: 6px;"></pre>
+    </div>
+    <div class="panel full">
+      <h2>MANIPULATION v2 — AUTHORITATIVE direction gate</h2>
+      <div class="muted" style="font-size: 11px; margin-bottom: 8px;">
+        Seven detectors fuse into one MM intent. The aggregator REFUSES entries that contradict
+        intent with confidence ≥ 0.60. Aligned intent boosts sizing. The operator override is
+        a logged emergency lever — use it only when you see something the model doesn&rsquo;t.
+      </div>
+      <div class="kv">
+        <div class="k">Intent direction</div><div class="v" id="mv2_dir">—</div>
+        <div class="k">Intent confidence</div><div class="v" id="mv2_conf">—</div>
+        <div class="k">Detectors firing</div><div class="v" id="mv2_fires">—</div>
+        <div class="k">Trend regime</div><div class="v" id="mv2_regime">—</div>
+        <div class="k">Gamma regime</div><div class="v" id="mv2_gamma">—</div>
+        <div class="k">Horizon</div><div class="v" id="mv2_horizon">—</div>
+        <div class="k">Targeted strike</div><div class="v" id="mv2_target">—</div>
+        <div class="k">Override</div><div class="v" id="mv2_override">—</div>
+      </div>
+      <h2 style="margin-top:14px;">Per-detector posteriors + self-calibrated weights</h2>
+      <div id="mv2_detectors">—</div>
+      <pre id="mv2_notes" class="muted" style="margin-top: 6px;"></pre>
+      <div class="control-bar" style="margin-top: 8px;">
+        <button id="btn-mv2-override-bull" class="btn btn-paper">OVERRIDE: BULL</button>
+        <button id="btn-mv2-override-bear" class="btn btn-paper">OVERRIDE: BEAR</button>
+        <button id="btn-mv2-override-clear" class="btn btn-neutral">CLEAR OVERRIDE</button>
+      </div>
     </div>
     <div class="panel full">
       <h2>BELIEF WEB v2 — Bayesian scenarios with confidence intervals + causal graph</h2>
@@ -1196,6 +1273,64 @@ function render_bootstrap(boot, regime) {
   document.getElementById("reg_family_rows").innerHTML = rows || '<em class="muted">no history yet (first day)</em>';
   document.getElementById("boot_notes").textContent =
     ((b.notes || []).concat(r.notes || [])).join("\n");
+}
+function render_manipulation_v2(mv) {
+  var m = mv || {};
+  var el = function(id) { return document.getElementById(id); };
+  if (!el('mv2_dir')) return;
+  var dir = Number(m.direction || 0);
+  var dirCls = dir > 0 ? 'green' : (dir < 0 ? 'red' : 'muted');
+  var dirTxt = dir > 0 ? '↑ +1 bull' : (dir < 0 ? '↓ -1 bear' : '· 0 neutral');
+  el('mv2_dir').innerHTML = '<span class="' + dirCls + '">' + dirTxt + '</span>';
+  var conf = Number(m.confidence || 0);
+  var confCls = conf >= 0.60 ? 'red' : (conf >= 0.40 ? 'yellow' : 'muted');
+  el('mv2_conf').innerHTML = fmt_bar(conf, 0, 1) + ' <span class="' + confCls + '">' + conf.toFixed(2) + '</span>';
+  el('mv2_fires').textContent = m.fire_count || 0;
+  el('mv2_regime').textContent = m.regime || '—';
+  el('mv2_gamma').textContent = m.gamma_regime || '—';
+  el('mv2_horizon').textContent = (m.horizon_bars || 0) + 'b';
+  el('mv2_target').textContent = m.targeted_strike ? Number(m.targeted_strike).toFixed(0) : '—';
+  var override = m.operator_override;
+  if (override) {
+    el('mv2_override').innerHTML = '<span class="yellow">OVERRIDE active: dir=' + override.direction
+      + ', bars_remaining=' + (override.bars_remaining || 0)
+      + (override.reason ? ' (' + override.reason + ')' : '') + '</span>';
+  } else {
+    el('mv2_override').innerHTML = '<span class="muted">no override</span>';
+  }
+  var det = m.per_detector || {};
+  var calibPer = m.calibrator_per_detector || {};
+  var calibWeights = m.calibrator_weights || {};
+  var order = ['sweep', 'cross_rail_asymmetry', 'dod_signature',
+                 'abnormal_acceptance', 'pin_risk', 'mm_gamma_proxy', 'trend_vs_range'];
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+    + '<tr style="color:#5a6172;text-align:left;">'
+    + '<th>detector</th><th>fire</th><th>dir</th><th>conf</th>'
+    + '<th>classification</th><th>magnitude</th>'
+    + '<th>weight</th><th>accuracy</th></tr>';
+  order.forEach(function(name) {
+    var p = det[name] || {};
+    var cp = calibPer[name] || {};
+    var w = Number(calibWeights[name] || 1.0);
+    var pDir = Number(p.direction || 0);
+    var pDirCls = pDir > 0 ? 'green' : (pDir < 0 ? 'red' : 'muted');
+    var fireCls = p.fire ? 'green' : 'muted';
+    var fireTxt = p.fire ? '●' : '○';
+    html += '<tr>'
+      + '<td><strong>' + name + '</strong></td>'
+      + '<td class="' + fireCls + '">' + fireTxt + '</td>'
+      + '<td class="' + pDirCls + '">' + (pDir > 0 ? '+1' : (pDir < 0 ? '-1' : '0')) + '</td>'
+      + '<td>' + Number(p.confidence || 0).toFixed(2) + '</td>'
+      + '<td class="muted">' + (p.classification || '') + '</td>'
+      + '<td class="muted">z=' + Number(((p.magnitude || {}).z_score) || 0).toFixed(2) + '</td>'
+      + '<td>' + w.toFixed(2) + '</td>'
+      + '<td class="muted">' + Math.round((Number(cp.directional_accuracy || 0)) * 100) + '%'
+      + ' (n=' + (cp.n_fires || 0) + ')</td>'
+      + '</tr>';
+  });
+  html += '</table>';
+  el('mv2_detectors').innerHTML = html;
+  el('mv2_notes').textContent = (m.notes || []).join('\n');
 }
 function render_belief_web_v2(b) {
   var bw = b || {};
@@ -1749,6 +1884,7 @@ function render(snap) {
   render_multi_leg(snap.multi_leg_panel || {});
   render_contextual_learner(snap.contextual_learner_panel || {});
   render_belief_web_v2(snap.belief_web_v2_panel || {});
+  render_manipulation_v2(snap.manipulation_v2_panel || {});
 }
 // ── Control bar (LIVE TOGGLES) ────────────────────────────────
 async function refreshControls() {
@@ -1807,6 +1943,29 @@ document.getElementById("btn-calib-toggle").addEventListener("click", async () =
 document.getElementById("btn-rollback").addEventListener("click", async () => {
   if (!confirm("Rollback the most recent applied weight change?")) return;
   await postControl("/api/calibrator/rollback");
+});
+// ManipulationV2 operator override (founder 2026-06-22 Tier-3).
+async function setMv2Override(direction) {
+  const reason = prompt(
+    "Override the model. Direction = " + (direction > 0 ? "BULL" : "BEAR")
+    + "\n\nReason (logged):", "operator override") || "";
+  const horizon = parseInt(prompt(
+    "Override horizon in bars (auto-decays after):", "10") || "10", 10);
+  if (!horizon || horizon < 1) return;
+  await postControl("/api/manipulation/override", {
+    direction: direction,
+    horizon_bars: horizon,
+    reason: reason,
+  });
+}
+var mv2BullBtn = document.getElementById("btn-mv2-override-bull");
+if (mv2BullBtn) mv2BullBtn.addEventListener("click", function() { setMv2Override(+1); });
+var mv2BearBtn = document.getElementById("btn-mv2-override-bear");
+if (mv2BearBtn) mv2BearBtn.addEventListener("click", function() { setMv2Override(-1); });
+var mv2ClearBtn = document.getElementById("btn-mv2-override-clear");
+if (mv2ClearBtn) mv2ClearBtn.addEventListener("click", async function() {
+  if (!confirm("Clear the manipulation override?")) return;
+  await postControl("/api/manipulation/override/clear");
 });
 refreshControls();
 setInterval(refreshControls, 5000);
