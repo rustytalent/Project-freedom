@@ -217,6 +217,51 @@ class V4Runner:
         _t2 = time.perf_counter()
         broker_results = self._route_to_broker(intent)
         timings_ms["broker_routing"] = (time.perf_counter() - _t2) * 1000.0
+
+        # 2a. Multi-leg auto-routing (founder 2026-06-22 Tier-2 part 4).
+        # If the scenario web's dominant strategy is multi-leg AND the
+        # bundle ledger has capacity, route an auto-entry. Then refresh
+        # any open-bundle marks from the snapshot and evaluate exits.
+        # All failures are silent — multi-leg is additive on top of
+        # single-leg, never a blocker.
+        multi_leg_events: List[Dict[str, Any]] = []
+        try:
+            bar_idx = int(belief_snapshot.get("bars_seen") or 0)
+            rec = self.manager.recommend_multi_leg_now()
+            if rec is not None:
+                outcome = self.manager.try_multi_leg_entry(
+                    structure_class=rec["structure_class"],
+                    lots=int(rec.get("lots", 1)),
+                    direction=int(rec.get("direction", 0)),
+                    option_type=str(rec.get("option_type", "CE")),
+                    broker=self.broker,
+                )
+                if outcome is not None:
+                    outcome = dict(outcome)
+                    outcome["route_reason"] = rec.get("reason", "")
+                    multi_leg_events.append(
+                        {"kind": "auto_route", **outcome})
+            # Per-tick: refresh marks + evaluate exits.
+            self.manager.refresh_bundle_marks_from_snapshot(
+                bar_index=bar_idx)
+            closed = self.manager.evaluate_bundle_exits(
+                broker=self.broker, bar_index=bar_idx)
+            for c in closed:
+                multi_leg_events.append({"kind": "auto_exit", **c})
+            # Refresh the multi-leg summary on the intent so the cockpit
+            # sees the bundle that just opened/closed this tick (the
+            # original portfolio_summary was captured in manager.evaluate
+            # before auto-route ran).
+            if multi_leg_events:
+                try:
+                    intent.portfolio_summary["multi_leg_bundles"] = (
+                        self.manager.bundle_ledger.summary())
+                    intent.portfolio_summary["last_bundle_outcome"] = (
+                        self.manager._last_bundle_outcome)
+                except Exception:
+                    pass
+        except Exception as exc:
+            notes.append(f"multi-leg auto-route exception: {exc}")
         # Keep the paper adapter's marks fresh for accurate unrealized P&L.
         if isinstance(self.broker, PaperBrokerAdapter):
             for slot in (belief_snapshot.get("slot_readings") or []):
@@ -269,6 +314,16 @@ class V4Runner:
         # Final timing — total wall time end-to-end.
         timings_ms["total_ms"] = (time.perf_counter() - _t0) * 1000.0
         self._latency_samples.append(dict(timings_ms))
+
+        # Multi-leg auto-route activity for this tick is recorded as
+        # notes so the cockpit explainer + post-mortem traces can pick
+        # them up alongside the single-leg events.
+        if multi_leg_events:
+            for ev in multi_leg_events:
+                notes.append(
+                    f"multi-leg {ev.get('kind')}: "
+                    f"{ev.get('structure_class') or ev.get('bundle_id')}"
+                )
 
         return TickResult(intent=intent, cockpit=cockpit,
                            broker_results=broker_results,

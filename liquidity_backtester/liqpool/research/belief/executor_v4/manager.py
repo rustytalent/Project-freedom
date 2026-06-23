@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .aggregator import (
     AGGR_ACCEPT,
@@ -206,6 +206,21 @@ class PortfolioManagerConfig:
     # entry-confidence floor based on prior-day per-family win rates.
     # Zero disables the nudge.
     regime_confidence_nudge_max: float = 0.08
+    # ── Multi-leg auto-routing (founder 2026-06-22 Tier-2 part 4) ─────
+    # When the scenario web's dominant_strategy_class is multi-leg AND
+    # we have bundle capacity, route ENTER signals to the multi-leg
+    # path INSTEAD of refusing the single-leg directional. Without this
+    # flag, dead-market regimes get no trade at all; with it, they get
+    # the right structure (iron condor in chop, butterfly in pinning,
+    # vertical spread in mild directional).
+    auto_route_multi_leg: bool = True
+    multi_leg_default_lots: int = 1
+    max_open_multi_leg_bundles: int = 2
+    # Web dominant_strategy_class strings that trigger auto-routing.
+    multi_leg_strategy_classes: Tuple[str, ...] = (
+        "iron_condor", "butterfly", "straddle",
+        "bull_vertical", "bear_vertical",
+    )
     # Decision gates
     min_entry_confidence: float = 0.55   # founder hot-fix 2026-06-22 LIVE (was 0.66)
     min_scalp_confidence: float = 0.62   # founder hot-fix 2026-06-22 LIVE (was 0.72)
@@ -2076,6 +2091,98 @@ class PortfolioManager:
 
     # ── Multi-leg structures (founder 2026-06-22 Tier-2) ───────────
 
+    # Map web strategy_class strings to structure_class + optional
+    # routing parameters (direction / option_type) used by the
+    # StructureConstructor.
+    _WEB_STRATEGY_ROUTING: Tuple[Tuple[str, str, int, str], ...] = (
+        # (web_class, structure_class, direction, option_type)
+        ("iron_condor",   "iron_condor",      0, "CE"),
+        ("butterfly",     "butterfly",        0, "CE"),
+        ("straddle",      "strangle",         0, "CE"),
+        ("bull_vertical", "vertical_spread", +1, "CE"),
+        ("bear_vertical", "vertical_spread", -1, "PE"),
+    )
+
+    def recommend_multi_leg_now(self) -> Optional[Dict[str, Any]]:
+        """Decide whether the current state warrants a multi-leg entry.
+
+        The recommendation fires when:
+          * cfg.auto_route_multi_leg is True
+          * the bundle ledger has open-slot capacity
+          * the web's dominant_strategy_class is one we route
+          * the snapshot has slot_readings (so a bundle can be built)
+          * there is no recent cooldown still in effect
+
+        Returns a routing dict {structure_class, lots, direction,
+        option_type, reason} or None.
+        """
+        cfg = self.cfg
+        if not cfg.auto_route_multi_leg:
+            return None
+        if self._last_snapshot is None or self._last_web_snapshot is None:
+            return None
+        if self.bundle_ledger.n_open() >= cfg.max_open_multi_leg_bundles:
+            return None
+        bar_index = int(_num(self._last_snapshot.get("bars_seen"), 0))
+        if bar_index <= self.cooldown_until_bar:
+            return None
+        web_class = str(getattr(self._last_web_snapshot,
+                                  "dominant_strategy_class", "") or "")
+        if not web_class:
+            return None
+        for (mapped_class, structure, direction, opt_type) in (
+                self._WEB_STRATEGY_ROUTING):
+            if mapped_class == web_class:
+                slots = self._last_snapshot.get("slot_readings") or []
+                if not slots:
+                    return None
+                return {
+                    "structure_class": structure,
+                    "lots": int(cfg.multi_leg_default_lots),
+                    "direction": int(direction),
+                    "option_type": str(opt_type),
+                    "reason": (
+                        f"web dominant strategy '{web_class}' → "
+                        f"{structure} (bar {bar_index})"),
+                }
+        return None
+
+    def refresh_bundle_marks_from_snapshot(self,
+                                                  bar_index: Optional[int] = None,
+                                                  ) -> int:
+        """Build a tradingsymbol → mark dict from the most-recent
+        snapshot's slot_readings and push it into the bundle ledger.
+
+        Returns the number of bundles updated. Calling this from
+        V4Runner each tick keeps combined R fresh for the exit
+        evaluator.
+        """
+        if self._last_snapshot is None:
+            return 0
+        bi = (bar_index if bar_index is not None
+               else int(_num(self._last_snapshot.get("bars_seen"), 0)))
+        mark_by_symbol: Dict[str, float] = {}
+        for raw in (self._last_snapshot.get("slot_readings") or []):
+            slot = raw if isinstance(raw, dict) else {}
+            label = slot.get("label") or slot.get("moneyness_label")
+            mark = slot.get("mark_price")
+            if not label or mark is None:
+                continue
+            try:
+                m = float(mark)
+            except (TypeError, ValueError):
+                continue
+            if m > 0:
+                mark_by_symbol[str(label)] = m
+
+        def _lookup(symbol: str) -> Optional[float]:
+            return mark_by_symbol.get(symbol)
+
+        # refresh_bundle_marks already walks every open bundle
+        # internally; call once.
+        self.refresh_bundle_marks(mark_lookup=_lookup, bar_index=bi)
+        return self.bundle_ledger.n_open()
+
     def try_multi_leg_entry(self, *,
                               structure_class: str,
                               lots: int = 1,
@@ -2249,6 +2356,131 @@ class PortfolioManager:
                 bars_held=entry.bars_held,
             )
             if closure is not None:
+                # Feed the closure into all the downstream observers so
+                # multi-leg track record shows up in attribution, the
+                # rehearsal ensemble, and the live P&L panel exactly
+                # like a single-leg trade.
+                self.daily_pnl_rupees += realised_rupees
+                # Per-strategy attribution.
+                strat = bundle.structure_class
+                stats = self._strategy_stats[strat]
+                stats["n_trades"] = stats.get("n_trades", 0) + 1
+                if realised_rupees > 0:
+                    stats["wins"] = stats.get("wins", 0) + 1
+                else:
+                    stats["losses"] = stats.get("losses", 0) + 1
+                stats["total_realized_rupees"] = (
+                    stats.get("total_realized_rupees", 0.0) + realised_rupees)
+                stats["best_trade"] = max(
+                    stats.get("best_trade", float("-inf")), realised_rupees)
+                stats["worst_trade"] = min(
+                    stats.get("worst_trade", float("inf")), realised_rupees)
+                n_tr = max(1, stats["n_trades"])
+                # avg_realized_r is in R-units; for bundles we approximate
+                # R from rupees / max_loss_estimate.
+                max_loss = max(1.0, bundle.max_loss_estimate)
+                stats["avg_realized_r"] = (
+                    stats["total_realized_rupees"] / n_tr / max_loss)
+                # Recent-trades tape (cockpit Live Trades).
+                import time as _time
+                self._recent_trades.appendleft({
+                    "kind": "CLOSE", "ts": _time.time(),
+                    "bar_index": bar_index,
+                    "position_id": bundle.bundle_id,
+                    "contract_label": f"bundle:{bundle.structure_class}",
+                    "direction": 0, "size_lots": bundle.total_lots(),
+                    "exit_premium": entry.current_combined_premium,
+                    "realized_r": stats["avg_realized_r"],
+                    "realized_rupees": realised_rupees,
+                    "exit_reason": closure.exit_reason or "",
+                    "strategy": bundle.structure_class,
+                })
+                # Rehearsal: record the bundle outcome as a synthetic
+                # observation so the rehearsal ensemble can learn that
+                # iron condors worked / didn't work in this regime.
+                try:
+                    if self.rehearsal_ensemble is not None:
+                        from .belief_rehearsal import (
+                            build_query_features, BeliefObservation,
+                            SCHEMA_VERSION,
+                        )
+                        from .learning_persistence import (
+                            regime_tag_from_web_snapshot,
+                        )
+                        web_dict = (self._last_web_snapshot.to_dict()
+                                       if self._last_web_snapshot
+                                       is not None else None)
+                        regime_tag = regime_tag_from_web_snapshot(web_dict)
+                        feature_vector = build_query_features(
+                            rich_context=(self._last_rich.to_dict()
+                                            if self._last_rich is not None
+                                            else None),
+                            web_snapshot=web_dict,
+                            mm_posterior=(self._last_mm_posterior.to_dict()
+                                            if self._last_mm_posterior
+                                            else None),
+                            crowd_report=(self._last_crowd_report.to_dict()
+                                            if self._last_crowd_report
+                                            else None),
+                            portfolio_risk=(self._last_risk_report.to_dict()
+                                              if self._last_risk_report
+                                              else None),
+                            iv_state=_map((self._last_snapshot or {})
+                                            .get("iv_state")),
+                            flow_event=None,
+                            n_open_positions=len(self._open_states),
+                        )
+                        approx_r = (realised_rupees
+                                     / max(1.0, bundle.max_loss_estimate))
+                        observation = BeliefObservation(
+                            obs_id=f"bundle-{bundle.bundle_id}",
+                            ts=str((self._last_snapshot or {})
+                                      .get("ts") or ""),
+                            bar_index=int(bar_index),
+                            schema_version=SCHEMA_VERSION,
+                            feature_vector=feature_vector,
+                            entry_params={
+                                "entry_confidence": 0.65,
+                                "size_lots": float(bundle.total_lots()),
+                                "target_r": float(bundle.target_credit_pct),
+                                "stop_r": float(bundle.stop_loss_pct),
+                                "profile_scalp": 0.0,
+                                "direction": 0.0,
+                            },
+                            outcome={
+                                "realized_r": float(approx_r),
+                                "realized_rupees": realised_rupees,
+                                "bars_to_resolution": float(entry.bars_held),
+                                "exit_reason": str(closure.exit_reason
+                                                      or ""),
+                                "max_favorable_r": float(
+                                    entry.best_combined_r),
+                                "max_adverse_r": float(
+                                    entry.worst_combined_r),
+                            },
+                            regime_tag=regime_tag,
+                            strategy=bundle.structure_class,
+                        )
+                        self.rehearsal_ensemble.record_closure(observation)
+                except Exception:
+                    pass
+                # Belief Web v2 resolution memory.
+                try:
+                    family = str(regime_tag.get("dominant_family", "unknown"))
+                    self.belief_web_v2.record_resolution(
+                        family=family,
+                        realised_r=float(realised_rupees
+                                            / max(1.0, bundle.max_loss_estimate)),
+                    )
+                except Exception:
+                    pass
+                # Apply a short cooldown after a bundle close so we
+                # don't immediately re-enter the same structure on the
+                # next tick.
+                self.cooldown_until_bar = max(
+                    self.cooldown_until_bar,
+                    bar_index + self.cfg.cooldown_bars_after_exit,
+                )
                 out.append({
                     "bundle_id": bundle.bundle_id,
                     "structure_class": bundle.structure_class,
