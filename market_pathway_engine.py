@@ -76,22 +76,49 @@ Fibonacci projection), which is what guarantees that a pathway's "price
 reached X" reads the same way on the 5m chart as it does on the 4h chart —
 by construction, not by hope.
 
-THE FOUR MODES
---------------
+THE MODES
+---------
     (default)          generate tomorrow's gap scenarios + pathway charts
-    --replay-days N    THE LEARNING LOOP: replay the last N completed
-                       sessions; for each, generate scenarios from only
-                       pre-open data, score every pathway against the tape
-                       that actually printed (ATR-normalized curve RMSE),
-                       and journal per-template match scores. Journal
-                       history then tilts template ranking in every future
-                       run via learned priors in [0.7, 1.3] — earned
-                       preference, never total override.
+                       (auto-loads trained state + learned priors if present)
+    --train-months N   ONE-TIME TRAINING: chunked historical fetch, then a
+                       no-lookahead replay of every session in the window,
+                       then fit the gap-direction model on the journaled
+                       outcomes and persist everything to engine_state.json.
+                       Train once on months of history; good to go daily
+                       after that. Retrain whenever you want.
+    --replay-days N    THE LEARNING LOOP (training phase 1 on its own):
+                       replay the last N completed sessions; for each,
+                       generate scenarios from only pre-open data, score
+                       every pathway against the tape that actually printed
+                       (ATR-normalized curve RMSE), and journal per-template
+                       match scores + day features. Journal history tilts
+                       template ranking via learned priors in [0.7, 1.3].
+    --tune             (re)fit the gap-direction model from the existing
+                       journal (training phase 2 on its own). Chronological
+                       train/validation split, honest out-of-sample accuracy
+                       vs the always-majority baseline, fitted weights
+                       persisted and printed — the direction term stops
+                       being a hand-authored number and becomes a fitted one.
     --track            LIVE TRACKER: mid-session, rank which of this
                        morning's pathways the day's tape is actually
                        tracing (scored over the elapsed session only),
                        with the realized tape overlaid on the chart.
+    --serve            PERSISTENT DASHBOARD: local web app (stdlib only) at
+                       http://127.0.0.1:8787 with a Pre-Market tab (all
+                       scenarios + probability table) and a Live Market tab
+                       (tracker vs the current price, 60s auto-refresh).
     --login / --check-auth   Kite Connect daily OAuth + connectivity check.
+
+INDEX VOLUME (important for NIFTY)
+-----------------------------------
+NIFTY 50 itself is not traded — it prints ZERO volume; the volume lives in
+its futures and options. In live mode the engine auto-detects a volume-less
+index feed and merges minute volume from the nearest (and next) NIFTY
+futures contract onto the index candles, so volume-dependent features (HVN,
+sweep magnitude) see real participation. Kite's instrument dump only lists
+live contracts, so merged volume covers roughly the last two expiry cycles;
+older candles keep volume 0 and every volume-dependent feature degrades
+gracefully there (HVN abstains, sweep magnitude falls back to neutral).
 
 Pathways are TIME-ANCHORED: each leg type carries a realistic session
 duration (a stop-run sweep is minutes, midday consolidation eats hours)
@@ -121,6 +148,7 @@ advice. The sentiment/news input is a manual pluggable hook
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import json
 import math
@@ -128,6 +156,7 @@ import os
 import random
 import statistics
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -294,6 +323,17 @@ class SyntheticProvider(DataProvider):
             drift = {"trend_up": 0.9, "trend_down": -0.9, "range": 0.0}[regime]
             vol = self.rng.uniform(2.0, 6.0)
 
+            # overnight gap: real index sessions open away from the prior
+            # close (global cues, SGX/GIFT lead, overnight news). Mildly
+            # correlated with the coming session's drift so the gap-vs-bias
+            # machinery has actual signal to find, plus occasional outsized
+            # event gaps. Without this, demo training has no gaps to learn.
+            if prev_day_high is not None:
+                gap = self.rng.gauss(drift * 18.0, 30.0)
+                if self.rng.random() < 0.08:  # event gap
+                    gap += self.rng.choice([-1, 1]) * self.rng.uniform(80, 200)
+                price = max(1.0, price + gap)
+
             # decide, ahead of time, whether today engineers a liquidity sweep
             # of yesterday's extreme before reversing - the signature this
             # engine's sweep/bias detectors are meant to pick up.
@@ -375,12 +415,18 @@ class ZerodhaProvider(DataProvider):
 
     def __init__(self, symbol: str, exchange: str = "NSE",
                  instrument_token: Optional[int] = None,
-                 api_key: Optional[str] = None, access_token: Optional[str] = None):
+                 api_key: Optional[str] = None, access_token: Optional[str] = None,
+                 volume_from_futures: Optional[bool] = None):
         self.symbol = symbol
         self.exchange = exchange
         self.instrument_token = instrument_token
         self.api_key = api_key or os.environ.get("KITE_API_KEY")
         self.access_token = access_token or os.environ.get("KITE_ACCESS_TOKEN")
+        # Indices (NIFTY 50, BANKNIFTY, ...) print ZERO volume — the traded
+        # volume lives in their futures & options. None = auto: if the
+        # fetched candles come back volume-less, pull the nearest NIFTY-fut
+        # (and next-month) minute volume and merge it in by timestamp.
+        self.volume_from_futures = volume_from_futures
 
     def _kite(self):
         try:
@@ -424,21 +470,70 @@ class ZerodhaProvider(DataProvider):
         raise ValueError(f"Could not resolve instrument_token for {key}. "
                           f"Pass --instrument-token explicitly.")
 
-    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
-        kite = self._kite()
-        token = self._resolve_token(kite)
-        start = _prior_trading_day(as_of, lookback_days)
-        # Kite's minute-candle history endpoint caps at ~60 days per call;
-        # chunk requests defensively.
+    def _fetch_minutes(self, kite, token: int, start: datetime, end: datetime) -> List[Candle]:
+        """Chunked minute-candle fetch. Kite caps minute history at ~60 days
+        per request and rate-limits the historical endpoint to 3 req/s, so
+        we chunk at 55 days and sleep 0.35s between calls — a 1-year pull
+        is ~7 requests, a few seconds total."""
         candles: List[Candle] = []
         chunk_start = start
-        while chunk_start < as_of:
-            chunk_end = min(chunk_start + timedelta(days=55), as_of)
+        while chunk_start < end:
+            chunk_end = min(chunk_start + timedelta(days=55), end)
             rows = kite.historical_data(token, chunk_start, chunk_end, "minute")
             for r in rows:
                 candles.append(Candle(r["date"], r["open"], r["high"], r["low"],
                                        r["close"], r.get("volume", 0)))
             chunk_start = chunk_end + timedelta(minutes=1)
+            time.sleep(0.35)
+        return candles
+
+    def _merge_futures_volume(self, kite, candles: List[Candle],
+                               start: datetime, end: datetime) -> int:
+        """Copy minute volume from this instrument's nearest (and next)
+        futures contract onto the volume-less index candles, matched by
+        timestamp. Honest limitation: Kite's instrument dump only lists
+        LIVE contracts, so futures volume covers roughly the last two
+        expiry cycles (~2 months). Older candles keep volume 0 and every
+        volume-dependent feature (HVN, sweep magnitude) falls back
+        gracefully there — price structure is unaffected."""
+        name = self.symbol.replace(" 50", "").replace(" ", "")
+        try:
+            nfo = kite.instruments("NFO")
+        except Exception as e:
+            print(f"[zerodha] futures volume merge skipped (instruments fetch failed: {e})")
+            return 0
+        futs = sorted([i for i in nfo
+                       if i.get("name") == name and i.get("segment") == "NFO-FUT"],
+                      key=lambda i: i["expiry"])[:2]
+        if not futs:
+            print(f"[zerodha] no live futures found for name={name!r}; volume stays 0")
+            return 0
+        vol_by_t: Dict[datetime, float] = {}
+        for fut in futs:
+            try:
+                for c in self._fetch_minutes(kite, fut["instrument_token"], start, end):
+                    vol_by_t[c.t] = vol_by_t.get(c.t, 0.0) + c.v
+            except Exception as e:
+                print(f"[zerodha] volume fetch failed for {fut['tradingsymbol']}: {e}")
+        merged = 0
+        for c in candles:
+            if c.t in vol_by_t:
+                c.v = vol_by_t[c.t]
+                merged += 1
+        print(f"[zerodha] merged futures volume onto {merged}/{len(candles)} index candles "
+              f"(from {', '.join(f['tradingsymbol'] for f in futs)})")
+        return merged
+
+    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
+        kite = self._kite()
+        token = self._resolve_token(kite)
+        start = _prior_trading_day(as_of, lookback_days)
+        candles = self._fetch_minutes(kite, token, start, as_of)
+        want_merge = self.volume_from_futures
+        if want_merge is None:  # auto-detect: index feeds print zero volume
+            want_merge = bool(candles) and all(c.v <= 0 for c in candles[-500:])
+        if want_merge and candles:
+            self._merge_futures_volume(kite, candles, start, as_of)
         return candles
 
 
@@ -829,7 +924,8 @@ class SweepEvent:
 
 
 def detect_liquidity_sweeps(candles: List[Candle], levels: List[LiquidityLevel],
-                             reversal_window: int = 6) -> List[SweepEvent]:
+                             reversal_window: int = 6,
+                             scan_window: int = 800) -> List[SweepEvent]:
     """A sweep: some candle's wick pierces a known liquidity level, and
     within `reversal_window` bars price closes back on the origin side of
     that level. We score `reversal_strength` by how much of the pierce got
@@ -838,9 +934,16 @@ def detect_liquidity_sweeps(candles: List[Candle], levels: List[LiquidityLevel],
     `est_volume` is a heuristic proxy for "how much liquidity was taken" —
     true resting-order size isn't observable from OHLCV, so we approximate
     it as the traded volume on the piercing bar, which at least tracks
-    participation at the level."""
+    participation at the level.
+
+    `scan_window`: sweeps are only searched within the most recent
+    `scan_window` bars of the layer. The session-bias consumer only reads
+    the latest handful of sweeps anyway, and bounding the scan keeps
+    long-history training runs (--train-months 12) linear instead of
+    quadratic."""
     events = []
-    idx_by_time = {c.t: i for i, c in enumerate(candles)}
+    times = [c.t for c in candles]
+    scan_start = max(0, len(candles) - scan_window)
     _HIGH_TYPES = (LevelType.EQH, LevelType.PDH, LevelType.PWH, LevelType.PMH,
                    LevelType.SESSION_HIGH, LevelType.SWING_HIGH)
     _LOW_TYPES = (LevelType.EQL, LevelType.PDL, LevelType.PWL, LevelType.PML,
@@ -852,9 +955,11 @@ def detect_liquidity_sweeps(candles: List[Candle], levels: List[LiquidityLevel],
         if lvl.type not in _HIGH_TYPES and lvl.type not in _LOW_TYPES:
             continue
         is_high = lvl.type in _HIGH_TYPES
-        for i, c in enumerate(candles):
-            if c.t <= lvl.t:
-                continue  # only look for sweeps of a level after it was established
+        # only look for sweeps of a level after it was established, and only
+        # within the bounded recent scan window
+        i0 = max(bisect.bisect_right(times, lvl.t), scan_start)
+        for i in range(i0, len(candles)):
+            c = candles[i]
             pierced = (c.h > lvl.price) if is_high else (c.l < lvl.price)
             if not pierced:
                 continue
@@ -1148,7 +1253,12 @@ def compute_liquidity_engineering_bias(layers: Dict[str, LayerContext]) -> Sessi
         for sw in ctx.sweeps[-8:]:  # most recent sweeps per layer
             if sw.classification != SweepClassification.GRAB:
                 continue
-            magnitude = sw.reversal_strength * math.log1p(max(sw.est_volume, 0)) * tf_weight
+            # Index feeds (NIFTY 50 etc.) print zero volume — the volume
+            # trades in the derivatives, not the index. When volume is
+            # absent the term falls back to a neutral 1.0 instead of
+            # silently zeroing every sweep's magnitude.
+            vol_term = math.log1p(sw.est_volume) if sw.est_volume > 0 else 1.0
+            magnitude = sw.reversal_strength * vol_term * tf_weight
             if sw.side == "sell_side":
                 weighted_bull += magnitude
                 notes.append(f"{tf}: sell-side liquidity swept at {sw.level.price:.2f} "
@@ -1353,7 +1463,8 @@ def build_gap_buckets(atr: float, custom_points: Optional[List[float]] = None) -
 
 
 def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: float,
-                             atr: float, flow: Optional[FlowContext] = None) -> List[GapBucket]:
+                             atr: float, flow: Optional[FlowContext] = None,
+                             direction_score: Optional[float] = None) -> List[GapBucket]:
     """Heuristic (not statistically fitted) scoring: a bucket's raw score
     combines (a) alignment between the bucket's direction and the
     liquidity-engineering bias, (b) alignment with the sentiment input,
@@ -1366,10 +1477,14 @@ def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: 
     anything downstream, since callers only consume `GapBucket.probability`.
     """
     flow_score = flow.score if flow is not None else 0.0
+    # When a fitted gap-direction model is available (see tune_from_journal),
+    # its calibrated score replaces the raw hand-authored bias score as the
+    # direction term; the bias still feeds the model as a feature.
+    dir_score = direction_score if direction_score is not None else bias.score
     raw_scores = []
     for pts in buckets:
         direction = 1.0 if pts > 0 else -1.0
-        bias_align = direction * bias.score
+        bias_align = direction * dir_score
         sentiment_align = direction * sentiment
         flow_align = direction * flow_score
         magnitude_penalty = -abs(pts) / (atr * 2.0 + 1e-9)
@@ -1385,8 +1500,9 @@ def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: 
     out = []
     for pts, p in zip(buckets, probs):
         direction_word = "gap up" if pts > 0 else "gap down"
+        dir_src = "fitted-model" if direction_score is not None else "heuristic-bias"
         rationale = (
-            f"{direction_word} of {abs(pts):.0f} pts: bias={bias.label} (score {bias.score:+.2f}), "
+            f"{direction_word} of {abs(pts):.0f} pts: direction={dir_score:+.2f} ({dir_src}), "
             f"sentiment={sentiment:+.2f}, flow={flow_score:+.2f}, magnitude={abs(pts)/atr:.2f}x ATR"
         )
         out.append(GapBucket(pts, round(p, 4), rationale))
@@ -1854,6 +1970,155 @@ def load_template_priors(path: str) -> Dict[str, float]:
 
 
 # =========================================================================
+# 13c. SELF-TUNING — fitted gap-direction model + persistent trained state
+# =========================================================================
+# "The formulas should not just be numbers pulled out of thin air."
+# This section replaces the hand-authored direction component of the gap
+# score with a FITTED one: during replay, each day's pre-open context is
+# condensed into a small feature vector (recorded in the journal alongside
+# what actually happened), and --tune / --train-months fits a logistic
+# regression on those (features -> did the day gap up?) by plain gradient
+# descent — pure stdlib, fully inspectable weights, chronological
+# train/validation split reported honestly. The fitted weights persist in
+# engine_state.json; every later run loads them automatically. Train once
+# on months of history, then use daily.
+
+FEATURE_NAMES = ["bias_score", "prev_day_ret_atr", "range_pos", "vol_consolidation",
+                  "vol_expansion"]
+
+
+def compute_day_features(layers: Dict[str, LayerContext], bias: SessionBias) -> Dict[str, float]:
+    """Pre-open feature vector for the NEXT session, computed strictly from
+    data available at the prior close (the same layers the generator saw —
+    no lookahead by construction)."""
+    f = {"bias_score": bias.score, "prev_day_ret_atr": 0.0, "range_pos": 0.0,
+         "vol_consolidation": 0.0, "vol_expansion": 0.0}
+    d = layers.get("1D")
+    if d and d.candles:
+        atr = CandleSeries(d.candles).atr(14) or 1.0
+        last = d.candles[-1]
+        f["prev_day_ret_atr"] = max(-3.0, min(3.0, (last.c - last.o) / atr))
+        f["range_pos"] = (d.range_ctx.position_pct / 100.0 - 0.5) * 2.0  # [-1, 1]
+        f["vol_consolidation"] = 1.0 if d.vol_state == VolState.CONSOLIDATION else 0.0
+        f["vol_expansion"] = 1.0 if d.vol_state == VolState.EXPANSION else 0.0
+    return f
+
+
+def _sigmoid(z: float) -> float:
+    z = max(-35.0, min(35.0, z))
+    return 1.0 / (1.0 + math.exp(-z))
+
+
+def _train_logistic(X: List[List[float]], y: List[int], epochs: int = 800,
+                     lr: float = 0.3, l2: float = 0.02) -> List[float]:
+    """Logistic regression by batch gradient descent, stdlib only.
+    Returns [intercept, w1..wn]. L2 keeps weights sane on small samples."""
+    n = len(X)
+    dim = len(X[0]) + 1
+    w = [0.0] * dim
+    for _ in range(epochs):
+        grad = [0.0] * dim
+        for xi, yi in zip(X, y):
+            z = w[0] + sum(w[j + 1] * xi[j] for j in range(len(xi)))
+            err = _sigmoid(z) - yi
+            grad[0] += err
+            for j in range(len(xi)):
+                grad[j + 1] += err * xi[j]
+        for j in range(dim):
+            reg = l2 * w[j] if j > 0 else 0.0
+            w[j] -= lr * (grad[j] / n + reg)
+    return w
+
+
+def _model_predict(weights: List[float], features: Dict[str, float]) -> float:
+    """P(gap up) from the fitted model."""
+    x = [features.get(name, 0.0) for name in FEATURE_NAMES]
+    z = weights[0] + sum(weights[j + 1] * x[j] for j in range(len(x)))
+    return _sigmoid(z)
+
+
+def load_state(path: str) -> Optional[dict]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_state(path: str, state: dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
+def tune_from_journal(journal_path: str, state_path: str) -> Optional[dict]:
+    """Fit the gap-direction model on journal history. Chronological 70/30
+    train/validation split — the validation days are strictly AFTER every
+    training day, so the reported validation accuracy is an honest
+    out-of-sample number, not resubstitution. The final persisted weights
+    are refit on all days (standard practice once validation is reported).
+    Duplicate journal entries for the same date (e.g. replay run twice)
+    are deduped keeping the latest."""
+    entries = load_journal(journal_path)
+    by_date: Dict[str, dict] = {}
+    for e in entries:
+        if e.get("features") and e.get("actual_gap") is not None:
+            by_date[e["date"]] = e
+    rows = [by_date[d] for d in sorted(by_date)]
+    if len(rows) < 20:
+        print(f"[tune] only {len(rows)} usable journaled days in {journal_path} — need >= 20 "
+              f"for a fit that means anything. Run --replay-days / --train-months first.")
+        return None
+
+    X = [[e["features"].get(n, 0.0) for n in FEATURE_NAMES] for e in rows]
+    y = [1 if e["actual_gap"] >= 0 else 0 for e in rows]
+
+    split = max(10, int(len(rows) * 0.7))
+    if split >= len(rows):
+        split = len(rows) - 5
+    w = _train_logistic(X[:split], y[:split])
+
+    def acc(w, X, y):
+        hits = sum(1 for xi, yi in zip(X, y)
+                   if (_sigmoid(w[0] + sum(w[j + 1] * xi[j] for j in range(len(xi)))) >= 0.5) == bool(yi))
+        return hits / len(X) if X else 0.0
+
+    train_acc = acc(w, X[:split], y[:split])
+    valid_acc = acc(w, X[split:], y[split:])
+    baseline = max(sum(y), len(y) - sum(y)) / len(y)  # always-guess-majority accuracy
+    print(f"[tune] {len(rows)} days | train {split}, validation {len(rows) - split} (chronological)")
+    print(f"[tune] train acc {train_acc:.3f} | VALIDATION acc {valid_acc:.3f} | "
+          f"always-majority baseline {baseline:.3f}")
+    if valid_acc <= baseline:
+        print("[tune] WARNING: the fitted model does NOT beat the majority baseline "
+              "out-of-sample. It will be persisted (weights are informative anyway) but "
+              "treat the direction signal as unproven on this history.")
+
+    w_full = _train_logistic(X, y)
+    state = {
+        "version": 1,
+        "trained_at": datetime.now(IST).isoformat(),
+        "n_train_days": len(rows),
+        "date_range": [rows[0]["date"], rows[-1]["date"]],
+        "gap_direction_model": {
+            "feature_names": FEATURE_NAMES,
+            "weights": [round(x, 6) for x in w_full],
+            "train_accuracy": round(train_acc, 4),
+            "validation_accuracy": round(valid_acc, 4),
+            "majority_baseline": round(baseline, 4),
+        },
+        "template_priors": load_template_priors(journal_path),
+    }
+    save_state(state_path, state)
+    print(f"[tune] fitted weights: intercept={w_full[0]:+.3f}, " +
+          ", ".join(f"{n}={w_full[i+1]:+.3f}" for i, n in enumerate(FEATURE_NAMES)))
+    print(f"[tune] state persisted -> {state_path}")
+    return state
+
+
+# =========================================================================
 # 14. RENDERING — self-contained SVG (no dependencies); optional matplotlib
 # =========================================================================
 
@@ -2081,13 +2346,24 @@ class AnalysisResult:
     prior_close: float
     atr: float
     flow: FlowContext
+    features: Dict[str, float] = field(default_factory=dict)
+    direction_score: Optional[float] = None  # from fitted model, if one was loaded
+
+
+# CLI-level default for the futures-volume merge (None = auto-detect).
+# Set once in main() from --no-futures-volume so it doesn't have to be
+# threaded through every run/replay/track/train signature.
+_VOLUME_FROM_FUTURES_DEFAULT: Optional[bool] = None
 
 
 def _make_provider(mode: str, symbol: str, exchange: str,
                     instrument_token: Optional[int], csv_path: Optional[str],
-                    seed: int) -> DataProvider:
+                    seed: int, volume_from_futures: Optional[bool] = None) -> DataProvider:
+    if volume_from_futures is None:
+        volume_from_futures = _VOLUME_FROM_FUTURES_DEFAULT
     if mode == "live":
-        return ZerodhaProvider(symbol, exchange, instrument_token)
+        return ZerodhaProvider(symbol, exchange, instrument_token,
+                                volume_from_futures=volume_from_futures)
     if mode == "csv":
         if not csv_path:
             raise ValueError("--csv PATH is required for --mode csv")
@@ -2100,6 +2376,7 @@ def analyze_and_generate(base: List[Candle], as_of: datetime, *,
                           sentiment: float = 0.0,
                           flow: Optional[FlowContext] = None,
                           template_priors: Optional[Dict[str, float]] = None,
+                          direction_model: Optional[dict] = None,
                           top_k: int = 3, seed: int = 7,
                           verbose: bool = True) -> AnalysisResult:
     """The full context -> ledger -> bias -> gap -> pathways pipeline over
@@ -2133,9 +2410,19 @@ def analyze_and_generate(base: List[Candle], as_of: datetime, *,
         say(f"      -> flow [{flow.source}]: score {flow.score:+.2f} "
             f"(pcr={flow.pcr}, depth={flow.depth_imbalance:+.2f}) — {flow.notes}")
 
+    features = compute_day_features(layers, bias)
+    direction_score = None
+    if direction_model and direction_model.get("weights"):
+        p_up = _model_predict(direction_model["weights"], features)
+        direction_score = round(2.0 * p_up - 1.0, 4)
+        say(f"      -> fitted gap-direction model: P(gap up)={p_up:.3f} "
+            f"(validation acc {direction_model.get('validation_accuracy', '?')}, "
+            f"baseline {direction_model.get('majority_baseline', '?')})")
+
     atr = compute_atr_daily(layers)
     gap_points = build_gap_buckets(atr, custom_gap_points)
-    gap_buckets = score_gap_probabilities(gap_points, bias, sentiment, atr, flow)
+    gap_buckets = score_gap_probabilities(gap_points, bias, sentiment, atr, flow,
+                                           direction_score=direction_score)
     prior_close = layers["1D"].candles[-1].c if "1D" in layers \
         else layers[list(layers.keys())[-1]].candles[-1].c
 
@@ -2149,7 +2436,7 @@ def analyze_and_generate(base: List[Candle], as_of: datetime, *,
             f"{len(candidates)} pathway(s) kept")
 
     return AnalysisResult(layers, ledger, bias, gap_buckets, scenarios,
-                           prior_close, atr, flow)
+                           prior_close, atr, flow, features, direction_score)
 
 
 def _session_bounds(day: datetime) -> Tuple[datetime, datetime]:
@@ -2175,9 +2462,13 @@ def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
         sentiment_override: Optional[float] = None,
         top_k: int = 3, out_dir: str = "market_pathway_output",
         use_flow: bool = False, flow_json: Optional[str] = None,
-        journal_path: Optional[str] = None) -> dict:
+        journal_path: Optional[str] = None,
+        state_path: Optional[str] = None) -> dict:
 
     provider = _make_provider(mode, symbol, exchange, instrument_token, csv_path, seed)
+    state_path = state_path or os.path.join(out_dir, "engine_state.json")
+    state = load_state(state_path)
+    direction_model = (state or {}).get("gap_direction_model")
 
     print(f"[1/5] Fetching base 1-minute data (mode={mode}, lookback={lookback_days}d)...")
     base = provider.fetch_base(as_of, lookback_days)
@@ -2202,10 +2493,18 @@ def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
     else:
         print(f"[4/5] No journal history at {journal_path} — all template priors neutral "
               f"(run --replay-days N to build the learning loop's history).")
+    if direction_model:
+        print(f"      Trained state loaded from {state_path} "
+              f"(fitted on {state.get('n_train_days')} days, "
+              f"{state.get('date_range', ['?', '?'])[0]} -> {state.get('date_range', ['?', '?'])[1]})")
+    else:
+        print(f"      No trained state at {state_path} — direction uses the heuristic bias "
+              f"(run --train-months N once to fit and persist the model).")
 
     print("[5/5] Analyzing + generating scenarios...")
     result = analyze_and_generate(base, as_of, custom_gap_points=custom_gap_points,
                                     sentiment=sentiment, flow=flow, template_priors=priors,
+                                    direction_model=direction_model,
                                     top_k=top_k, seed=seed, verbose=True)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -2268,7 +2567,11 @@ def replay_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
         _, prev_close_t = _session_bounds(prev_day)
         day_open_t, day_close_t = _session_bounds(day)
 
-        base_before = [c for c in base if c.t <= prev_close_t]
+        # Bound each replayed day's context to a trailing window: enough for
+        # prev-month extremes and all intraday structure, and it keeps a
+        # 12-month training run linear in months instead of quadratic.
+        trim_cutoff = prev_close_t - timedelta(days=50)
+        base_before = [c for c in base if trim_cutoff <= c.t <= prev_close_t]
         day_candles = [c for c in base if day_open_t <= c.t <= day_close_t]
         if len(base_before) < 500 or len(day_candles) < 30:
             print(f"[replay] {day.date()}: skipped (insufficient data)")
@@ -2306,6 +2609,7 @@ def replay_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
             "predicted_top_bucket": predicted_top,
             "gap_direction_hit": gap_direction_hit,
             "session_bias_score": result.bias.score,
+            "features": result.features,
             "match_by_template": match_by_template,
             "best_template": best[0] if best else None,
             "best_match_score": best[1] if best else None,
@@ -2334,7 +2638,8 @@ def track_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
                out_dir: str = "market_pathway_output",
                journal_path: Optional[str] = None,
                use_flow: bool = False, flow_json: Optional[str] = None,
-               sentiment_override: Optional[float] = None) -> dict:
+               sentiment_override: Optional[float] = None,
+               state_path: Optional[str] = None) -> dict:
     """LIVE TRACKER. `as_of` is a moment INSIDE the current session. The
     engine rewinds to yesterday's close, generates this morning's scenarios
     (same code path as run(), so what you track is what you would have been
@@ -2363,12 +2668,15 @@ def track_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
     sentiment = sentiment_override if sentiment_override is not None else 0.0
     flow = _resolve_flow(mode, symbol, exchange, use_flow, flow_json)
     priors = load_template_priors(journal_path or os.path.join(out_dir, "journal.jsonl"))
+    state = load_state(state_path or os.path.join(out_dir, "engine_state.json"))
+    direction_model = (state or {}).get("gap_direction_model")
 
     print("[track] Generating this morning's scenarios (data through yesterday's close)...")
     result = analyze_and_generate(base_before, prev_close_t,
                                     custom_gap_points=custom_gap_points,
                                     sentiment=sentiment, flow=flow,
-                                    template_priors=priors, top_k=top_k,
+                                    template_priors=priors,
+                                    direction_model=direction_model, top_k=top_k,
                                     seed=seed, verbose=False)
 
     actual = actual_day_path(today)
@@ -2415,6 +2723,214 @@ def track_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
         json.dump(report, f, indent=2, default=str)
     print(f"\n[track] Wrote:\n  {svg_path}\n  {json_path}")
     return report
+
+
+def train_run(symbol: str, mode: str, as_of: datetime, train_months: int,
+               csv_path: Optional[str] = None, exchange: str = "NSE",
+               instrument_token: Optional[int] = None, seed: int = 7,
+               custom_gap_points: Optional[List[float]] = None, top_k: int = 3,
+               out_dir: str = "market_pathway_output",
+               journal_path: Optional[str] = None,
+               state_path: Optional[str] = None) -> Optional[dict]:
+    """ONE-TIME TRAINING. The 'make it persistent, train it once on months
+    of history, good to go after that' mode:
+
+      1. Fetch `train_months` months of minute history (chunked around
+         Kite's ~60-day-per-request cap on minute candles, rate-limited).
+      2. Replay every completed session chronologically with NO lookahead —
+         each day is generated from strictly pre-open data and journaled.
+      3. Fit the gap-direction model on the journaled (features -> outcome)
+         pairs, report honest chronological validation accuracy, and
+         persist everything to engine_state.json.
+
+    After this completes, every plain run / --track automatically loads the
+    trained state. Retrain whenever you like — e.g. monthly, or after each
+    week's sessions have been journaled by a nightly --replay-days 1.
+
+    NOTE (live mode): Kite's historical-data API needs the historical
+    add-on subscription on your Kite Connect app. Minute data goes back
+    years server-side; a 12-month pull is ~7 chunked requests."""
+    trading_days = int(train_months * 21)
+    print(f"[train] === PHASE 1/2: no-lookahead replay of ~{trading_days} sessions "
+          f"({train_months} months) ===")
+    replay_run(symbol=symbol, mode=mode, as_of=as_of,
+                lookback_days=int(train_months * 31) + 10,
+                replay_days=trading_days, csv_path=csv_path, exchange=exchange,
+                instrument_token=instrument_token, seed=seed,
+                custom_gap_points=custom_gap_points, top_k=top_k, out_dir=out_dir,
+                journal_path=journal_path)
+    print(f"\n[train] === PHASE 2/2: fitting gap-direction model ===")
+    journal_path = journal_path or os.path.join(out_dir, "journal.jsonl")
+    state_path = state_path or os.path.join(out_dir, "engine_state.json")
+    state = tune_from_journal(journal_path, state_path)
+    if state:
+        print("\n[train] Training complete. Plain runs and --track will now load this "
+              "state automatically. The program is 'good to go'.")
+    return state
+
+
+# =========================================================================
+# 16b. PERSISTENT DASHBOARD — `--serve`: Pre-Market + Live Market tabs
+# =========================================================================
+# Runs the engine as a small always-on local web app (stdlib http.server,
+# nothing to install). Open http://127.0.0.1:<port> in a browser:
+#   Pre-Market tab : every gap scenario's pathways + probability table
+#                    (generated once at startup from the prior close)
+#   Live Market tab: the tracker — actual tape overlaid on this morning's
+#                    scenarios, ranked by what the day is tracing; the
+#                    Refresh button (and 60s auto-refresh) re-runs the
+#                    tracker, which in live mode re-fetches fresh minute
+#                    candles from Kite each time.
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Market Pathway Engine</title>
+<style>
+ body { margin:0; background:#0b1220; color:#e5e7eb; font-family:Helvetica,Arial,sans-serif; }
+ .tabs { display:flex; gap:4px; padding:12px 16px 0; border-bottom:1px solid #1f2937; }
+ .tab { padding:10px 22px; cursor:pointer; background:#111a2e; border-radius:8px 8px 0 0;
+        font-weight:600; font-size:14px; }
+ .tab.active { background:#2563eb; color:#fff; }
+ .panel { display:none; padding:16px; }
+ .panel.active { display:block; }
+ img.chart { width:100%; max-width:1250px; border:1px solid #1f2937; border-radius:8px; }
+ table { border-collapse:collapse; margin:14px 0; font-size:13px; }
+ th,td { border:1px solid #1f2937; padding:6px 12px; text-align:left; }
+ th { background:#111a2e; }
+ .btn { background:#2563eb; color:#fff; border:0; padding:9px 18px; border-radius:6px;
+        cursor:pointer; font-size:14px; font-weight:600; }
+ .muted { color:#6b7280; font-size:12px; }
+ #liveStatus { margin-left:12px; font-size:13px; color:#9ca3af; }
+</style></head><body>
+<div class="tabs">
+  <div class="tab active" onclick="showTab(0)">Pre-Market Scenarios</div>
+  <div class="tab" onclick="showTab(1)">Live Market</div>
+</div>
+<div class="panel active" id="panel0">
+  <p class="muted">All gap scenarios generated from the prior close. Static for the day.</p>
+  <img class="chart" src="/pathways.svg" alt="pre-market pathways">
+  <div id="gapTable"></div>
+</div>
+<div class="panel" id="panel1">
+  <button class="btn" onclick="refreshTrack()">Refresh now</button>
+  <label style="margin-left:10px"><input type="checkbox" id="autoRef" checked> auto-refresh 60s</label>
+  <span id="liveStatus"></span>
+  <p class="muted">White line = actual tape. Ranked below: which pathway today is tracing.</p>
+  <img class="chart" id="trackImg" src="/track.svg" alt="live track"
+       onerror="this.alt='no track yet — press Refresh during a session'">
+  <div id="rankTable"></div>
+</div>
+<script>
+function showTab(i) {
+  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('active', j===i));
+  document.querySelectorAll('.panel').forEach((p,j)=>p.classList.toggle('active', j===i));
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+async function loadGapTable() {
+  try {
+    const r = await fetch('/context_map.json'); const d = await r.json();
+    let h = '<table><tr><th>Gap</th><th>Probability</th><th>Rationale</th></tr>';
+    for (const g of d.gap_buckets) h += `<tr><td>${g.points>0?'+':''}${g.points}</td>` +
+      `<td>${(g.probability*100).toFixed(1)}%</td><td>${esc(g.rationale)}</td></tr>`;
+    document.getElementById('gapTable').innerHTML = h + '</table>';
+  } catch(e) {}
+}
+async function loadRankTable() {
+  try {
+    const r = await fetch('/track_report.json'); const d = await r.json();
+    let h = `<p>As of ${esc(d.as_of)} — gap ${d.actual_gap>0?'+':''}${d.actual_gap}, ` +
+            `${Math.round(d.elapsed_frac*100)}% of session elapsed</p>` +
+            '<table><tr><th>Match</th><th>Gap bucket</th><th>Template</th><th>Narrative</th></tr>';
+    d.ranking.forEach((row,i) => {
+      h += `<tr${i===0?' style="background:#14532d"':''}><td>${row.match.toFixed(3)}</td>` +
+           `<td>${row.gap_bucket>0?'+':''}${row.gap_bucket}</td>` +
+           `<td>${esc(row.template)}</td><td>${esc(row.narrative)}</td></tr>`;
+    });
+    document.getElementById('rankTable').innerHTML = h + '</table>';
+  } catch(e) {}
+}
+async function refreshTrack() {
+  document.getElementById('liveStatus').textContent = 'refreshing...';
+  try {
+    const r = await fetch('/api/refresh'); const d = await r.json();
+    document.getElementById('liveStatus').textContent = d.ok ?
+      ('updated ' + new Date().toLocaleTimeString()) : ('error: ' + d.error);
+    document.getElementById('trackImg').src = '/track.svg?t=' + Date.now();
+    loadRankTable();
+  } catch(e) { document.getElementById('liveStatus').textContent = 'refresh failed: ' + e; }
+}
+setInterval(() => { if (document.getElementById('autoRef').checked) refreshTrack(); }, 60000);
+loadGapTable(); loadRankTable();
+</script></body></html>"""
+
+
+def serve_dashboard(run_kwargs: dict, track_kwargs: dict, out_dir: str,
+                     port: int = 8787) -> None:
+    """Start the persistent local dashboard. Generates the pre-market view
+    once at startup, then serves it plus an on-demand live tracker. Local
+    only (binds 127.0.0.1) — nothing is exposed to the network."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    print("[serve] Generating pre-market scenarios...")
+    try:
+        run(**run_kwargs)
+    except Exception as e:
+        print(f"[serve] pre-market generation failed: {e}")
+
+    last_refresh = {"t": 0.0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code: int, body: bytes, ctype: str):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/":
+                self._send(200, _DASHBOARD_HTML.encode(), "text/html; charset=utf-8")
+                return
+            if path == "/api/refresh":
+                now = time.time()
+                if now - last_refresh["t"] < 20:
+                    self._send(200, json.dumps({"ok": True, "note": "throttled"}).encode(),
+                               "application/json")
+                    return
+                last_refresh["t"] = now
+                try:
+                    kw = dict(track_kwargs)
+                    kw["as_of"] = datetime.now(IST) if kw.get("as_of") is None else kw["as_of"]
+                    track_run(**kw)
+                    self._send(200, json.dumps({"ok": True}).encode(), "application/json")
+                except Exception as e:
+                    self._send(200, json.dumps({"ok": False, "error": str(e)}).encode(),
+                               "application/json")
+                return
+            # static files from out_dir only (svg/json), no path traversal
+            fname = os.path.basename(path)
+            fpath = os.path.join(out_dir, fname)
+            if fname.endswith((".svg", ".json")) and os.path.exists(fpath):
+                ctype = "image/svg+xml" if fname.endswith(".svg") else "application/json"
+                with open(fpath, "rb") as f:
+                    self._send(200, f.read(), ctype)
+                return
+            self._send(404, b"not found", "text/plain")
+
+        def log_message(self, fmt, *args):  # quiet the request log
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"\n[serve] Dashboard running -> http://127.0.0.1:{port}")
+    print("[serve] Pre-Market tab: today's scenarios | Live Market tab: what the tape is tracing")
+    print("[serve] Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[serve] stopped.")
 
 
 # =========================================================================
@@ -2565,6 +3081,24 @@ def main():
                           "which pathway the tape printed so far is actually tracing.")
     ap.add_argument("--journal", dest="journal_path", default=None,
                      help="Path to the replay journal (default: <out-dir>/journal.jsonl)")
+    ap.add_argument("--train-months", type=int, default=None,
+                     help="ONE-TIME TRAINING: replay ~21 sessions/month of history with no "
+                          "lookahead, fit the gap-direction model on the journaled outcomes, "
+                          "and persist everything to engine_state.json. Run once; every later "
+                          "run loads the trained state automatically.")
+    ap.add_argument("--tune", action="store_true",
+                     help="(Re)fit the gap-direction model from the existing journal without "
+                          "re-running replay, and persist to engine_state.json.")
+    ap.add_argument("--state", dest="state_path", default=None,
+                     help="Path to trained state (default: <out-dir>/engine_state.json)")
+    ap.add_argument("--serve", action="store_true",
+                     help="PERSISTENT DASHBOARD: local web app with a Pre-Market tab (all "
+                          "scenarios) and a Live Market tab (tracker vs current price, "
+                          "60s auto-refresh). Local only, http://127.0.0.1:<port>.")
+    ap.add_argument("--port", type=int, default=8787, help="Dashboard port for --serve")
+    ap.add_argument("--no-futures-volume", action="store_true",
+                     help="Live mode: disable merging futures volume onto zero-volume index "
+                          "candles (default is auto-detect and merge).")
     ap.add_argument("--flow", action="store_true",
                      help="Live mode only: pull options OI (put-call ratio) + futures depth "
                           "from Kite and feed the flow score into gap probabilities.")
@@ -2589,6 +3123,48 @@ def main():
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=IST)
 
+    if args.no_futures_volume:
+        global _VOLUME_FROM_FUTURES_DEFAULT
+        _VOLUME_FROM_FUTURES_DEFAULT = False
+
+    if args.tune:
+        journal_path = args.journal_path or os.path.join(args.out_dir, "journal.jsonl")
+        state_path = args.state_path or os.path.join(args.out_dir, "engine_state.json")
+        tune_from_journal(journal_path, state_path)
+        return
+
+    if args.train_months:
+        train_run(
+            symbol=args.symbol, mode=mode, as_of=as_of, train_months=args.train_months,
+            csv_path=args.csv_path, exchange=args.exchange,
+            instrument_token=args.instrument_token, seed=args.seed,
+            custom_gap_points=args.gap_points, top_k=args.top_k, out_dir=args.out_dir,
+            journal_path=args.journal_path, state_path=args.state_path,
+        )
+        return
+
+    if args.serve:
+        run_kwargs = dict(
+            symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
+            csv_path=args.csv_path, exchange=args.exchange,
+            instrument_token=args.instrument_token, seed=args.seed,
+            custom_gap_points=args.gap_points, sentiment_override=args.sentiment,
+            top_k=args.top_k, out_dir=args.out_dir, use_flow=args.flow,
+            flow_json=args.flow_json, journal_path=args.journal_path,
+            state_path=args.state_path,
+        )
+        track_kwargs = dict(
+            symbol=args.symbol, mode=mode, as_of=None if not args.as_of else as_of,
+            lookback_days=args.lookback_days, csv_path=args.csv_path,
+            exchange=args.exchange, instrument_token=args.instrument_token,
+            seed=args.seed, custom_gap_points=args.gap_points, top_k=args.top_k,
+            out_dir=args.out_dir, journal_path=args.journal_path, use_flow=args.flow,
+            flow_json=args.flow_json, sentiment_override=args.sentiment,
+            state_path=args.state_path,
+        )
+        serve_dashboard(run_kwargs, track_kwargs, args.out_dir, port=args.port)
+        return
+
     if args.replay_days:
         replay_run(
             symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
@@ -2606,7 +3182,7 @@ def main():
             instrument_token=args.instrument_token, seed=args.seed,
             custom_gap_points=args.gap_points, top_k=args.top_k, out_dir=args.out_dir,
             journal_path=args.journal_path, use_flow=args.flow, flow_json=args.flow_json,
-            sentiment_override=args.sentiment,
+            sentiment_override=args.sentiment, state_path=args.state_path,
         )
         return
 
@@ -2615,7 +3191,7 @@ def main():
         csv_path=args.csv_path, exchange=args.exchange, instrument_token=args.instrument_token,
         seed=args.seed, custom_gap_points=args.gap_points, sentiment_override=args.sentiment,
         top_k=args.top_k, out_dir=args.out_dir, use_flow=args.flow, flow_json=args.flow_json,
-        journal_path=args.journal_path,
+        journal_path=args.journal_path, state_path=args.state_path,
     )
 
 
