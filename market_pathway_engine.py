@@ -76,6 +76,38 @@ Fibonacci projection), which is what guarantees that a pathway's "price
 reached X" reads the same way on the 5m chart as it does on the 4h chart —
 by construction, not by hope.
 
+THE FOUR MODES
+--------------
+    (default)          generate tomorrow's gap scenarios + pathway charts
+    --replay-days N    THE LEARNING LOOP: replay the last N completed
+                       sessions; for each, generate scenarios from only
+                       pre-open data, score every pathway against the tape
+                       that actually printed (ATR-normalized curve RMSE),
+                       and journal per-template match scores. Journal
+                       history then tilts template ranking in every future
+                       run via learned priors in [0.7, 1.3] — earned
+                       preference, never total override.
+    --track            LIVE TRACKER: mid-session, rank which of this
+                       morning's pathways the day's tape is actually
+                       tracing (scored over the elapsed session only),
+                       with the realized tape overlaid on the chart.
+    --login / --check-auth   Kite Connect daily OAuth + connectivity check.
+
+Pathways are TIME-ANCHORED: each leg type carries a realistic session
+duration (a stop-run sweep is minutes, midday consolidation eats hours)
+and a time-of-day affinity (sweeps cluster at open/close, consolidation
+at midday) that feeds plausibility. The x-axis is the actual NSE session
+clock, 09:15 -> 15:30 IST.
+
+The ledger includes, beyond swings/EQH/EQL/prior-period extremes: Fair
+Value Gaps, order blocks, and volume-by-price high-volume nodes — all
+merged through the same cross-timeframe confluence machinery.
+
+Derivatives flow (--flow in live mode, or --flow-json for manual
+injection) adds options put-call OI ratio + futures order-book depth
+imbalance as a third input to gap probabilities, alongside the liquidity-
+engineering bias and sentiment.
+
 DISCLAIMER
 ----------
 This is a decision-support / research-visualization tool. It does not
@@ -613,6 +645,11 @@ class LevelType(Enum):
     SESSION_LOW = "session_low"
     SWING_HIGH = "swing_high"
     SWING_LOW = "swing_low"
+    FVG_BULL = "fvg_bullish"
+    FVG_BEAR = "fvg_bearish"
+    OB_BULL = "order_block_bullish"
+    OB_BEAR = "order_block_bearish"
+    HVN = "high_volume_node"
 
 
 @dataclass
@@ -632,6 +669,9 @@ _LEVEL_BASE_WEIGHT = {
     LevelType.PMH: 2.4, LevelType.PML: 2.4,
     LevelType.SESSION_HIGH: 1.0, LevelType.SESSION_LOW: 1.0,
     LevelType.SWING_HIGH: 0.8, LevelType.SWING_LOW: 0.8,
+    LevelType.FVG_BULL: 1.1, LevelType.FVG_BEAR: 1.1,
+    LevelType.OB_BULL: 1.2, LevelType.OB_BEAR: 1.2,
+    LevelType.HVN: 1.4,
 }
 
 
@@ -694,6 +734,82 @@ def detect_periodic_extremes(daily: List[Candle], weekly: List[Candle],
     return levels
 
 
+def detect_fvgs(candles: List[Candle], timeframe: str, atr: float,
+                 keep_recent: int = 30) -> List[LiquidityLevel]:
+    """Fair Value Gaps: the classic three-candle imbalance. A bullish FVG
+    exists when candle i's low is strictly above candle i-2's high — the
+    middle candle displaced so fast that a price band traded on only one
+    side of the book. That unfilled band acts as a magnet/support on
+    revisit. We anchor the level at the gap midpoint and require the gap
+    to be at least 0.15 ATR wide so micro-gaps don't flood the ledger."""
+    levels: List[LiquidityLevel] = []
+    min_gap = atr * 0.15
+    for i in range(2, len(candles)):
+        a, c = candles[i - 2], candles[i]
+        if c.l > a.h and (c.l - a.h) >= min_gap:
+            levels.append(LiquidityLevel((c.l + a.h) / 2, LevelType.FVG_BULL, timeframe,
+                                          c.t, _LEVEL_BASE_WEIGHT[LevelType.FVG_BULL]))
+        elif c.h < a.l and (a.l - c.h) >= min_gap:
+            levels.append(LiquidityLevel((c.h + a.l) / 2, LevelType.FVG_BEAR, timeframe,
+                                          c.t, _LEVEL_BASE_WEIGHT[LevelType.FVG_BEAR]))
+    return levels[-keep_recent:]
+
+
+def detect_order_blocks(candles: List[Candle], timeframe: str, atr: float,
+                         keep_recent: int = 30) -> List[LiquidityLevel]:
+    """Order blocks: the last opposite-direction candle immediately before
+    a displacement move (a candle whose body is >= 1.2 ATR). The logic:
+    institutions filling size leave their footprint in that final counter-
+    candle before price launches — its body midpoint is where unfilled
+    institutional orders are presumed to rest, so revisits react there."""
+    levels: List[LiquidityLevel] = []
+    min_body = atr * 1.2
+    for i in range(0, len(candles) - 1):
+        prev, cur = candles[i], candles[i + 1]
+        body = abs(cur.c - cur.o)
+        if body < min_body:
+            continue
+        if cur.c > cur.o and prev.c < prev.o:      # bearish candle, then bullish displacement
+            levels.append(LiquidityLevel((prev.o + prev.c) / 2, LevelType.OB_BULL, timeframe,
+                                          prev.t, _LEVEL_BASE_WEIGHT[LevelType.OB_BULL]))
+        elif cur.c < cur.o and prev.c > prev.o:    # bullish candle, then bearish displacement
+            levels.append(LiquidityLevel((prev.o + prev.c) / 2, LevelType.OB_BEAR, timeframe,
+                                          prev.t, _LEVEL_BASE_WEIGHT[LevelType.OB_BEAR]))
+    return levels[-keep_recent:]
+
+
+def detect_volume_nodes(candles: List[Candle], timeframe: str,
+                         lookback: int = 300, n_bins: int = 24) -> List[LiquidityLevel]:
+    """High-volume nodes from a volume-by-price histogram: bin the trailing
+    window's closes into `n_bins` price buckets weighted by traded volume;
+    a local-maximum bin carrying >= 1.5x the average bin volume marks a
+    price the market repeatedly accepted (an old value area). Those act as
+    consolidation magnets on revisit — this is the detector that encodes
+    'which price levels had the most consolidation' directly."""
+    window = candles[-lookback:] if len(candles) > lookback else candles
+    if len(window) < 20:
+        return []
+    lo = min(c.l for c in window)
+    hi = max(c.h for c in window)
+    if hi <= lo:
+        return []
+    if not any(c.v > 0 for c in window):
+        return []  # no volume data on this feed -> detector honestly abstains
+    bin_w = (hi - lo) / n_bins
+    vols = [0.0] * n_bins
+    for c in window:
+        idx = min(n_bins - 1, max(0, int((c.c - lo) / bin_w)))
+        vols[idx] += c.v
+    avg = sum(vols) / n_bins
+    levels: List[LiquidityLevel] = []
+    for i in range(1, n_bins - 1):
+        if vols[i] > vols[i - 1] and vols[i] >= vols[i + 1] and vols[i] >= avg * 1.5:
+            price = lo + (i + 0.5) * bin_w
+            levels.append(LiquidityLevel(price, LevelType.HVN, timeframe, window[-1].t,
+                                          _LEVEL_BASE_WEIGHT[LevelType.HVN]))
+    return levels
+
+
 # --- Liquidity sweeps -----------------------------------------------------
 
 class SweepClassification(Enum):
@@ -725,9 +841,17 @@ def detect_liquidity_sweeps(candles: List[Candle], levels: List[LiquidityLevel],
     participation at the level."""
     events = []
     idx_by_time = {c.t: i for i, c in enumerate(candles)}
+    _HIGH_TYPES = (LevelType.EQH, LevelType.PDH, LevelType.PWH, LevelType.PMH,
+                   LevelType.SESSION_HIGH, LevelType.SWING_HIGH)
+    _LOW_TYPES = (LevelType.EQL, LevelType.PDL, LevelType.PWL, LevelType.PML,
+                  LevelType.SESSION_LOW, LevelType.SWING_LOW)
     for lvl in levels:
-        is_high = lvl.type in (LevelType.EQH, LevelType.PDH, LevelType.PWH, LevelType.PMH,
-                                LevelType.SESSION_HIGH, LevelType.SWING_HIGH)
+        # FVG/OB/HVN are magnet/reaction zones, not stop clusters — a wick
+        # through them isn't a "sweep" in the stop-run sense, so they are
+        # excluded from sweep classification (they still shape the ledger).
+        if lvl.type not in _HIGH_TYPES and lvl.type not in _LOW_TYPES:
+            continue
+        is_high = lvl.type in _HIGH_TYPES
         for i, c in enumerate(candles):
             if c.t <= lvl.t:
                 continue  # only look for sweeps of a level after it was established
@@ -832,6 +956,10 @@ def build_layer_context(tf_name: str, candles: List[Candle], daily: List[Candle]
     for sw in swings[-40:]:
         lt = LevelType.SWING_HIGH if sw.kind == SwingKind.HIGH else LevelType.SWING_LOW
         levels.append(LiquidityLevel(sw.price, lt, tf_name, sw.t, _LEVEL_BASE_WEIGHT[lt]))
+
+    levels += detect_fvgs(candles, tf_name, atr)
+    levels += detect_order_blocks(candles, tf_name, atr)
+    levels += detect_volume_nodes(candles, tf_name)
 
     sweeps = detect_liquidity_sweeps(candles, levels, reversal_window=6)
     vol_state = classify_volatility_state(candles, lookback=30)
@@ -1065,6 +1193,131 @@ def default_sentiment_provider() -> float:
 
 
 # =========================================================================
+# 10b. OPTIONS OI + MARKET-DEPTH FLOW (Kite-powered, or manually injected)
+# =========================================================================
+
+@dataclass
+class FlowContext:
+    """Derivatives/order-book flow read, condensed to one score in [-1,1].
+
+    pcr               put-call OI ratio near the money. Indian-market
+                      convention: heavy put OI = put WRITERS defending
+                      levels below price (supportive/bullish); heavy call
+                      OI = call writers capping upside (bearish). We map
+                      pcr -> tanh((pcr - 1.0) * 2), so pcr 1.0 is neutral,
+                      ~1.5 strongly bullish, ~0.6 strongly bearish.
+    depth_imbalance   (total bid qty - total ask qty) / (bid + ask) from
+                      the order book of the instrument's nearest future
+                      (indices have no cash order book). Positive = more
+                      resting demand visible.
+    score             0.7 * pcr_bias + 0.3 * depth_imbalance, clamped.
+    source            "kite" | "manual" | "none" — always shown in the
+                      report so you know whether flow was real data.
+    """
+    pcr: Optional[float]
+    depth_imbalance: float
+    score: float
+    source: str
+    notes: str = ""
+
+
+def neutral_flow() -> FlowContext:
+    return FlowContext(pcr=None, depth_imbalance=0.0, score=0.0, source="none",
+                        notes="no flow data supplied — flow term contributes nothing")
+
+
+def _flow_score(pcr: Optional[float], depth_imbalance: float) -> float:
+    pcr_bias = math.tanh((pcr - 1.0) * 2.0) if pcr is not None else 0.0
+    raw = 0.7 * pcr_bias + 0.3 * max(-1.0, min(1.0, depth_imbalance))
+    return round(max(-1.0, min(1.0, raw)), 3)
+
+
+def flow_from_json(payload: str) -> FlowContext:
+    """Manual injection for offline runs / other data sources:
+    --flow-json '{"pcr": 1.32, "depth_imbalance": 0.15}'"""
+    d = json.loads(payload)
+    pcr = d.get("pcr")
+    depth = float(d.get("depth_imbalance", 0.0))
+    return FlowContext(pcr=pcr, depth_imbalance=depth,
+                        score=_flow_score(pcr, depth), source="manual",
+                        notes="values injected via --flow-json")
+
+
+def fetch_kite_flow(symbol: str, exchange: str = "NSE",
+                     option_name: Optional[str] = None,
+                     strikes_pct_window: float = 0.03) -> FlowContext:
+    """Pull near-the-money option OI and futures order-book depth from Kite
+    and condense them into a FlowContext. Degrades gracefully: any missing
+    piece (no NFO derivatives for the symbol, quote errors, no depth) just
+    drops out of the score rather than failing the run.
+
+    option_name: the NFO 'name' field (e.g. "NIFTY" for the NIFTY 50 index,
+    "HDFCBANK" for the stock). Defaults to symbol with spaces/index suffixes
+    stripped, which handles "NIFTY 50" -> "NIFTY".
+    """
+    try:
+        from kiteconnect import KiteConnect
+    except ImportError:
+        return FlowContext(None, 0.0, 0.0, "none",
+                            "kiteconnect not installed — flow skipped")
+    api_key = os.environ.get("KITE_API_KEY")
+    token = os.environ.get("KITE_ACCESS_TOKEN")
+    if not api_key or not token:
+        return FlowContext(None, 0.0, 0.0, "none",
+                            "KITE_API_KEY / KITE_ACCESS_TOKEN not set — flow skipped")
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(token)
+
+    name = option_name or symbol.replace(" 50", "").replace(" ", "")
+    notes = []
+    pcr = None
+    depth_imbalance = 0.0
+
+    try:
+        spot = kite.ltp([f"{exchange}:{symbol}"])
+        spot_price = list(spot.values())[0]["last_price"]
+    except Exception as e:
+        return FlowContext(None, 0.0, 0.0, "none", f"spot LTP failed: {e}")
+
+    try:
+        nfo = kite.instruments("NFO")
+        opts = [i for i in nfo if i.get("name") == name and i.get("segment") == "NFO-OPT"]
+        futs = [i for i in nfo if i.get("name") == name and i.get("segment") == "NFO-FUT"]
+
+        if opts:
+            nearest_expiry = min(o["expiry"] for o in opts)
+            lo = spot_price * (1 - strikes_pct_window)
+            hi = spot_price * (1 + strikes_pct_window)
+            near = [o for o in opts
+                    if o["expiry"] == nearest_expiry and lo <= o["strike"] <= hi]
+            # kite.quote caps at ~500 instruments per call; NTM window is far below that
+            keys = [f"NFO:{o['tradingsymbol']}" for o in near][:400]
+            if keys:
+                quotes = kite.quote(keys)
+                put_oi = sum(q.get("oi", 0) for k, q in quotes.items() if k.endswith("PE"))
+                call_oi = sum(q.get("oi", 0) for k, q in quotes.items() if k.endswith("CE"))
+                if call_oi > 0:
+                    pcr = round(put_oi / call_oi, 3)
+                    notes.append(f"PCR {pcr} from {len(keys)} NTM contracts "
+                                 f"(expiry {nearest_expiry}, ±{strikes_pct_window*100:.0f}% strikes)")
+        if futs:
+            fut = min(futs, key=lambda f: f["expiry"])
+            fq = kite.quote([f"NFO:{fut['tradingsymbol']}"])
+            depth = list(fq.values())[0].get("depth", {})
+            bid_qty = sum(x.get("quantity", 0) for x in depth.get("buy", []))
+            ask_qty = sum(x.get("quantity", 0) for x in depth.get("sell", []))
+            if bid_qty + ask_qty > 0:
+                depth_imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty)
+                notes.append(f"depth imbalance {depth_imbalance:+.2f} from {fut['tradingsymbol']}")
+    except Exception as e:
+        notes.append(f"derivatives fetch partial failure: {e}")
+
+    return FlowContext(pcr=pcr, depth_imbalance=round(depth_imbalance, 3),
+                        score=_flow_score(pcr, depth_imbalance), source="kite",
+                        notes="; ".join(notes) or "no derivatives found for this name")
+
+
+# =========================================================================
 # 11. GAP BUCKET ENGINE
 # =========================================================================
 
@@ -1100,23 +1353,28 @@ def build_gap_buckets(atr: float, custom_points: Optional[List[float]] = None) -
 
 
 def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: float,
-                             atr: float) -> List[GapBucket]:
+                             atr: float, flow: Optional[FlowContext] = None) -> List[GapBucket]:
     """Heuristic (not statistically fitted) scoring: a bucket's raw score
     combines (a) alignment between the bucket's direction and the
     liquidity-engineering bias, (b) alignment with the sentiment input,
-    and (c) a magnitude penalty (bigger gaps are inherently less probable,
-    all else equal). Scores are then softmax-normalized into a probability
-    distribution over the buckets. This is transparent by design — replace
+    (c) alignment with the derivatives-flow score (options OI put-call
+    ratio + futures depth imbalance, when supplied), and (d) a magnitude
+    penalty (bigger gaps are inherently less probable, all else equal).
+    Scores are then softmax-normalized into a probability distribution
+    over the buckets. This is transparent by design — replace
     `score_gap_probabilities` with a fitted model later without touching
     anything downstream, since callers only consume `GapBucket.probability`.
     """
+    flow_score = flow.score if flow is not None else 0.0
     raw_scores = []
     for pts in buckets:
         direction = 1.0 if pts > 0 else -1.0
         bias_align = direction * bias.score
         sentiment_align = direction * sentiment
+        flow_align = direction * flow_score
         magnitude_penalty = -abs(pts) / (atr * 2.0 + 1e-9)
-        raw = 1.4 * bias_align + 0.8 * sentiment_align + 0.6 * magnitude_penalty
+        raw = (1.4 * bias_align + 0.8 * sentiment_align + 0.9 * flow_align
+               + 0.6 * magnitude_penalty)
         raw_scores.append(raw)
 
     max_raw = max(raw_scores)
@@ -1129,7 +1387,7 @@ def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: 
         direction_word = "gap up" if pts > 0 else "gap down"
         rationale = (
             f"{direction_word} of {abs(pts):.0f} pts: bias={bias.label} (score {bias.score:+.2f}), "
-            f"sentiment={sentiment:+.2f}, magnitude={abs(pts)/atr:.2f}x ATR"
+            f"sentiment={sentiment:+.2f}, flow={flow_score:+.2f}, magnitude={abs(pts)/atr:.2f}x ATR"
         )
         out.append(GapBucket(pts, round(p, 4), rationale))
     out.sort(key=lambda g: g.probability, reverse=True)
@@ -1191,6 +1449,63 @@ _TEMPLATES: List[Tuple[str, List[Tuple[LegType, int]]]] = [
 ]
 
 
+# --- Session-clock model ---------------------------------------------------
+# Legs don't take equal time in a real session: a stop-run sweep is minutes,
+# a midday consolidation eats hours. Each leg type gets a duration weight;
+# a template's anchor times are the normalized cumulative durations, so the
+# x-axis of every pathway is actual session time (09:15 -> 15:30 IST), not
+# an abstract "leg index". On top of that, each leg type has a time-of-day
+# affinity (sweeps cluster at the open and the close, consolidation lives
+# in the midday lull, expansions favor the open drive and the closing hour)
+# which feeds the plausibility score: a template whose consolidation lands
+# at 12:30 is more believable than one that consolidates into the close.
+
+SESSION_MINUTES = (SESSION_CLOSE[0] * 60 + SESSION_CLOSE[1]) - (SESSION_OPEN[0] * 60 + SESSION_OPEN[1])
+
+_LEG_DURATION_WEIGHT = {
+    LegType.EXPANSION: 0.18,
+    LegType.RETRACEMENT: 0.12,
+    LegType.LIQUIDITY_SWEEP: 0.08,
+    LegType.CONSOLIDATION: 0.24,
+    LegType.DISTRIBUTION: 0.15,
+    LegType.REVERSAL: 0.10,
+}
+
+
+def session_clock(frac: float) -> str:
+    """Map a session fraction (0..1) to an IST clock string, 09:15..15:30."""
+    minutes = SESSION_OPEN[0] * 60 + SESSION_OPEN[1] + int(round(frac * SESSION_MINUTES))
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def compute_time_anchors(template: List[Tuple[LegType, int]]) -> List[float]:
+    """Cumulative normalized durations: len(template)+1 fractions from 0.0
+    to 1.0, one anchor per leg boundary."""
+    durs = [_LEG_DURATION_WEIGHT[kind] for kind, _ in template]
+    total = sum(durs) or 1.0
+    anchors = [0.0]
+    acc = 0.0
+    for d in durs:
+        acc += d / total
+        anchors.append(min(1.0, acc))
+    anchors[-1] = 1.0
+    return anchors
+
+
+def _time_affinity_bonus(kind: LegType, mid_frac: float) -> float:
+    """Small plausibility adjustment for how well a leg's session timing
+    matches where that behavior empirically clusters in an NSE cash day."""
+    if kind == LegType.LIQUIDITY_SWEEP:
+        return 0.20 if (mid_frac < 0.25 or mid_frac > 0.75) else -0.10
+    if kind == LegType.CONSOLIDATION:
+        return 0.15 if 0.35 <= mid_frac <= 0.65 else -0.05
+    if kind == LegType.EXPANSION:
+        return 0.10 if (mid_frac < 0.35 or mid_frac > 0.70) else 0.0
+    if kind == LegType.DISTRIBUTION:
+        return 0.10 if mid_frac > 0.55 else -0.05
+    return 0.0
+
+
 @dataclass
 class Leg:
     kind: LegType
@@ -1200,6 +1515,8 @@ class Leg:
     target_zone: Optional[LiquidityZone]
     layer_alignment: Dict[str, dict]
     note: str
+    t_start: float = 0.0    # session fraction at leg start (0 = 09:15, 1 = 15:30)
+    t_end: float = 1.0
 
 
 @dataclass
@@ -1221,6 +1538,7 @@ class Pathway:
             "legs": [
                 {
                     "kind": leg.kind.value, "direction": leg.direction,
+                    "session_window": f"{session_clock(leg.t_start)}-{session_clock(leg.t_end)}",
                     "start_price": round(leg.start_price, 2), "end_price": round(leg.end_price, 2),
                     "target_confluence": (
                         {"score": leg.target_zone.confluence_score,
@@ -1288,8 +1606,9 @@ def generate_pathway(template_name: str, template: List[Tuple[LegType, int]],
     price = gap_open_price
     gap_direction = 1 if gap.points >= 0 else -1
     score = gap.probability * 3.0  # base score seeded from the gap's own probability
+    anchors = compute_time_anchors(template)
 
-    for kind, rel_dir in template:
+    for li, (kind, rel_dir) in enumerate(template):
         direction = gap_direction * rel_dir if rel_dir != 0 else 0
         if kind == LegType.CONSOLIDATION:
             min_reach, max_reach = 0.0, atr * 0.2
@@ -1317,8 +1636,11 @@ def generate_pathway(template_name: str, template: List[Tuple[LegType, int]],
         if zone is not None:
             score += 0.15 * math.log1p(zone.confluence_score)
 
+        t0, t1 = anchors[li], anchors[li + 1]
+        score += _time_affinity_bonus(kind, (t0 + t1) / 2)
+
         legs.append(Leg(kind, direction, price, end_price, zone, alignment,
-                         f"{kind.value}: {note}"))
+                         f"{kind.value}: {note}", t_start=t0, t_end=t1))
         price = end_price
 
     # net-displacement sanity: whole day shouldn't wildly exceed a plausible
@@ -1327,18 +1649,17 @@ def generate_pathway(template_name: str, template: List[Tuple[LegType, int]],
     if total_move > atr * 3.0:
         score -= (total_move / atr - 3.0) * 0.5
 
-    time_points = len(template) + 1
-    points = [(i / (time_points - 1), None) for i in range(time_points)]
     prices = [gap_open_price] + [leg.end_price for leg in legs]
-    points = [(t, p) for (t, _), p in zip(points, prices)]
+    points = list(zip(anchors, prices))
 
     narrative_parts = [
         f"Gap {'up' if gap.points >= 0 else 'down'} {abs(gap.points):.0f} pts to open near "
-        f"{gap_open_price:.2f} (prior close {prior_close:.2f})."
+        f"{gap_open_price:.2f} at {session_clock(0.0)} (prior close {prior_close:.2f})."
     ]
     for leg in legs:
         dir_word = {1: "up", -1: "down", 0: "sideways"}[leg.direction]
         narrative_parts.append(
+            f"[{session_clock(leg.t_start)}-{session_clock(leg.t_end)}] "
             f"{leg.kind.value.replace('_', ' ').title()} {dir_word} toward "
             f"{leg.end_price:.2f} — {leg.note}"
         )
@@ -1350,20 +1671,24 @@ def generate_pathway(template_name: str, template: List[Tuple[LegType, int]],
 def generate_candidates(gap: GapBucket, ledger: List[LiquidityZone],
                          layers: Dict[str, LayerContext], bias: SessionBias,
                          prior_close: float, n_per_template: int = 2,
-                         top_k: int = 3, seed: Optional[int] = None) -> List[Pathway]:
+                         top_k: int = 3, seed: Optional[int] = None,
+                         template_priors: Optional[Dict[str, float]] = None) -> List[Pathway]:
     if seed is not None:
         random.seed(seed)
 
     gap_open_price = prior_close + gap.points
     all_candidates: List[Pathway] = []
 
-    # Weight template selection toward narratives that match the direction
-    # implied by the session bias (an accumulation bias makes trend/expansion
-    # templates in the gap direction more plausible than fade templates).
+    # template_priors is the learning loop's feedback channel: replayed
+    # sessions journal how well each template matched reality, and those
+    # per-template weights (neutral = 1.0) tilt ranking here. Applied
+    # additively so a negative raw score isn't perversely amplified.
+    priors = template_priors or {}
     for name, template in _TEMPLATES:
         for _ in range(n_per_template):
             pw = generate_pathway(name, template, gap, ledger, layers, bias,
                                    gap_open_price, prior_close)
+            pw.plausibility_score += (priors.get(name, 1.0) - 1.0) * 1.5
             if validate_pathway_coherence(pw, layers):
                 all_candidates.append(pw)
 
@@ -1428,6 +1753,107 @@ def sample_smooth_curve(points: List[Tuple[float, float]], samples_per_seg: int 
 
 
 # =========================================================================
+# 13b. PATHWAY vs REALITY — match scoring, journal, learned template priors
+# =========================================================================
+# This is the end-of-day feedback loop: after a session completes, we can
+# ask "which of the pathways generated BEFORE the open actually traced
+# closest to what the market did?", write the answer to a journal, and let
+# accumulated journal history tilt future template ranking. Probabilities
+# stay heuristic, but template preference becomes *earned* over time
+# instead of authored.
+
+def _interp_path(points: List[Tuple[float, float]], x: float) -> float:
+    """Piecewise-linear interpolation over (t, price) points sorted by t."""
+    if not points:
+        return 0.0
+    if x <= points[0][0]:
+        return points[0][1]
+    if x >= points[-1][0]:
+        return points[-1][1]
+    for i in range(1, len(points)):
+        if points[i][0] >= x:
+            (x0, y0), (x1, y1) = points[i - 1], points[i]
+            if x1 == x0:
+                return y1
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return points[-1][1]
+
+
+def actual_day_path(day_candles: List[Candle]) -> List[Tuple[float, float]]:
+    """The realized session as (session_fraction, close) points — the same
+    coordinate system pathways live in, so the two are directly comparable."""
+    if not day_candles:
+        return []
+    open_minutes = SESSION_OPEN[0] * 60 + SESSION_OPEN[1]
+    out = []
+    for c in day_candles:
+        frac = ((c.t.hour * 60 + c.t.minute) - open_minutes) / SESSION_MINUTES
+        out.append((max(0.0, min(1.0, frac)), c.c))
+    return out
+
+
+def score_curve_match(pathway: Pathway, actual: List[Tuple[float, float]],
+                       atr: float, upto_frac: float = 1.0, n_samples: int = 64) -> float:
+    """Similarity in (0, 1]: sample both curves on a shared time grid over
+    [0, upto_frac], normalize prices by ATR (so the score is scale-free and
+    comparable across instruments/days), and squash the RMSE through
+    1/(1+rmse). 1.0 = pathway traced reality exactly; ~0.5 = off by one
+    full ATR on average. `upto_frac < 1` scores only the elapsed part of
+    the session — that's what live tracking uses."""
+    if not actual or atr <= 0:
+        return 0.0
+    smooth = sample_smooth_curve(pathway.points, samples_per_seg=16)
+    errs = []
+    for i in range(n_samples):
+        x = upto_frac * i / (n_samples - 1)
+        p_path = _interp_path(smooth, x)
+        p_real = _interp_path(actual, x)
+        errs.append(((p_path - p_real) / atr) ** 2)
+    rmse = math.sqrt(sum(errs) / len(errs))
+    return round(1.0 / (1.0 + rmse), 4)
+
+
+def journal_append(path: str, entry: dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def load_journal(path: str) -> List[dict]:
+    if not os.path.exists(path):
+        return []
+    entries = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def load_template_priors(path: str) -> Dict[str, float]:
+    """Convert journal history into per-template weights centered on 1.0.
+    Each replayed day records every template's best match score (0..1);
+    a template's prior is 0.7 + 0.6 * (its average score), i.e. bounded in
+    [0.7, 1.3] so no template is ever fully silenced or made dominant —
+    the journal *tilts* ranking, it doesn't take it over. Templates with
+    no history stay at exactly 1.0 (neutral)."""
+    entries = load_journal(path)
+    sums: Dict[str, float] = {}
+    counts: Dict[str, int] = {}
+    for e in entries:
+        for name, s in (e.get("match_by_template") or {}).items():
+            sums[name] = sums.get(name, 0.0) + float(s)
+            counts[name] = counts.get(name, 0) + 1
+    return {name: round(0.7 + 0.6 * (sums[name] / counts[name]), 4)
+            for name in sums if counts[name] > 0}
+
+
+# =========================================================================
 # 14. RENDERING — self-contained SVG (no dependencies); optional matplotlib
 # =========================================================================
 
@@ -1436,16 +1862,23 @@ _PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2"]
 
 def render_pathways_svg(gap_scenarios: Dict[float, List[Pathway]],
                          ledger: List[LiquidityZone], prior_close: float,
-                         out_path: str, width: int = 1200, height: int = 760) -> None:
+                         out_path: str, width: int = 1200, height: int = 760,
+                         actual_path: Optional[List[Tuple[float, float]]] = None,
+                         title_suffix: str = "") -> None:
     """Renders every gap scenario's top pathways as smooth lines on one
-    SVG chart, with liquidity-zone bands drawn behind them. Self-contained
-    (no JS, no external fonts/CDNs) — open directly in a browser."""
+    SVG chart, with liquidity-zone bands drawn behind them and the x-axis
+    labeled in session time (09:15 -> 15:30 IST). If `actual_path` is
+    given (track/replay modes), the realized tape is overlaid as a thick
+    white line so you can see which projection the day is tracing.
+    Self-contained (no JS, no external fonts/CDNs) — open in a browser."""
     all_prices = [prior_close]
     for pathways in gap_scenarios.values():
         for pw in pathways:
             all_prices.extend(p for _, p in pw.points)
     for z in ledger[:12]:
         all_prices.extend([z.price_low, z.price_high])
+    if actual_path:
+        all_prices.extend(p for _, p in actual_path)
 
     y_min, y_max = min(all_prices), max(all_prices)
     pad = (y_max - y_min) * 0.08 or 1.0
@@ -1466,7 +1899,8 @@ def render_pathways_svg(gap_scenarios: Dict[float, List[Pathway]],
                f'font-family="Helvetica,Arial,sans-serif">')
     svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#0b1220"/>')
     svg.append(f'<text x="{margin_l}" y="28" fill="#e5e7eb" font-size="18" font-weight="600">'
-               f'Market Pathway Projections — gap scenarios from prior close {prior_close:.2f}</text>')
+               f'Market Pathway Projections — gap scenarios from prior close {prior_close:.2f}'
+               f'{" — " + title_suffix if title_suffix else ""}</text>')
 
     # gridlines + y-axis labels
     for i in range(6):
@@ -1476,6 +1910,15 @@ def render_pathways_svg(gap_scenarios: Dict[float, List[Pathway]],
                    f'stroke="#1f2937" stroke-width="1"/>')
         svg.append(f'<text x="{margin_l - 10}" y="{gy + 4:.1f}" fill="#9ca3af" font-size="11" '
                    f'text-anchor="end">{price:.1f}</text>')
+
+    # x-axis: session-time ticks (09:15 .. 15:30 IST)
+    for i in range(7):
+        frac = i / 6
+        gx = px(frac)
+        svg.append(f'<line x1="{gx:.1f}" y1="{margin_t}" x2="{gx:.1f}" y2="{margin_t + plot_h}" '
+                   f'stroke="#1f2937" stroke-width="1"/>')
+        svg.append(f'<text x="{gx:.1f}" y="{margin_t + plot_h + 18}" fill="#9ca3af" '
+                   f'font-size="11" text-anchor="middle">{session_clock(frac)}</text>')
 
     # liquidity zone bands (top confluence zones only, to avoid clutter)
     for z in ledger[:10]:
@@ -1515,6 +1958,19 @@ def render_pathways_svg(gap_scenarios: Dict[float, List[Pathway]],
             svg.append(f'<text x="{width - margin_r + 18}" y="{legend_y - 1}" fill="#e5e7eb" '
                        f'font-size="10">{label}</text>')
             legend_y += 16
+
+    # realized-tape overlay (track / replay modes)
+    if actual_path and len(actual_path) >= 2:
+        path_d = " ".join(
+            f'{"M" if i == 0 else "L"} {px(t):.1f} {py(p):.1f}'
+            for i, (t, p) in enumerate(actual_path)
+        )
+        svg.append(f'<path d="{path_d}" fill="none" stroke="#f8fafc" stroke-width="3.2" '
+                   f'stroke-linecap="round" opacity="0.95"/>')
+        lt, lp = actual_path[-1]
+        svg.append(f'<circle cx="{px(lt):.1f}" cy="{py(lp):.1f}" r="5" fill="#f8fafc"/>')
+        svg.append(f'<text x="{px(lt) + 8:.1f}" y="{py(lp) - 8:.1f}" fill="#f8fafc" '
+                   f'font-size="11" font-weight="600">actual {lp:.1f}</text>')
 
     svg.append(f'<text x="{margin_l}" y="{height - 12}" fill="#6b7280" font-size="10">'
                f'Illustrative structural pathways, not a candle-by-candle forecast. '
@@ -1612,8 +2068,104 @@ def build_context_map(layers: Dict[str, LayerContext], ledger: List[LiquidityZon
 
 
 # =========================================================================
-# 16. ORCHESTRATION
+# 16. ORCHESTRATION — shared analysis core + run / replay / track modes
 # =========================================================================
+
+@dataclass
+class AnalysisResult:
+    layers: Dict[str, LayerContext]
+    ledger: List[LiquidityZone]
+    bias: SessionBias
+    gap_buckets: List[GapBucket]
+    scenarios: Dict[float, List[Pathway]]
+    prior_close: float
+    atr: float
+    flow: FlowContext
+
+
+def _make_provider(mode: str, symbol: str, exchange: str,
+                    instrument_token: Optional[int], csv_path: Optional[str],
+                    seed: int) -> DataProvider:
+    if mode == "live":
+        return ZerodhaProvider(symbol, exchange, instrument_token)
+    if mode == "csv":
+        if not csv_path:
+            raise ValueError("--csv PATH is required for --mode csv")
+        return CSVProvider(csv_path)
+    return SyntheticProvider(seed=seed)
+
+
+def analyze_and_generate(base: List[Candle], as_of: datetime, *,
+                          custom_gap_points: Optional[List[float]] = None,
+                          sentiment: float = 0.0,
+                          flow: Optional[FlowContext] = None,
+                          template_priors: Optional[Dict[str, float]] = None,
+                          top_k: int = 3, seed: int = 7,
+                          verbose: bool = True) -> AnalysisResult:
+    """The full context -> ledger -> bias -> gap -> pathways pipeline over
+    a candle set, with NO file/IO side effects. run(), replay_run() and
+    track_run() are all thin shells around this — which is exactly what
+    makes replay honest: the replayed day is generated by the same code
+    path, seeing only data that existed before that day's open."""
+    flow = flow or neutral_flow()
+
+    def say(msg: str):
+        if verbose:
+            print(msg)
+
+    say("      building multi-timeframe layer contexts (1min..1D)...")
+    layers = build_all_layers(base, as_of)
+    if not layers:
+        raise RuntimeError("No layers could be built from the supplied candles.")
+    for tf, ctx in layers.items():
+        say(f"      {tf:>5}: {len(ctx.candles):>5} candles | bias={ctx.bias.value:<8} | "
+            f"range_state={ctx.range_ctx.state:<11} | vol={ctx.vol_state.value:<13} | "
+            f"levels={len(ctx.levels):>3} | sweeps={len(ctx.sweeps)}")
+
+    ledger = build_level_ledger(layers, tolerance_pct=0.05)
+    say(f"      -> {len(ledger)} canonical liquidity zones" +
+        (f" (top confluence: {ledger[0].confluence_score:.2f} across {ledger[0].timeframes})"
+         if ledger else ""))
+
+    bias = compute_liquidity_engineering_bias(layers)
+    say(f"      -> session bias: {bias.label} (score {bias.score:+.2f})")
+    if flow.source != "none":
+        say(f"      -> flow [{flow.source}]: score {flow.score:+.2f} "
+            f"(pcr={flow.pcr}, depth={flow.depth_imbalance:+.2f}) — {flow.notes}")
+
+    atr = compute_atr_daily(layers)
+    gap_points = build_gap_buckets(atr, custom_gap_points)
+    gap_buckets = score_gap_probabilities(gap_points, bias, sentiment, atr, flow)
+    prior_close = layers["1D"].candles[-1].c if "1D" in layers \
+        else layers[list(layers.keys())[-1]].candles[-1].c
+
+    scenarios: Dict[float, List[Pathway]] = {}
+    for i, gap in enumerate(gap_buckets):
+        candidates = generate_candidates(gap, ledger, layers, bias, prior_close,
+                                          n_per_template=2, top_k=top_k, seed=seed + i,
+                                          template_priors=template_priors)
+        scenarios[gap.points] = candidates
+        say(f"      gap {gap.points:+.0f} (p={gap.probability:.2f}): "
+            f"{len(candidates)} pathway(s) kept")
+
+    return AnalysisResult(layers, ledger, bias, gap_buckets, scenarios,
+                           prior_close, atr, flow)
+
+
+def _session_bounds(day: datetime) -> Tuple[datetime, datetime]:
+    o = day.replace(hour=SESSION_OPEN[0], minute=SESSION_OPEN[1], second=0, microsecond=0)
+    c = day.replace(hour=SESSION_CLOSE[0], minute=SESSION_CLOSE[1], second=0, microsecond=0)
+    return o, c
+
+
+def _resolve_flow(mode: str, symbol: str, exchange: str, use_flow: bool,
+                   flow_json: Optional[str]) -> FlowContext:
+    if flow_json:
+        return flow_from_json(flow_json)
+    if use_flow and mode == "live":
+        return fetch_kite_flow(symbol, exchange)
+    return neutral_flow()
+
 
 def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
         csv_path: Optional[str] = None, exchange: str = "NSE",
@@ -1621,67 +2173,55 @@ def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
         custom_gap_points: Optional[List[float]] = None,
         sentiment_provider: Callable[[], float] = default_sentiment_provider,
         sentiment_override: Optional[float] = None,
-        top_k: int = 3, out_dir: str = "market_pathway_output") -> dict:
+        top_k: int = 3, out_dir: str = "market_pathway_output",
+        use_flow: bool = False, flow_json: Optional[str] = None,
+        journal_path: Optional[str] = None) -> dict:
 
-    if mode == "live":
-        provider: DataProvider = ZerodhaProvider(symbol, exchange, instrument_token)
-    elif mode == "csv":
-        if not csv_path:
-            raise ValueError("--csv PATH is required for --mode csv")
-        provider = CSVProvider(csv_path)
-    else:
-        provider = SyntheticProvider(seed=seed)
+    provider = _make_provider(mode, symbol, exchange, instrument_token, csv_path, seed)
 
-    print(f"[1/7] Fetching base 1-minute data (mode={mode}, lookback={lookback_days}d)...")
+    print(f"[1/5] Fetching base 1-minute data (mode={mode}, lookback={lookback_days}d)...")
     base = provider.fetch_base(as_of, lookback_days)
     if not base:
         raise RuntimeError("No candles returned — check symbol/lookback/credentials.")
     print(f"      -> {len(base)} base candles from {base[0].t} to {base[-1].t}")
 
-    print("[2/7] Building multi-timeframe layer contexts (1min..1D)...")
-    layers = build_all_layers(base, as_of)
-    for tf, ctx in layers.items():
-        print(f"      {tf:>5}: {len(ctx.candles):>5} candles | bias={ctx.bias.value:<8} | "
-              f"range_state={ctx.range_ctx.state:<11} | vol={ctx.vol_state.value:<13} | "
-              f"levels={len(ctx.levels):>3} | sweeps={len(ctx.sweeps)}")
-
-    print("[3/7] Merging liquidity levels into the cross-timeframe ledger...")
-    ledger = build_level_ledger(layers, tolerance_pct=0.05)
-    print(f"      -> {len(ledger)} canonical liquidity zones "
-          f"(top confluence: {ledger[0].confluence_score:.2f} across {ledger[0].timeframes})"
-          if ledger else "      -> no liquidity zones found")
-
-    print("[4/7] Scoring liquidity-engineering / session bias...")
-    bias = compute_liquidity_engineering_bias(layers)
-    print(f"      -> {bias.label} (score {bias.score:+.2f})")
-
     sentiment = sentiment_override if sentiment_override is not None else sentiment_provider()
-    print(f"[5/7] Sentiment input: {sentiment:+.2f} "
+    print(f"[2/5] Sentiment input: {sentiment:+.2f} "
           f"({'override' if sentiment_override is not None else 'provider'})")
 
-    print("[6/7] Building gap buckets and generating pathway scenarios...")
-    atr = compute_atr_daily(layers)
-    gap_points = build_gap_buckets(atr, custom_gap_points)
-    gap_buckets = score_gap_probabilities(gap_points, bias, sentiment, atr)
-    prior_close = layers[list(layers.keys())[-1]].candles[-1].c if "1D" not in layers \
-        else layers["1D"].candles[-1].c
+    flow = _resolve_flow(mode, symbol, exchange, use_flow, flow_json)
+    print(f"[3/5] Flow input [{flow.source}]: score {flow.score:+.2f} — {flow.notes}")
 
-    scenarios: Dict[float, List[Pathway]] = {}
-    for i, gap in enumerate(gap_buckets):
-        candidates = generate_candidates(gap, ledger, layers, bias, prior_close,
-                                          n_per_template=2, top_k=top_k, seed=seed + i)
-        scenarios[gap.points] = candidates
-        print(f"      gap {gap.points:+.0f} (p={gap.probability:.2f}): "
-              f"{len(candidates)} pathway(s) kept")
+    journal_path = journal_path or os.path.join(out_dir, "journal.jsonl")
+    priors = load_template_priors(journal_path)
+    if priors:
+        ranked = sorted(priors.items(), key=lambda kv: kv[1], reverse=True)
+        print(f"[4/5] Learned template priors from {journal_path} "
+              f"({len(load_journal(journal_path))} journaled sessions): "
+              + ", ".join(f"{n}={w:.2f}" for n, w in ranked))
+    else:
+        print(f"[4/5] No journal history at {journal_path} — all template priors neutral "
+              f"(run --replay-days N to build the learning loop's history).")
 
-    print("[7/7] Rendering + writing report...")
+    print("[5/5] Analyzing + generating scenarios...")
+    result = analyze_and_generate(base, as_of, custom_gap_points=custom_gap_points,
+                                    sentiment=sentiment, flow=flow, template_priors=priors,
+                                    top_k=top_k, seed=seed, verbose=True)
+
     os.makedirs(out_dir, exist_ok=True)
     svg_path = os.path.join(out_dir, "pathways.svg")
-    render_pathways_svg(scenarios, ledger, prior_close, svg_path)
+    render_pathways_svg(result.scenarios, result.ledger, result.prior_close, svg_path)
     png_path = os.path.join(out_dir, "pathways.png")
-    rendered_png = try_render_matplotlib(scenarios, ledger, prior_close, png_path)
+    rendered_png = try_render_matplotlib(result.scenarios, result.ledger,
+                                          result.prior_close, png_path)
 
-    context_map = build_context_map(layers, ledger, bias, gap_buckets, scenarios, prior_close)
+    context_map = build_context_map(result.layers, result.ledger, result.bias,
+                                     result.gap_buckets, result.scenarios, result.prior_close)
+    context_map["flow"] = {"source": result.flow.source, "score": result.flow.score,
+                            "pcr": result.flow.pcr,
+                            "depth_imbalance": result.flow.depth_imbalance,
+                            "notes": result.flow.notes}
+    context_map["template_priors"] = priors
     json_path = os.path.join(out_dir, "context_map.json")
     with open(json_path, "w") as f:
         json.dump(context_map, f, indent=2, default=str)
@@ -1689,6 +2229,192 @@ def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
     print(f"\nDone. Wrote:\n  {svg_path}" + (f"\n  {png_path}" if rendered_png else "") +
           f"\n  {json_path}")
     return context_map
+
+
+def replay_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
+                replay_days: int, csv_path: Optional[str] = None, exchange: str = "NSE",
+                instrument_token: Optional[int] = None, seed: int = 7,
+                custom_gap_points: Optional[List[float]] = None, top_k: int = 3,
+                out_dir: str = "market_pathway_output",
+                journal_path: Optional[str] = None) -> List[dict]:
+    """THE LEARNING LOOP. For each of the last `replay_days` completed
+    sessions: rewind to the prior day's close, generate scenarios exactly
+    as run() would have that evening (same code path, priors as they stood
+    from earlier replayed days), then score every generated pathway
+    against the session that actually printed. Each day appends a journal
+    entry recording (a) actual vs predicted gap bucket, (b) every
+    template's best match score, (c) the winning pathway. The journal then
+    feeds load_template_priors() for all future runs — including later
+    iterations of this same loop, so priors compound day over day in
+    strict chronological order (no lookahead: day N's generation only ever
+    sees journal entries from days < N)."""
+    provider = _make_provider(mode, symbol, exchange, instrument_token, csv_path, seed)
+    journal_path = journal_path or os.path.join(out_dir, "journal.jsonl")
+
+    print(f"[replay] Fetching base data (mode={mode}, lookback={lookback_days}d)...")
+    base = provider.fetch_base(as_of, lookback_days)
+    if not base:
+        raise RuntimeError("No candles returned.")
+    daily = resample(base, "1D", 1440, "calendar_day")
+    # completed sessions only, oldest -> newest, most recent `replay_days`
+    days = [c.t for c in daily][-(replay_days + 1):]
+    if len(days) < 2:
+        raise RuntimeError(f"Need at least 2 daily candles to replay; got {len(days)}.")
+
+    entries = []
+    for di in range(1, len(days)):
+        day = days[di]
+        prev_day = days[di - 1]
+        _, prev_close_t = _session_bounds(prev_day)
+        day_open_t, day_close_t = _session_bounds(day)
+
+        base_before = [c for c in base if c.t <= prev_close_t]
+        day_candles = [c for c in base if day_open_t <= c.t <= day_close_t]
+        if len(base_before) < 500 or len(day_candles) < 30:
+            print(f"[replay] {day.date()}: skipped (insufficient data)")
+            continue
+
+        priors = load_template_priors(journal_path)
+        result = analyze_and_generate(base_before, prev_close_t,
+                                        custom_gap_points=custom_gap_points,
+                                        sentiment=0.0, template_priors=priors,
+                                        top_k=top_k, seed=seed + di, verbose=False)
+
+        actual = actual_day_path(day_candles)
+        actual_open = day_candles[0].o
+        actual_gap = actual_open - result.prior_close
+        # bucket whose gap size is closest to what actually printed
+        nearest_gap = min(result.scenarios.keys(), key=lambda p: abs(p - actual_gap))
+        predicted_top = result.gap_buckets[0].points if result.gap_buckets else 0.0
+        gap_direction_hit = (actual_gap >= 0) == (predicted_top >= 0)
+
+        match_by_template: Dict[str, float] = {}
+        best: Optional[Tuple[str, float]] = None
+        for pw in result.scenarios.get(nearest_gap, []):
+            s = score_curve_match(pw, actual, result.atr)
+            prev_best = match_by_template.get(pw.template_name, 0.0)
+            match_by_template[pw.template_name] = max(prev_best, s)
+            if best is None or s > best[1]:
+                best = (pw.template_name, s)
+
+        entry = {
+            "date": str(day.date()), "symbol": symbol,
+            "prior_close": round(result.prior_close, 2),
+            "actual_open": round(actual_open, 2),
+            "actual_gap": round(actual_gap, 2),
+            "nearest_gap_bucket": nearest_gap,
+            "predicted_top_bucket": predicted_top,
+            "gap_direction_hit": gap_direction_hit,
+            "session_bias_score": result.bias.score,
+            "match_by_template": match_by_template,
+            "best_template": best[0] if best else None,
+            "best_match_score": best[1] if best else None,
+        }
+        journal_append(journal_path, entry)
+        entries.append(entry)
+        print(f"[replay] {day.date()}: gap {actual_gap:+.0f} (nearest bucket {nearest_gap:+.0f}, "
+              f"direction {'HIT' if gap_direction_hit else 'MISS'}) | best template: "
+              f"{best[0] if best else '-'} (match {best[1] if best else 0:.3f})")
+
+    if entries:
+        hits = sum(1 for e in entries if e["gap_direction_hit"])
+        print(f"\n[replay] {len(entries)} sessions journaled -> {journal_path}")
+        print(f"[replay] gap DIRECTION hit rate: {hits}/{len(entries)} "
+              f"({hits / len(entries) * 100:.0f}%) — heuristic, small sample, treat accordingly")
+        priors = load_template_priors(journal_path)
+        for name, w in sorted(priors.items(), key=lambda kv: kv[1], reverse=True):
+            print(f"[replay]   learned prior: {name:<24} {w:.3f}")
+    return entries
+
+
+def track_run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
+               csv_path: Optional[str] = None, exchange: str = "NSE",
+               instrument_token: Optional[int] = None, seed: int = 7,
+               custom_gap_points: Optional[List[float]] = None, top_k: int = 3,
+               out_dir: str = "market_pathway_output",
+               journal_path: Optional[str] = None,
+               use_flow: bool = False, flow_json: Optional[str] = None,
+               sentiment_override: Optional[float] = None) -> dict:
+    """LIVE TRACKER. `as_of` is a moment INSIDE the current session. The
+    engine rewinds to yesterday's close, generates this morning's scenarios
+    (same code path as run(), so what you track is what you would have been
+    handed pre-open), then scores each pathway against the tape that has
+    actually printed so far — over the elapsed part of the session only —
+    and tells you which projection the day is currently tracing. Re-run it
+    whenever you want an updated read; in live mode each invocation
+    re-fetches up-to-the-minute candles from Kite."""
+    provider = _make_provider(mode, symbol, exchange, instrument_token, csv_path, seed)
+    print(f"[track] Fetching base data through {as_of} (mode={mode})...")
+    base = provider.fetch_base(as_of, lookback_days)
+    if not base:
+        raise RuntimeError("No candles returned.")
+
+    day_open_t, day_close_t = _session_bounds(as_of)
+    today = [c for c in base if day_open_t <= c.t <= min(as_of, day_close_t)]
+    if len(today) < 5:
+        raise RuntimeError(f"Only {len(today)} candles printed today by {as_of} — nothing to track yet.")
+    daily = resample(base, "1D", 1440, "calendar_day")
+    prev_days = [c.t for c in daily if c.t.date() < as_of.date()]
+    if not prev_days:
+        raise RuntimeError("No prior session in the data to anchor scenarios on.")
+    _, prev_close_t = _session_bounds(prev_days[-1])
+    base_before = [c for c in base if c.t <= prev_close_t]
+
+    sentiment = sentiment_override if sentiment_override is not None else 0.0
+    flow = _resolve_flow(mode, symbol, exchange, use_flow, flow_json)
+    priors = load_template_priors(journal_path or os.path.join(out_dir, "journal.jsonl"))
+
+    print("[track] Generating this morning's scenarios (data through yesterday's close)...")
+    result = analyze_and_generate(base_before, prev_close_t,
+                                    custom_gap_points=custom_gap_points,
+                                    sentiment=sentiment, flow=flow,
+                                    template_priors=priors, top_k=top_k,
+                                    seed=seed, verbose=False)
+
+    actual = actual_day_path(today)
+    elapsed_frac = actual[-1][0] if actual else 0.0
+    actual_open = today[0].o
+    actual_gap = actual_open - result.prior_close
+    nearest_gap = min(result.scenarios.keys(), key=lambda p: abs(p - actual_gap))
+
+    print(f"[track] Session {as_of.date()} | open {actual_open:.2f} = gap {actual_gap:+.1f} "
+          f"vs prior close {result.prior_close:.2f} (nearest bucket {nearest_gap:+.0f})")
+    print(f"[track] Elapsed: {session_clock(0)} -> {session_clock(elapsed_frac)} "
+          f"({elapsed_frac * 100:.0f}% of session)\n")
+
+    ranked = []
+    for gap_pts, pathways in result.scenarios.items():
+        for pw in pathways:
+            s = score_curve_match(pw, actual, result.atr, upto_frac=max(0.05, elapsed_frac))
+            ranked.append((s, gap_pts, pw))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    print(f"{'match':>6}  {'gap':>5}  {'template':<24} narrative-so-far")
+    for s, gap_pts, pw in ranked[:8]:
+        marker = " <-- tracking" if (s, gap_pts) == (ranked[0][0], ranked[0][1]) else ""
+        print(f"{s:>6.3f}  {gap_pts:+5.0f}  {pw.template_name:<24} "
+              f"plausibility {pw.plausibility_score:.2f}{marker}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    svg_path = os.path.join(out_dir, "track.svg")
+    # draw only the actual-gap bucket's pathways so the overlay is readable
+    render_pathways_svg({nearest_gap: result.scenarios[nearest_gap]}, result.ledger,
+                         result.prior_close, svg_path, actual_path=actual,
+                         title_suffix=f"LIVE TRACK {as_of.date()} @ {session_clock(elapsed_frac)}")
+    report = {
+        "as_of": as_of.isoformat(), "elapsed_frac": round(elapsed_frac, 3),
+        "actual_gap": round(actual_gap, 2), "nearest_gap_bucket": nearest_gap,
+        "ranking": [
+            {"match": s, "gap_bucket": gp, "template": pw.template_name,
+             "plausibility": round(pw.plausibility_score, 3), "narrative": pw.narrative}
+            for s, gp, pw in ranked[:8]
+        ],
+    }
+    json_path = os.path.join(out_dir, "track_report.json")
+    with open(json_path, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+    print(f"\n[track] Wrote:\n  {svg_path}\n  {json_path}")
+    return report
 
 
 # =========================================================================
@@ -1828,6 +2554,23 @@ def main():
                      help="Manual sentiment override in [-1,1]; default uses the neutral stub provider")
     ap.add_argument("--top-k", type=int, default=3, help="Pathways kept per gap bucket")
     ap.add_argument("--out-dir", default="market_pathway_output")
+    ap.add_argument("--replay-days", type=int, default=None,
+                     help="LEARNING LOOP: replay the last N completed sessions — generate each "
+                          "day's scenarios from only pre-open data, score them against what "
+                          "actually printed, and journal per-template match scores. The journal "
+                          "then tilts template ranking in all future runs.")
+    ap.add_argument("--track", action="store_true",
+                     help="LIVE TRACKER: treat --as-of as a moment inside today's session; "
+                          "generate this morning's scenarios from yesterday's close and rank "
+                          "which pathway the tape printed so far is actually tracing.")
+    ap.add_argument("--journal", dest="journal_path", default=None,
+                     help="Path to the replay journal (default: <out-dir>/journal.jsonl)")
+    ap.add_argument("--flow", action="store_true",
+                     help="Live mode only: pull options OI (put-call ratio) + futures depth "
+                          "from Kite and feed the flow score into gap probabilities.")
+    ap.add_argument("--flow-json", default=None,
+                     help='Manually inject flow data for any mode, e.g. '
+                          '\'{"pcr": 1.32, "depth_imbalance": 0.15}\'')
     ap.add_argument("--login", action="store_true",
                      help="Run the daily Kite Connect OAuth flow: prints the login URL, "
                           "exchanges your request_token for today's access_token, and exits.")
@@ -1846,11 +2589,33 @@ def main():
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=IST)
 
+    if args.replay_days:
+        replay_run(
+            symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
+            replay_days=args.replay_days, csv_path=args.csv_path, exchange=args.exchange,
+            instrument_token=args.instrument_token, seed=args.seed,
+            custom_gap_points=args.gap_points, top_k=args.top_k, out_dir=args.out_dir,
+            journal_path=args.journal_path,
+        )
+        return
+
+    if args.track:
+        track_run(
+            symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
+            csv_path=args.csv_path, exchange=args.exchange,
+            instrument_token=args.instrument_token, seed=args.seed,
+            custom_gap_points=args.gap_points, top_k=args.top_k, out_dir=args.out_dir,
+            journal_path=args.journal_path, use_flow=args.flow, flow_json=args.flow_json,
+            sentiment_override=args.sentiment,
+        )
+        return
+
     run(
         symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
         csv_path=args.csv_path, exchange=args.exchange, instrument_token=args.instrument_token,
         seed=args.seed, custom_gap_points=args.gap_points, sentiment_override=args.sentiment,
-        top_k=args.top_k, out_dir=args.out_dir,
+        top_k=args.top_k, out_dir=args.out_dir, use_flow=args.flow, flow_json=args.flow_json,
+        journal_path=args.journal_path,
     )
 
 
