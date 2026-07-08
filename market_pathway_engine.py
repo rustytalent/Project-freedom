@@ -1,0 +1,1735 @@
+#!/usr/bin/env python3
+"""
+market_pathway_engine.py
+=========================================================================
+A standalone, dependency-free, multi-timeframe market-structure and
+pathway-projection engine.
+
+WHAT THIS IS
+------------
+This file is a self-contained research tool. It does not predict candles.
+It builds a layered *context* of how price is structured across several
+timeframes (1min, 5min, 15min, 1h, 4h, 1D — configurable), reconciles that
+context into a single set of price levels that every timeframe agrees on,
+scores how "engineered" the most recent session's liquidity was (i.e.
+whether smart money likely swept stops and accumulated/distributed
+inventory), and from that produces a small set of *plausible pathways* —
+labeled sequences of structural "legs" (expansion, retracement, liquidity
+sweep, consolidation, distribution, reversal) rendered as smooth curves —
+for a chosen set of gap-up / gap-down scenarios. A human then looks at the
+handful of rendered pathways and decides which one the market is tracing.
+
+This is deliberately NOT a black box. Every number the engine produces
+(a swing, a liquidity level, a sweep, a bias score, a pathway) is backed
+by an explicit, inspectable rule, and every pathway ships with a written
+narrative of *why* it was generated. Read `build_context_map()` and
+`Pathway.narrative` if you want the "why", not just the "what".
+
+WHY THIS FILE IS STANDALONE
+----------------------------
+The repository already has a substantial research package for liquidity-
+pool detection (`liquidity_backtester/`). This module intentionally does
+NOT import anything from it, and nothing in the repository imports this
+module. It has one dependency policy: the Python 3.9+ standard library,
+full stop. numpy/pandas/matplotlib are NOT required — swing detection,
+ATR, percentiles, spline smoothing and SVG rendering are all implemented
+by hand below. `kiteconnect` (Zerodha Kite Connect) is used ONLY if you
+choose --mode live, and it is imported lazily so its absence never breaks
+--mode synthetic or --mode csv.
+
+You can run this file today, with no setup, no API keys, no network:
+
+    python3 market_pathway_engine.py --demo
+
+That runs the full pipeline against an internally-generated synthetic
+dataset (a random walk seeded with realistic liquidity-sweep and
+trend/consolidation regimes) and writes an SVG chart + JSON context map to
+./market_pathway_output/.
+
+To run it against real data via your Zerodha Kite Connect subscription:
+
+    export KITE_API_KEY=...
+    export KITE_ACCESS_TOKEN=...      # see the Kite login/OAuth flow docs
+    python3 market_pathway_engine.py --mode live --symbol NIFTY 50 \
+        --exchange NSE --instrument-token 256265 --lookback-days 60
+
+(`--instrument-token` skips the instrument-master lookup; pass it if you
+already know it. Without it the engine will call kite.instruments() once
+and cache the resolved token to disk next to this file.)
+
+THE CORE IDEA, IN ONE PARAGRAPH
+--------------------------------
+Every timeframe layer (1m..1D) gets: swing highs/lows, a market-structure
+read (bullish / bearish / ranging, with the BOS/CHoCH that produced it),
+an external range with a premium/discount read of where price currently
+sits inside it, a set of liquidity levels (equal highs/lows, previous
+day/week/month extremes, session extremes), a volatility-state read
+(consolidating / expanding / distributing), and — critically — a pointer
+to its immediate parent timeframe's range so you can see whether the 5m
+structure is "a discount pullback inside a 1h premium leg inside a 4h
+uptrend" or similar. All of those per-layer liquidity levels are then
+merged, across every timeframe, into a single `LiquidityZone` ledger using
+price-tolerance clustering — the same zone gets a higher confluence score
+the more independent timeframes point at it. Pathways are only allowed to
+target zones from that shared ledger (or an explicitly-labeled unconfluenced
+Fibonacci projection), which is what guarantees that a pathway's "price
+reached X" reads the same way on the 5m chart as it does on the 4h chart —
+by construction, not by hope.
+
+DISCLAIMER
+----------
+This is a decision-support / research-visualization tool. It does not
+place trades, does not call any broker's order-entry endpoints, and the
+gap/pathway probabilities it prints are transparent heuristics over the
+detected structure — not a fitted statistical model and not investment
+advice. The sentiment/news input is a manual pluggable hook
+(`sentiment_provider`), not a live news feed, unless you wire one in.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import random
+import statistics
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# =========================================================================
+# 1. TIMEFRAME CONFIG
+# =========================================================================
+
+# Ordered fine -> coarse. Each entry: (name, minutes, kind)
+# kind "intraday" = bucketed against the session anchor time within a day.
+# kind "calendar" = bucketed against calendar day/week/month boundaries.
+TIMEFRAME_SPECS: List[Tuple[str, int, str]] = [
+    ("1min", 1, "intraday"),
+    ("5min", 5, "intraday"),
+    ("15min", 15, "intraday"),
+    ("1h", 60, "intraday"),
+    ("4h", 240, "intraday"),
+    ("1D", 1440, "calendar_day"),
+]
+
+SESSION_OPEN = (9, 15)   # NSE cash session open, IST
+SESSION_CLOSE = (15, 30)  # NSE cash session close, IST
+
+
+# =========================================================================
+# 2. DATA MODEL
+# =========================================================================
+
+@dataclass
+class Candle:
+    t: datetime
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {"t": self.t.isoformat(), "o": self.o, "h": self.h,
+                "l": self.l, "c": self.c, "v": self.v}
+
+
+class CandleSeries:
+    """Thin wrapper over a chronologically-sorted list of Candles with the
+    handful of numeric helpers the rest of the engine needs. Pure stdlib —
+    no numpy. Everything here is O(n) and written for clarity over speed;
+    a few thousand candles per layer is the expected scale, not millions.
+    """
+
+    def __init__(self, candles: List[Candle]):
+        self.candles = sorted(candles, key=lambda c: c.t)
+
+    def __len__(self) -> int:
+        return len(self.candles)
+
+    def __getitem__(self, i) -> Candle:
+        return self.candles[i]
+
+    def __iter__(self):
+        return iter(self.candles)
+
+    def highs(self) -> List[float]:
+        return [c.h for c in self.candles]
+
+    def lows(self) -> List[float]:
+        return [c.l for c in self.candles]
+
+    def closes(self) -> List[float]:
+        return [c.c for c in self.candles]
+
+    def slice(self, start: Optional[datetime] = None,
+              end: Optional[datetime] = None) -> "CandleSeries":
+        out = [c for c in self.candles
+               if (start is None or c.t >= start) and (end is None or c.t <= end)]
+        return CandleSeries(out)
+
+    def last_n(self, n: int) -> "CandleSeries":
+        return CandleSeries(self.candles[-n:])
+
+    def true_ranges(self) -> List[float]:
+        trs = []
+        prev_close = None
+        for c in self.candles:
+            if prev_close is None:
+                trs.append(c.h - c.l)
+            else:
+                trs.append(max(c.h - c.l, abs(c.h - prev_close), abs(c.l - prev_close)))
+            prev_close = c.c
+        return trs
+
+    def atr(self, n: int = 14) -> float:
+        trs = self.true_ranges()
+        if not trs:
+            return 0.0
+        window = trs[-n:] if len(trs) >= n else trs
+        return sum(window) / len(window)
+
+    def range_high_low(self) -> Tuple[float, float]:
+        return max(self.highs()), min(self.lows())
+
+
+def percentile(values: List[float], pct: float) -> float:
+    """Linear-interpolation percentile, pure stdlib (no numpy)."""
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    if len(xs) == 1:
+        return xs[0]
+    k = (len(xs) - 1) * (pct / 100.0)
+    f, c = math.floor(k), math.ceil(k)
+    if f == c:
+        return xs[int(k)]
+    return xs[f] + (xs[c] - xs[f]) * (k - f)
+
+
+# =========================================================================
+# 3. DATA PROVIDERS
+# =========================================================================
+
+class DataProvider:
+    """Interface: fetch_base() must return 1-minute Candles, chronological,
+    spanning `lookback_days` trading days up to `as_of`."""
+
+    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
+        raise NotImplementedError
+
+
+class SyntheticProvider(DataProvider):
+    """Generates a 1-minute OHLCV series with the ingredients this engine is
+    built to detect: daily trend/range regimes, injected liquidity sweeps
+    (a wick punches through the prior day's high/low or an equal-high/low
+    cluster, then price snaps back), and volatility regimes that alternate
+    between consolidation and expansion. Fully deterministic given a seed,
+    so --demo runs are reproducible. This exists so the whole pipeline is
+    runnable and testable with zero credentials and zero network access.
+    """
+
+    def __init__(self, seed: int = 7, start_price: float = 22500.0):
+        self.rng = random.Random(seed)
+        self.start_price = start_price
+
+    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
+        candles: List[Candle] = []
+        price = self.start_price
+        day = _prior_trading_day(as_of, lookback_days)
+        prev_day_high = None
+        prev_day_low = None
+
+        while day.date() <= as_of.date():
+            if day.weekday() >= 5:  # skip weekends
+                day = day + timedelta(days=1)
+                continue
+
+            session_open = day.replace(hour=SESSION_OPEN[0], minute=SESSION_OPEN[1],
+                                        second=0, microsecond=0)
+            session_close = day.replace(hour=SESSION_CLOSE[0], minute=SESSION_CLOSE[1],
+                                         second=0, microsecond=0)
+            n_bars = int((session_close - session_open).total_seconds() // 60)
+
+            regime = self.rng.choice(["trend_up", "trend_down", "range", "trend_up", "trend_down"])
+            drift = {"trend_up": 0.9, "trend_down": -0.9, "range": 0.0}[regime]
+            vol = self.rng.uniform(2.0, 6.0)
+
+            # decide, ahead of time, whether today engineers a liquidity sweep
+            # of yesterday's extreme before reversing - the signature this
+            # engine's sweep/bias detectors are meant to pick up.
+            sweep_plan = None
+            if prev_day_high is not None and self.rng.random() < 0.35:
+                side = self.rng.choice(["high", "low"])
+                sweep_bar = self.rng.randint(int(n_bars * 0.1), int(n_bars * 0.4))
+                sweep_plan = (side, sweep_bar)
+
+            day_open = price
+            day_high = day_open
+            day_low = day_open
+            t = session_open
+            for i in range(n_bars):
+                o = price
+                step = self.rng.gauss(drift * 0.05, vol * 0.15)
+
+                if sweep_plan and i == sweep_plan[1]:
+                    side, _ = sweep_plan
+                    target = prev_day_high if side == "high" else prev_day_low
+                    if target is not None:
+                        # punch through the level then start reverting
+                        overshoot = vol * self.rng.uniform(1.5, 3.5)
+                        price = target + overshoot if side == "high" else target - overshoot
+                        drift = -drift if drift != 0 else (0.9 if side == "low" else -0.9)
+
+                price = max(1.0, price + step)
+                h = price + abs(self.rng.gauss(0, vol * 0.4))
+                l = price - abs(self.rng.gauss(0, vol * 0.4))
+                c = price
+                v = max(0, self.rng.gauss(1500, 400))
+                candles.append(Candle(t, o, max(h, o, c), min(l, o, c), c, v))
+                day_high = max(day_high, h)
+                day_low = min(day_low, l)
+                t = t + timedelta(minutes=1)
+
+            prev_day_high, prev_day_low = day_high, day_low
+            day = day + timedelta(days=1)
+
+        return candles
+
+
+class CSVProvider(DataProvider):
+    """Reads a local CSV with header: date,open,high,low,close,volume (any
+    ISO-parsable date/datetime string). Use this to feed in an export from
+    Kite, TradingView, or anywhere else, without wiring up live auth."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
+        candles = []
+        with open(self.path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                t = datetime.fromisoformat(row["date"]).replace(tzinfo=IST) \
+                    if datetime.fromisoformat(row["date"]).tzinfo is None \
+                    else datetime.fromisoformat(row["date"])
+                candles.append(Candle(
+                    t, float(row["open"]), float(row["high"]),
+                    float(row["low"]), float(row["close"]),
+                    float(row.get("volume", 0) or 0),
+                ))
+        cutoff = as_of - timedelta(days=int(lookback_days * 1.6) + 5)
+        return [c for c in candles if cutoff <= c.t <= as_of]
+
+
+class ZerodhaProvider(DataProvider):
+    """Live data via Zerodha Kite Connect. `kiteconnect` is imported lazily
+    so its absence never breaks --mode synthetic/csv. Auth follows the same
+    env-var convention as the rest of this repo's Kite tooling:
+        KITE_API_KEY, KITE_ACCESS_TOKEN
+    (access_token expires daily; regenerate it via Kite's OAuth flow before
+    running this in live mode.)
+    """
+
+    TOKEN_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                ".market_pathway_instrument_cache.json")
+
+    def __init__(self, symbol: str, exchange: str = "NSE",
+                 instrument_token: Optional[int] = None,
+                 api_key: Optional[str] = None, access_token: Optional[str] = None):
+        self.symbol = symbol
+        self.exchange = exchange
+        self.instrument_token = instrument_token
+        self.api_key = api_key or os.environ.get("KITE_API_KEY")
+        self.access_token = access_token or os.environ.get("KITE_ACCESS_TOKEN")
+
+    def _kite(self):
+        try:
+            from kiteconnect import KiteConnect
+        except ImportError as e:
+            raise ImportError(
+                "Live mode needs the `kiteconnect` package: pip install kiteconnect"
+            ) from e
+        if not self.api_key or not self.access_token:
+            raise RuntimeError(
+                "Live mode needs KITE_API_KEY and KITE_ACCESS_TOKEN (env vars or "
+                "constructor args). Generate an access_token via Kite's daily OAuth "
+                "flow before running this."
+            )
+        kite = KiteConnect(api_key=self.api_key)
+        kite.set_access_token(self.access_token)
+        return kite
+
+    def _resolve_token(self, kite) -> int:
+        if self.instrument_token:
+            return self.instrument_token
+        cache = {}
+        if os.path.exists(self.TOKEN_CACHE):
+            try:
+                with open(self.TOKEN_CACHE) as f:
+                    cache = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                cache = {}
+        key = f"{self.exchange}:{self.symbol}"
+        if key in cache:
+            return cache[key]
+        for inst in kite.instruments(self.exchange):
+            if inst.get("tradingsymbol") == self.symbol:
+                cache[key] = inst["instrument_token"]
+                try:
+                    with open(self.TOKEN_CACHE, "w") as f:
+                        json.dump(cache, f)
+                except OSError:
+                    pass
+                return inst["instrument_token"]
+        raise ValueError(f"Could not resolve instrument_token for {key}. "
+                          f"Pass --instrument-token explicitly.")
+
+    def fetch_base(self, as_of: datetime, lookback_days: int) -> List[Candle]:
+        kite = self._kite()
+        token = self._resolve_token(kite)
+        start = _prior_trading_day(as_of, lookback_days)
+        # Kite's minute-candle history endpoint caps at ~60 days per call;
+        # chunk requests defensively.
+        candles: List[Candle] = []
+        chunk_start = start
+        while chunk_start < as_of:
+            chunk_end = min(chunk_start + timedelta(days=55), as_of)
+            rows = kite.historical_data(token, chunk_start, chunk_end, "minute")
+            for r in rows:
+                candles.append(Candle(r["date"], r["open"], r["high"], r["low"],
+                                       r["close"], r.get("volume", 0)))
+            chunk_start = chunk_end + timedelta(minutes=1)
+        return candles
+
+
+def _prior_trading_day(as_of: datetime, lookback_days: int) -> datetime:
+    d = as_of - timedelta(days=int(lookback_days * 1.6) + 5)  # pad for weekends
+    return d.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+# =========================================================================
+# 4. RESAMPLING (1-minute base -> every configured timeframe)
+# =========================================================================
+
+def _intraday_bucket(t: datetime, tf_minutes: int) -> datetime:
+    """Bucket a timestamp to a timeframe boundary anchored at session open
+    (09:15 IST), not clock-hour boundaries — a 5-minute NSE candle starts
+    at 09:15, 09:20, ... not 09:00, 09:05."""
+    anchor = t.replace(hour=SESSION_OPEN[0], minute=SESSION_OPEN[1], second=0, microsecond=0)
+    delta_min = int((t - anchor).total_seconds() // 60)
+    bucket_min = (delta_min // tf_minutes) * tf_minutes
+    return anchor + timedelta(minutes=bucket_min)
+
+
+def _calendar_day_bucket(t: datetime) -> datetime:
+    return t.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def resample(base: List[Candle], tf_name: str, tf_minutes: int, kind: str) -> List[Candle]:
+    if tf_minutes == 1:
+        return sorted(base, key=lambda c: c.t)
+
+    buckets: Dict[datetime, List[Candle]] = {}
+    for c in sorted(base, key=lambda c: c.t):
+        if kind == "intraday":
+            key = _intraday_bucket(c.t, tf_minutes)
+        else:  # calendar_day
+            key = _calendar_day_bucket(c.t)
+        buckets.setdefault(key, []).append(c)
+
+    out = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        out.append(Candle(
+            t=key,
+            o=group[0].o,
+            h=max(g.h for g in group),
+            l=min(g.l for g in group),
+            c=group[-1].c,
+            v=sum(g.v for g in group),
+        ))
+    return out
+
+
+def resample_weekly(daily: List[Candle]) -> List[Candle]:
+    buckets: Dict[Tuple[int, int], List[Candle]] = {}
+    for c in daily:
+        iso_year, iso_week, _ = c.t.isocalendar()
+        buckets.setdefault((iso_year, iso_week), []).append(c)
+    out = []
+    for key in sorted(buckets):
+        g = buckets[key]
+        out.append(Candle(g[0].t, g[0].o, max(x.h for x in g), min(x.l for x in g),
+                           g[-1].c, sum(x.v for x in g)))
+    return out
+
+
+def resample_monthly(daily: List[Candle]) -> List[Candle]:
+    buckets: Dict[Tuple[int, int], List[Candle]] = {}
+    for c in daily:
+        buckets.setdefault((c.t.year, c.t.month), []).append(c)
+    out = []
+    for key in sorted(buckets):
+        g = buckets[key]
+        out.append(Candle(g[0].t, g[0].o, max(x.h for x in g), min(x.l for x in g),
+                           g[-1].c, sum(x.v for x in g)))
+    return out
+
+
+# =========================================================================
+# 5. SWING / MARKET-STRUCTURE DETECTION
+# =========================================================================
+
+class SwingKind(Enum):
+    HIGH = "high"
+    LOW = "low"
+
+
+@dataclass
+class Swing:
+    idx: int
+    t: datetime
+    price: float
+    kind: SwingKind
+
+
+def detect_swings(candles: List[Candle], left: int = 2, right: int = 2) -> List[Swing]:
+    """Fractal swing detection: a bar is a swing high if its high is the
+    strict max over `left` bars before and `right` bars after (swing low:
+    symmetric on lows). This is the bedrock structural primitive everything
+    else (BOS/CHoCH, EQH/EQL, ranges) is built from."""
+    swings = []
+    n = len(candles)
+    for i in range(left, n - right):
+        window_h = [candles[j].h for j in range(i - left, i + right + 1)]
+        window_l = [candles[j].l for j in range(i - left, i + right + 1)]
+        if candles[i].h == max(window_h) and window_h.count(candles[i].h) == 1:
+            swings.append(Swing(i, candles[i].t, candles[i].h, SwingKind.HIGH))
+        if candles[i].l == min(window_l) and window_l.count(candles[i].l) == 1:
+            swings.append(Swing(i, candles[i].t, candles[i].l, SwingKind.LOW))
+    return swings
+
+
+class StructureBias(Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    RANGING = "ranging"
+
+
+@dataclass
+class StructureEvent:
+    t: datetime
+    price: float
+    kind: str          # "BOS" (break of structure, trend-confirming) or "CHoCH" (change of character)
+    direction: StructureBias
+
+
+def analyze_market_structure(candles: List[Candle], swings: List[Swing]
+                              ) -> Tuple[StructureBias, List[StructureEvent]]:
+    """Walks the swing sequence and classifies each new swing break as a
+    BOS (break of structure — the prevailing trend takes out the prior
+    same-direction swing, confirming continuation) or a CHoCH (change of
+    character — price breaks the most recent opposite-direction swing,
+    signalling the trend may be flipping). The returned bias is simply
+    "whatever the last event implied"."""
+    events: List[StructureEvent] = []
+    bias = StructureBias.RANGING
+    if len(swings) < 2:
+        return bias, events
+
+    last_high = None
+    last_low = None
+    for sw in swings:
+        if sw.kind == SwingKind.HIGH:
+            if last_high is not None and sw.price > last_high.price:
+                kind = "BOS" if bias == StructureBias.BULLISH else "CHoCH"
+                events.append(StructureEvent(sw.t, sw.price, kind, StructureBias.BULLISH))
+                bias = StructureBias.BULLISH
+            last_high = sw
+        else:
+            if last_low is not None and sw.price < last_low.price:
+                kind = "BOS" if bias == StructureBias.BEARISH else "CHoCH"
+                events.append(StructureEvent(sw.t, sw.price, kind, StructureBias.BEARISH))
+                bias = StructureBias.BEARISH
+            last_low = sw
+
+    return bias, events
+
+
+@dataclass
+class RangeContext:
+    high: float
+    low: float
+    mid: float
+    current_price: float
+    position_pct: float   # 0 = at range low, 100 = at range high
+    state: str             # "premium" (>55), "discount" (<45), "equilibrium"
+
+
+def compute_range_context(candles: List[Candle], lookback: int = 120) -> RangeContext:
+    """The 'external range' this timeframe is currently trading inside:
+    the highest-high / lowest-low over the trailing `lookback` bars. Where
+    current price sits inside that range (premium vs discount, ICT-style,
+    split around the 50% equilibrium) is one of the strongest per-layer
+    context signals — a layer trading in discount of its own range is a
+    very different regime than one trading in premium."""
+    window = candles[-lookback:] if len(candles) >= lookback else candles
+    hi = max(c.h for c in window)
+    lo = min(c.l for c in window)
+    mid = (hi + lo) / 2
+    cur = candles[-1].c
+    pct = 50.0 if hi == lo else (cur - lo) / (hi - lo) * 100.0
+    if pct >= 55:
+        state = "premium"
+    elif pct <= 45:
+        state = "discount"
+    else:
+        state = "equilibrium"
+    return RangeContext(hi, lo, mid, cur, pct, state)
+
+
+# =========================================================================
+# 6. LIQUIDITY LEVELS
+# =========================================================================
+
+class LevelType(Enum):
+    EQH = "equal_highs"
+    EQL = "equal_lows"
+    PDH = "prev_day_high"
+    PDL = "prev_day_low"
+    PWH = "prev_week_high"
+    PWL = "prev_week_low"
+    PMH = "prev_month_high"
+    PML = "prev_month_low"
+    SESSION_HIGH = "session_high"
+    SESSION_LOW = "session_low"
+    SWING_HIGH = "swing_high"
+    SWING_LOW = "swing_low"
+
+
+@dataclass
+class LiquidityLevel:
+    price: float
+    type: LevelType
+    timeframe: str
+    t: datetime
+    strength: float = 1.0   # base weight before cross-TF confluence multiplier
+
+
+# Heavier weight = a heavier stop cluster / more consequential level.
+_LEVEL_BASE_WEIGHT = {
+    LevelType.EQH: 1.3, LevelType.EQL: 1.3,
+    LevelType.PDH: 1.6, LevelType.PDL: 1.6,
+    LevelType.PWH: 2.0, LevelType.PWL: 2.0,
+    LevelType.PMH: 2.4, LevelType.PML: 2.4,
+    LevelType.SESSION_HIGH: 1.0, LevelType.SESSION_LOW: 1.0,
+    LevelType.SWING_HIGH: 0.8, LevelType.SWING_LOW: 0.8,
+}
+
+
+def detect_equal_highs_lows(swings: List[Swing], timeframe: str, tolerance: float
+                             ) -> List[LiquidityLevel]:
+    """Two or more swing highs (or lows) within `tolerance` price-units of
+    each other read as a single, heavier resting-liquidity cluster (EQH /
+    EQL) rather than two separate swings — that's where stops actually
+    stack."""
+    levels = []
+    highs = sorted([s for s in swings if s.kind == SwingKind.HIGH], key=lambda s: s.price)
+    lows = sorted([s for s in swings if s.kind == SwingKind.LOW], key=lambda s: s.price)
+
+    for group, kind, ltype in ((highs, SwingKind.HIGH, LevelType.EQH),
+                                (lows, SwingKind.LOW, LevelType.EQL)):
+        used = [False] * len(group)
+        for i in range(len(group)):
+            if used[i]:
+                continue
+            cluster = [group[i]]
+            for j in range(i + 1, len(group)):
+                if used[j]:
+                    continue
+                if abs(group[j].price - group[i].price) <= tolerance:
+                    cluster.append(group[j])
+                    used[j] = True
+            if len(cluster) >= 2:
+                avg_price = sum(s.price for s in cluster) / len(cluster)
+                latest_t = max(s.t for s in cluster)
+                strength = _LEVEL_BASE_WEIGHT[ltype] * (1 + 0.25 * (len(cluster) - 2))
+                levels.append(LiquidityLevel(avg_price, ltype, timeframe, latest_t, strength))
+    return levels
+
+
+def detect_periodic_extremes(daily: List[Candle], weekly: List[Candle],
+                              monthly: List[Candle], as_of_date, timeframe: str
+                              ) -> List[LiquidityLevel]:
+    """Previous day / week / month high & low — the classic external-
+    liquidity reference points. `as_of_date` marks 'P day'; we want the
+    completed P-1 day/week/month, not the in-progress one."""
+    levels = []
+    prior_days = [c for c in daily if c.t.date() < as_of_date]
+    if prior_days:
+        p = prior_days[-1]
+        levels.append(LiquidityLevel(p.h, LevelType.PDH, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PDH]))
+        levels.append(LiquidityLevel(p.l, LevelType.PDL, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PDL]))
+
+    prior_weeks = [c for c in weekly if c.t.date() < as_of_date]
+    if prior_weeks:
+        p = prior_weeks[-1]
+        levels.append(LiquidityLevel(p.h, LevelType.PWH, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PWH]))
+        levels.append(LiquidityLevel(p.l, LevelType.PWL, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PWL]))
+
+    prior_months = [c for c in monthly if c.t.date() < as_of_date]
+    if prior_months:
+        p = prior_months[-1]
+        levels.append(LiquidityLevel(p.h, LevelType.PMH, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PMH]))
+        levels.append(LiquidityLevel(p.l, LevelType.PML, timeframe, p.t, _LEVEL_BASE_WEIGHT[LevelType.PML]))
+
+    return levels
+
+
+# --- Liquidity sweeps -----------------------------------------------------
+
+class SweepClassification(Enum):
+    GRAB = "predatory_grab"        # swept then reversed hard: liquidity engineered, not a real breakout
+    BREAKOUT = "genuine_breakout"  # swept and follow-through continued: real expansion
+
+
+@dataclass
+class SweepEvent:
+    t: datetime
+    level: LiquidityLevel
+    side: str                # "buy_side" (swept a high) or "sell_side" (swept a low)
+    swept_by: float          # points beyond the level the wick reached
+    reversal_strength: float  # 0..1, how convincingly price reclaimed the level within the window
+    est_volume: float
+    classification: SweepClassification
+
+
+def detect_liquidity_sweeps(candles: List[Candle], levels: List[LiquidityLevel],
+                             reversal_window: int = 6) -> List[SweepEvent]:
+    """A sweep: some candle's wick pierces a known liquidity level, and
+    within `reversal_window` bars price closes back on the origin side of
+    that level. We score `reversal_strength` by how much of the pierce got
+    reclaimed, and classify GRAB (strong reclaim -> liquidity engineered,
+    a probable trap) vs BREAKOUT (weak/no reclaim -> real continuation).
+    `est_volume` is a heuristic proxy for "how much liquidity was taken" —
+    true resting-order size isn't observable from OHLCV, so we approximate
+    it as the traded volume on the piercing bar, which at least tracks
+    participation at the level."""
+    events = []
+    idx_by_time = {c.t: i for i, c in enumerate(candles)}
+    for lvl in levels:
+        is_high = lvl.type in (LevelType.EQH, LevelType.PDH, LevelType.PWH, LevelType.PMH,
+                                LevelType.SESSION_HIGH, LevelType.SWING_HIGH)
+        for i, c in enumerate(candles):
+            if c.t <= lvl.t:
+                continue  # only look for sweeps of a level after it was established
+            pierced = (c.h > lvl.price) if is_high else (c.l < lvl.price)
+            if not pierced:
+                continue
+            swept_by = (c.h - lvl.price) if is_high else (lvl.price - c.l)
+            window = candles[i:i + reversal_window]
+            if not window:
+                continue
+            reclaim_close = window[-1].c
+            reclaimed = (reclaim_close < lvl.price) if is_high else (reclaim_close > lvl.price)
+            if is_high:
+                strength = max(0.0, min(1.0, (c.h - reclaim_close) / swept_by)) if swept_by > 0 else 0.0
+            else:
+                strength = max(0.0, min(1.0, (reclaim_close - c.l) / swept_by)) if swept_by > 0 else 0.0
+            classification = SweepClassification.GRAB if (reclaimed and strength > 0.5) \
+                else SweepClassification.BREAKOUT
+            events.append(SweepEvent(
+                t=c.t, level=lvl, side="buy_side" if is_high else "sell_side",
+                swept_by=swept_by, reversal_strength=strength, est_volume=c.v,
+                classification=classification,
+            ))
+            break  # one sweep per level is enough context; avoid double counting the same pierce
+    return events
+
+
+# --- Volatility / consolidation-vs-expansion state ------------------------
+
+class VolState(Enum):
+    CONSOLIDATION = "consolidation"
+    EXPANSION = "expansion"
+    DISTRIBUTION = "distribution"  # wide range, but closes clustering near one edge (a topping/bottoming signature)
+
+
+def classify_volatility_state(candles: List[Candle], lookback: int = 30) -> VolState:
+    """Range-width, normalized by its own trailing distribution (a
+    percentile-rank, not a fixed threshold, so this adapts per-instrument
+    and per-regime instead of hard-coding a point value). Low percentile ->
+    consolidation (coiling). High percentile with closes bunched at one
+    extreme of the range -> distribution. High percentile with closes
+    spread through the range -> expansion."""
+    if len(candles) < 10:
+        return VolState.CONSOLIDATION
+    window = candles[-lookback:] if len(candles) >= lookback else candles
+    ranges = [c.h - c.l for c in window]
+    current_range = ranges[-1] if ranges else 0.0
+    rank = sum(1 for r in ranges if r <= current_range) / len(ranges) * 100.0
+
+    hi = max(c.h for c in window)
+    lo = min(c.l for c in window)
+    span = hi - lo if hi > lo else 1.0
+    closes_pos = [(c.c - lo) / span for c in window]
+    close_spread = statistics.pstdev(closes_pos) if len(closes_pos) > 1 else 0.5
+
+    if rank <= 40:
+        return VolState.CONSOLIDATION
+    if close_spread < 0.15:
+        return VolState.DISTRIBUTION
+    return VolState.EXPANSION
+
+
+# =========================================================================
+# 7. LAYER CONTEXT (one bundle per timeframe)
+# =========================================================================
+
+@dataclass
+class LayerContext:
+    timeframe: str
+    candles: List[Candle]
+    swings: List[Swing]
+    bias: StructureBias
+    structure_events: List[StructureEvent]
+    range_ctx: RangeContext
+    levels: List[LiquidityLevel]
+    sweeps: List[SweepEvent]
+    vol_state: VolState
+    parent_timeframe: Optional[str] = None
+    parent_relation: Optional[str] = None  # human-readable nesting description
+
+
+def build_layer_context(tf_name: str, candles: List[Candle], daily: List[Candle],
+                         weekly: List[Candle], monthly: List[Candle],
+                         as_of_date, parent: Optional[LayerContext] = None) -> LayerContext:
+    swings = detect_swings(candles, left=2, right=2)
+    bias, events = analyze_market_structure(candles, swings)
+    range_ctx = compute_range_context(candles, lookback=min(120, len(candles)))
+
+    atr = CandleSeries(candles).atr(14)
+    tolerance = max(atr * 0.15, 0.0001)
+
+    levels = detect_equal_highs_lows(swings, tf_name, tolerance)
+    levels += detect_periodic_extremes(daily, weekly, monthly, as_of_date, tf_name)
+    if candles:
+        session_day = candles[-1].t.date()
+        today_candles = [c for c in candles if c.t.date() == session_day]
+        if today_candles:
+            levels.append(LiquidityLevel(max(c.h for c in today_candles), LevelType.SESSION_HIGH,
+                                          tf_name, today_candles[-1].t, _LEVEL_BASE_WEIGHT[LevelType.SESSION_HIGH]))
+            levels.append(LiquidityLevel(min(c.l for c in today_candles), LevelType.SESSION_LOW,
+                                          tf_name, today_candles[-1].t, _LEVEL_BASE_WEIGHT[LevelType.SESSION_LOW]))
+    for sw in swings[-40:]:
+        lt = LevelType.SWING_HIGH if sw.kind == SwingKind.HIGH else LevelType.SWING_LOW
+        levels.append(LiquidityLevel(sw.price, lt, tf_name, sw.t, _LEVEL_BASE_WEIGHT[lt]))
+
+    sweeps = detect_liquidity_sweeps(candles, levels, reversal_window=6)
+    vol_state = classify_volatility_state(candles, lookback=30)
+
+    parent_relation = None
+    if parent is not None:
+        cur_price = candles[-1].c
+        if parent.range_ctx.low <= cur_price <= parent.range_ctx.high:
+            parent_relation = (
+                f"{tf_name} price ({cur_price:.2f}) sits in the {range_ctx.state} of its own "
+                f"range and in the {parent.range_ctx.state} ({parent.range_ctx.position_pct:.0f}%) "
+                f"of the {parent.timeframe} range [{parent.range_ctx.low:.2f}, "
+                f"{parent.range_ctx.high:.2f}], while {parent.timeframe} bias reads "
+                f"{parent.bias.value}."
+            )
+        else:
+            parent_relation = (
+                f"{tf_name} price ({cur_price:.2f}) has traded OUTSIDE the last "
+                f"{parent.timeframe} range [{parent.range_ctx.low:.2f}, {parent.range_ctx.high:.2f}] "
+                f"— the {parent.timeframe} range itself is stale/expanding."
+            )
+
+    return LayerContext(
+        timeframe=tf_name, candles=candles, swings=swings, bias=bias,
+        structure_events=events, range_ctx=range_ctx, levels=levels, sweeps=sweeps,
+        vol_state=vol_state, parent_timeframe=parent.timeframe if parent else None,
+        parent_relation=parent_relation,
+    )
+
+
+def build_all_layers(base_1min: List[Candle], as_of: datetime) -> Dict[str, LayerContext]:
+    """Orchestrates resampling + per-layer analysis, coarse-to-fine parent
+    linking (4h's parent is 1D, 1h's parent is 4h, etc.), so each layer
+    context carries a read on how it nests inside the layer above it."""
+    base_1min = sorted(base_1min, key=lambda c: c.t)
+    daily = resample(base_1min, "1D", 1440, "calendar_day")
+    weekly = resample_weekly(daily)
+    monthly = resample_monthly(daily)
+    as_of_date = as_of.date()
+
+    layers: Dict[str, LayerContext] = {}
+    ordered_names = [name for name, _, _ in TIMEFRAME_SPECS]
+    parent_ctx = None
+    # Build coarse -> fine so each layer can reference its already-built parent.
+    for name, minutes, kind in reversed(TIMEFRAME_SPECS):
+        candles = resample(base_1min, name, minutes, kind)
+        candles = [c for c in candles if c.t <= as_of]
+        if not candles:
+            continue
+        ctx = build_layer_context(name, candles, daily, weekly, monthly, as_of_date, parent=parent_ctx)
+        layers[name] = ctx
+        parent_ctx = ctx
+
+    return {name: layers[name] for name in ordered_names if name in layers}
+
+
+# =========================================================================
+# 8. LEVEL LEDGER — cross-timeframe confluence merge
+# =========================================================================
+
+@dataclass
+class LiquidityZone:
+    price_low: float
+    price_high: float
+    mid: float
+    contributors: List[LiquidityLevel]
+    confluence_score: float
+    timeframes: List[str]
+
+    def touches(self, price: float) -> bool:
+        return self.price_low <= price <= self.price_high
+
+
+def build_level_ledger(layers: Dict[str, LayerContext], tolerance_pct: float = 0.05
+                        ) -> List[LiquidityZone]:
+    """This is the coherence guarantee the whole engine is built around: we
+    take every liquidity level from every timeframe, sort by price, and
+    merge anything within `tolerance_pct`% of price into one canonical
+    zone. A zone's confluence_score rewards agreement from MORE DISTINCT
+    timeframes (not just more levels on one timeframe), so a 5m equal-high
+    that overlaps a 1h swing high and a prior-day high scores far higher
+    than any one of those alone. Because pathway generation (section 10)
+    only ever targets zones from this ledger, a pathway can never claim a
+    price on one timeframe that contradicts another timeframe's read of
+    that same price — the level is the same object everywhere it appears.
+    """
+    all_levels: List[LiquidityLevel] = []
+    for ctx in layers.values():
+        all_levels.extend(ctx.levels)
+    if not all_levels:
+        return []
+
+    ref_price = statistics.median(l.price for l in all_levels)
+    tolerance = max(ref_price * (tolerance_pct / 100.0), 1e-6)
+
+    all_levels.sort(key=lambda l: l.price)
+    zones: List[LiquidityZone] = []
+    cluster: List[LiquidityLevel] = [all_levels[0]]
+
+    def flush(cluster: List[LiquidityLevel]):
+        prices = [l.price for l in cluster]
+        distinct_tfs = set(l.timeframe for l in cluster)
+        base_strength = sum(l.strength for l in cluster)
+        # diminishing returns per extra level on the SAME timeframe, but a
+        # full multiplicative bump for every additional DISTINCT timeframe —
+        # this is what makes multi-timeframe agreement worth more than
+        # repetition on one timeframe.
+        confluence_multiplier = 1.0 + 0.5 * (len(distinct_tfs) - 1)
+        score = base_strength * confluence_multiplier
+        zones.append(LiquidityZone(
+            price_low=min(prices), price_high=max(prices),
+            mid=sum(prices) / len(prices), contributors=list(cluster),
+            confluence_score=round(score, 3), timeframes=sorted(distinct_tfs),
+        ))
+
+    for lvl in all_levels[1:]:
+        # Bound cluster width against its START price, not the last-added
+        # price - comparing against cluster[-1] lets dense levels "chain"
+        # transitively across an unbounded span (classic single-linkage
+        # degeneracy). Bounding against cluster[0] keeps every zone's total
+        # width <= tolerance.
+        if lvl.price - cluster[0].price <= tolerance:
+            cluster.append(lvl)
+        else:
+            flush(cluster)
+            cluster = [lvl]
+    flush(cluster)
+
+    zones.sort(key=lambda z: z.confluence_score, reverse=True)
+    return zones
+
+
+def compute_layer_alignment(price: float, layers: Dict[str, LayerContext]) -> Dict[str, dict]:
+    """For a candidate pathway target price, read out where that price
+    would sit on EVERY layer's own range (premium/discount %) and whether
+    that reading is even reachable (inside that layer's plausible extended
+    range). This is the explicit implementation of the requirement that
+    'if the lower timeframe reaches X, the 4h view of that same X must
+    read coherently too' — every leg target gets checked against every
+    layer before the pathway is accepted."""
+    out = {}
+    for tf, ctx in layers.items():
+        rc = ctx.range_ctx
+        span = rc.high - rc.low
+        extended_lo = rc.low - span * 0.5
+        extended_hi = rc.high + span * 0.5
+        pct = 50.0 if span == 0 else (price - rc.low) / span * 100.0
+        out[tf] = {
+            "position_pct": round(pct, 1),
+            "reachable": extended_lo <= price <= extended_hi,
+            "layer_bias": ctx.bias.value,
+        }
+    return out
+
+
+# =========================================================================
+# 9. LIQUIDITY ENGINEERING / SESSION BIAS
+# =========================================================================
+
+@dataclass
+class SessionBias:
+    score: float           # -1 (strong bearish/distribution bias) .. +1 (strong bullish/accumulation bias)
+    label: str
+    explanation: str
+
+
+def compute_liquidity_engineering_bias(layers: Dict[str, LayerContext]) -> SessionBias:
+    """Reads the most recent session's sweep events across all layers and
+    scores how much of the day's liquidity-taking looks like engineered
+    accumulation/distribution rather than a clean trend day. The intuition
+    this encodes (directly from your brief): if sell-side liquidity was
+    swept hard and then strongly reclaimed (a GRAB), that reads as smart
+    money accumulating into weak hands' stops -> bullish bias for the next
+    session (and vice-versa for buy-side grabs -> bearish/distribution
+    bias). Genuine BREAKOUT sweeps (no reclaim) are treated as trend
+    confirmation, not engineering, and contribute far less to this score.
+    """
+    weighted_bull = 0.0
+    weighted_bear = 0.0
+    notes = []
+
+    for tf, ctx in layers.items():
+        # weight sweeps on coarser timeframes more heavily - a 1D/4h grab
+        # matters more to next-session bias than a 1-minute wick.
+        tf_weight = {"1min": 0.3, "5min": 0.5, "15min": 0.7, "1h": 1.0, "4h": 1.4, "1D": 1.8}.get(tf, 1.0)
+        for sw in ctx.sweeps[-8:]:  # most recent sweeps per layer
+            if sw.classification != SweepClassification.GRAB:
+                continue
+            magnitude = sw.reversal_strength * math.log1p(max(sw.est_volume, 0)) * tf_weight
+            if sw.side == "sell_side":
+                weighted_bull += magnitude
+                notes.append(f"{tf}: sell-side liquidity swept at {sw.level.price:.2f} "
+                             f"({sw.level.type.value}) and reclaimed (strength "
+                             f"{sw.reversal_strength:.2f}) -> bullish engineering signature")
+            else:
+                weighted_bear += magnitude
+                notes.append(f"{tf}: buy-side liquidity swept at {sw.level.price:.2f} "
+                             f"({sw.level.type.value}) and reclaimed (strength "
+                             f"{sw.reversal_strength:.2f}) -> bearish/distribution signature")
+
+    total = weighted_bull + weighted_bear
+    score = 0.0 if total == 0 else (weighted_bull - weighted_bear) / total
+    score = max(-1.0, min(1.0, score))
+
+    if score > 0.25:
+        label = "accumulation (gap-up leaning)"
+    elif score < -0.25:
+        label = "distribution (gap-down leaning)"
+    else:
+        label = "balanced / no clear engineering signature"
+
+    explanation = (
+        f"Weighted bullish engineering: {weighted_bull:.2f}; bearish: {weighted_bear:.2f}. "
+        + (" | ".join(notes[-6:]) if notes else "No qualifying liquidity grabs found in the "
+                                                 "recent window across any layer.")
+    )
+    return SessionBias(round(score, 3), label, explanation)
+
+
+# =========================================================================
+# 10. SENTIMENT HOOK (pluggable — not a live feed)
+# =========================================================================
+
+def default_sentiment_provider() -> float:
+    """Returns 0.0 (neutral) by default. This is an explicit extension
+    point: wire in a real news/sentiment source by passing a callable of
+    the same signature (`() -> float in [-1, 1]`) to `run()`'s
+    `sentiment_provider` argument, or pass --sentiment on the CLI to hard-
+    set a value for one run. We do NOT fabricate a news score here."""
+    return 0.0
+
+
+# =========================================================================
+# 11. GAP BUCKET ENGINE
+# =========================================================================
+
+@dataclass
+class GapBucket:
+    points: float          # signed: +N = gap up, -N = gap down
+    probability: float
+    rationale: str
+
+
+def compute_atr_daily(layers: Dict[str, LayerContext], n: int = 14) -> float:
+    if "1D" in layers:
+        return CandleSeries(layers["1D"].candles).atr(n)
+    # fall back to the coarsest available layer, scaled up crudely
+    coarsest = list(layers.values())[-1]
+    return CandleSeries(coarsest.candles).atr(n)
+
+
+def build_gap_buckets(atr: float, custom_points: Optional[List[float]] = None) -> List[float]:
+    """Default buckets are ATR-derived fractions, rounded to a clean step
+    (25 units) so they read like the round-number gaps traders actually
+    talk about (+50/+100/+200/+250/+300-style). Pass --gap-points to
+    override with your own explicit list (e.g. instrument-specific)."""
+    if custom_points:
+        pts = sorted(set(custom_points) | set(-p for p in custom_points))
+        return [p for p in pts if p != 0]
+
+    fractions = [0.15, 0.35, 0.6, 1.0, 1.5]
+    step = 25.0
+    raw = [round(atr * f / step) * step for f in fractions]
+    raw = sorted(set(p for p in raw if p > 0))
+    return [-p for p in reversed(raw)] + raw
+
+
+def score_gap_probabilities(buckets: List[float], bias: SessionBias, sentiment: float,
+                             atr: float) -> List[GapBucket]:
+    """Heuristic (not statistically fitted) scoring: a bucket's raw score
+    combines (a) alignment between the bucket's direction and the
+    liquidity-engineering bias, (b) alignment with the sentiment input,
+    and (c) a magnitude penalty (bigger gaps are inherently less probable,
+    all else equal). Scores are then softmax-normalized into a probability
+    distribution over the buckets. This is transparent by design — replace
+    `score_gap_probabilities` with a fitted model later without touching
+    anything downstream, since callers only consume `GapBucket.probability`.
+    """
+    raw_scores = []
+    for pts in buckets:
+        direction = 1.0 if pts > 0 else -1.0
+        bias_align = direction * bias.score
+        sentiment_align = direction * sentiment
+        magnitude_penalty = -abs(pts) / (atr * 2.0 + 1e-9)
+        raw = 1.4 * bias_align + 0.8 * sentiment_align + 0.6 * magnitude_penalty
+        raw_scores.append(raw)
+
+    max_raw = max(raw_scores)
+    exp_scores = [math.exp(r - max_raw) for r in raw_scores]
+    total = sum(exp_scores)
+    probs = [e / total for e in exp_scores]
+
+    out = []
+    for pts, p in zip(buckets, probs):
+        direction_word = "gap up" if pts > 0 else "gap down"
+        rationale = (
+            f"{direction_word} of {abs(pts):.0f} pts: bias={bias.label} (score {bias.score:+.2f}), "
+            f"sentiment={sentiment:+.2f}, magnitude={abs(pts)/atr:.2f}x ATR"
+        )
+        out.append(GapBucket(pts, round(p, 4), rationale))
+    out.sort(key=lambda g: g.probability, reverse=True)
+    return out
+
+
+# =========================================================================
+# 12. PATHWAY / SCENARIO GRAMMAR
+# =========================================================================
+
+class LegType(Enum):
+    EXPANSION = "expansion"
+    RETRACEMENT = "retracement"
+    LIQUIDITY_SWEEP = "liquidity_sweep"
+    CONSOLIDATION = "consolidation"
+    DISTRIBUTION = "distribution"
+    REVERSAL = "reversal"
+
+
+# Named narrative templates: each is a sequence of (LegType, direction_sign)
+# where direction_sign is relative to the PRIMARY (gap) direction: +1 = with
+# the gap direction, -1 = against it. These are hand-authored structural
+# narratives grounded in common ICT/SMC session archetypes, not randomly
+# generated, so every pathway tells a coherent story rather than a random
+# walk of labels.
+_TEMPLATES: List[Tuple[str, List[Tuple[LegType, int]]]] = [
+    ("sweep_and_go", [
+        (LegType.LIQUIDITY_SWEEP, -1), (LegType.REVERSAL, +1),
+        (LegType.EXPANSION, +1), (LegType.CONSOLIDATION, 0), (LegType.EXPANSION, +1),
+    ]),
+    ("trend_day", [
+        (LegType.CONSOLIDATION, 0), (LegType.EXPANSION, +1),
+        (LegType.RETRACEMENT, -1), (LegType.EXPANSION, +1), (LegType.CONSOLIDATION, 0),
+    ]),
+    ("fade_and_reverse", [
+        (LegType.EXPANSION, +1), (LegType.LIQUIDITY_SWEEP, +1),
+        (LegType.REVERSAL, -1), (LegType.EXPANSION, -1), (LegType.DISTRIBUTION, -1),
+    ]),
+    ("double_sweep_range", [
+        (LegType.LIQUIDITY_SWEEP, +1), (LegType.REVERSAL, -1),
+        (LegType.LIQUIDITY_SWEEP, -1), (LegType.REVERSAL, +1), (LegType.CONSOLIDATION, 0),
+    ]),
+    ("choppy_consolidation", [
+        (LegType.CONSOLIDATION, 0), (LegType.RETRACEMENT, -1),
+        (LegType.CONSOLIDATION, 0), (LegType.RETRACEMENT, +1), (LegType.CONSOLIDATION, 0),
+    ]),
+    ("distribution_day", [
+        (LegType.EXPANSION, +1), (LegType.CONSOLIDATION, 0),
+        (LegType.DISTRIBUTION, +1), (LegType.REVERSAL, -1), (LegType.EXPANSION, -1),
+    ]),
+    ("clean_expansion", [
+        (LegType.EXPANSION, +1), (LegType.RETRACEMENT, -1),
+        (LegType.EXPANSION, +1), (LegType.RETRACEMENT, -1), (LegType.EXPANSION, +1),
+    ]),
+    ("liquidity_hunt_reversal", [
+        (LegType.EXPANSION, +1), (LegType.LIQUIDITY_SWEEP, +1),
+        (LegType.REVERSAL, -1), (LegType.EXPANSION, -1), (LegType.RETRACEMENT, +1),
+    ]),
+]
+
+
+@dataclass
+class Leg:
+    kind: LegType
+    direction: int          # +1 up, -1 down, 0 flat/ranging
+    start_price: float
+    end_price: float
+    target_zone: Optional[LiquidityZone]
+    layer_alignment: Dict[str, dict]
+    note: str
+
+
+@dataclass
+class Pathway:
+    template_name: str
+    gap: GapBucket
+    legs: List[Leg]
+    points: List[Tuple[float, float]]   # (time_fraction 0..1, price) anchor points
+    plausibility_score: float
+    narrative: str
+
+    def to_dict(self) -> dict:
+        return {
+            "template": self.template_name,
+            "gap_points": self.gap.points,
+            "gap_probability": self.gap.probability,
+            "plausibility_score": round(self.plausibility_score, 3),
+            "narrative": self.narrative,
+            "legs": [
+                {
+                    "kind": leg.kind.value, "direction": leg.direction,
+                    "start_price": round(leg.start_price, 2), "end_price": round(leg.end_price, 2),
+                    "target_confluence": (
+                        {"score": leg.target_zone.confluence_score,
+                         "timeframes": leg.target_zone.timeframes,
+                         "price_range": [round(leg.target_zone.price_low, 2),
+                                         round(leg.target_zone.price_high, 2)]}
+                        if leg.target_zone else "projected (no cross-timeframe confluence)"
+                    ),
+                    "note": leg.note,
+                }
+                for leg in self.legs
+            ],
+        }
+
+
+def _bias_alignment_bonus(direction: int, higher_tf_bias: StructureBias) -> float:
+    if direction == 0:
+        return 0.0
+    if higher_tf_bias == StructureBias.BULLISH:
+        return 0.4 if direction > 0 else -0.3
+    if higher_tf_bias == StructureBias.BEARISH:
+        return 0.4 if direction < 0 else -0.3
+    return 0.0
+
+
+def _pick_leg_target(current_price: float, direction: int, atr: float,
+                      ledger: List[LiquidityZone], min_reach: float, max_reach: float
+                      ) -> Tuple[float, Optional[LiquidityZone], str]:
+    """Chooses the next anchor price for a leg. Prefers a ledger zone in
+    the requested direction within [min_reach, max_reach] of current price
+    (weighted toward higher-confluence zones), and falls back to a
+    Fibonacci-style projection (explicitly labeled unconfluenced) if no
+    zone qualifies."""
+    if direction == 0:
+        wob = atr * 0.15
+        return current_price + random.uniform(-wob, wob), None, "ranging inside current value area"
+
+    candidates = []
+    for z in ledger:
+        dist = (z.mid - current_price) * direction
+        if min_reach <= dist <= max_reach:
+            candidates.append(z)
+    if candidates:
+        candidates.sort(key=lambda z: z.confluence_score, reverse=True)
+        top = candidates[: max(1, len(candidates) // 2 + 1)]
+        chosen = random.choice(top)
+        note = (f"targets a {len(chosen.timeframes)}-timeframe confluence zone "
+                f"({', '.join(chosen.timeframes)}) around {chosen.mid:.2f}")
+        return chosen.mid, chosen, note
+
+    fib = random.choice([0.5, 0.618, 0.786, 1.0])
+    projected = current_price + direction * (min_reach + fib * (max_reach - min_reach))
+    return projected, None, f"no cross-timeframe confluence nearby — projected via {fib} extension of ATR range"
+
+
+def generate_pathway(template_name: str, template: List[Tuple[LegType, int]],
+                      gap: GapBucket, ledger: List[LiquidityZone],
+                      layers: Dict[str, LayerContext], bias: SessionBias,
+                      gap_open_price: float, prior_close: float) -> Pathway:
+    coarsest_tf = list(layers.keys())[-1]
+    higher_bias = layers[coarsest_tf].bias
+    atr = compute_atr_daily(layers)
+
+    legs: List[Leg] = []
+    price = gap_open_price
+    gap_direction = 1 if gap.points >= 0 else -1
+    score = gap.probability * 3.0  # base score seeded from the gap's own probability
+
+    for kind, rel_dir in template:
+        direction = gap_direction * rel_dir if rel_dir != 0 else 0
+        if kind == LegType.CONSOLIDATION:
+            min_reach, max_reach = 0.0, atr * 0.2
+        elif kind == LegType.RETRACEMENT:
+            min_reach, max_reach = atr * 0.15, atr * 0.5
+        elif kind == LegType.LIQUIDITY_SWEEP:
+            min_reach, max_reach = atr * 0.1, atr * 0.4
+        elif kind == LegType.DISTRIBUTION:
+            min_reach, max_reach = atr * 0.05, atr * 0.3
+        else:  # EXPANSION, REVERSAL
+            min_reach, max_reach = atr * 0.3, atr * 1.1
+
+        end_price, zone, note = _pick_leg_target(price, direction if direction != 0 else 1,
+                                                   atr, ledger, min_reach, max_reach)
+        if direction == 0:
+            end_price, zone, note = _pick_leg_target(price, 0, atr, ledger, min_reach, max_reach)
+
+        alignment = compute_layer_alignment(end_price, layers)
+        unreachable_layers = [tf for tf, a in alignment.items() if not a["reachable"]]
+        if unreachable_layers:
+            score -= 0.5 * len(unreachable_layers)
+            note += f" [WARNING: outside plausible range on {', '.join(unreachable_layers)}]"
+
+        score += _bias_alignment_bonus(direction, higher_bias)
+        if zone is not None:
+            score += 0.15 * math.log1p(zone.confluence_score)
+
+        legs.append(Leg(kind, direction, price, end_price, zone, alignment,
+                         f"{kind.value}: {note}"))
+        price = end_price
+
+    # net-displacement sanity: whole day shouldn't wildly exceed a plausible
+    # multiple of ATR, or plausibility drops sharply.
+    total_move = abs(price - gap_open_price)
+    if total_move > atr * 3.0:
+        score -= (total_move / atr - 3.0) * 0.5
+
+    time_points = len(template) + 1
+    points = [(i / (time_points - 1), None) for i in range(time_points)]
+    prices = [gap_open_price] + [leg.end_price for leg in legs]
+    points = [(t, p) for (t, _), p in zip(points, prices)]
+
+    narrative_parts = [
+        f"Gap {'up' if gap.points >= 0 else 'down'} {abs(gap.points):.0f} pts to open near "
+        f"{gap_open_price:.2f} (prior close {prior_close:.2f})."
+    ]
+    for leg in legs:
+        dir_word = {1: "up", -1: "down", 0: "sideways"}[leg.direction]
+        narrative_parts.append(
+            f"{leg.kind.value.replace('_', ' ').title()} {dir_word} toward "
+            f"{leg.end_price:.2f} — {leg.note}"
+        )
+    narrative = " ".join(narrative_parts)
+
+    return Pathway(template_name, gap, legs, points, score, narrative)
+
+
+def generate_candidates(gap: GapBucket, ledger: List[LiquidityZone],
+                         layers: Dict[str, LayerContext], bias: SessionBias,
+                         prior_close: float, n_per_template: int = 2,
+                         top_k: int = 3, seed: Optional[int] = None) -> List[Pathway]:
+    if seed is not None:
+        random.seed(seed)
+
+    gap_open_price = prior_close + gap.points
+    all_candidates: List[Pathway] = []
+
+    # Weight template selection toward narratives that match the direction
+    # implied by the session bias (an accumulation bias makes trend/expansion
+    # templates in the gap direction more plausible than fade templates).
+    for name, template in _TEMPLATES:
+        for _ in range(n_per_template):
+            pw = generate_pathway(name, template, gap, ledger, layers, bias,
+                                   gap_open_price, prior_close)
+            if validate_pathway_coherence(pw, layers):
+                all_candidates.append(pw)
+
+    all_candidates.sort(key=lambda p: p.plausibility_score, reverse=True)
+    return all_candidates[:top_k]
+
+
+def validate_pathway_coherence(pathway: Pathway, layers: Dict[str, LayerContext]) -> bool:
+    """Final safety-net check (the construction in generate_pathway already
+    biases heavily toward coherent paths, but this is a hard gate): every
+    leg's target must be reachable on at least a majority of layers, and
+    price direction must actually move the stated way."""
+    for leg in pathway.legs:
+        reachable_count = sum(1 for a in leg.layer_alignment.values() if a["reachable"])
+        if reachable_count < max(1, len(leg.layer_alignment) // 2):
+            return False
+        if leg.direction > 0 and leg.end_price < leg.start_price - 1e-6:
+            return False
+        if leg.direction < 0 and leg.end_price > leg.start_price + 1e-6:
+            return False
+    return True
+
+
+# =========================================================================
+# 13. SMOOTH CURVE MATH — pure-python Catmull-Rom -> sampled points
+# =========================================================================
+
+def _catmull_rom_point(p0, p1, p2, p3, t: float) -> Tuple[float, float]:
+    t2 = t * t
+    t3 = t2 * t
+    x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t
+               + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+               + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+    y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t
+               + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+               + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+    return x, y
+
+
+def sample_smooth_curve(points: List[Tuple[float, float]], samples_per_seg: int = 24
+                         ) -> List[Tuple[float, float]]:
+    """Catmull-Rom spline through the anchor points, sampled densely — a
+    dependency-free stand-in for scipy's PCHIP/cubic interpolation. Pads
+    the ends by reflecting the first/last segment so the curve doesn't
+    need special-cased boundary handling."""
+    if len(points) < 2:
+        return points
+    if len(points) == 2:
+        (x0, y0), (x1, y1) = points
+        return [(x0 + (x1 - x0) * i / samples_per_seg, y0 + (y1 - y0) * i / samples_per_seg)
+                for i in range(samples_per_seg + 1)]
+
+    padded = [points[0]] + points + [points[-1]]
+    out = []
+    for i in range(1, len(padded) - 2):
+        p0, p1, p2, p3 = padded[i - 1], padded[i], padded[i + 1], padded[i + 2]
+        for s in range(samples_per_seg):
+            t = s / samples_per_seg
+            out.append(_catmull_rom_point(p0, p1, p2, p3, t))
+    out.append(points[-1])
+    return out
+
+
+# =========================================================================
+# 14. RENDERING — self-contained SVG (no dependencies); optional matplotlib
+# =========================================================================
+
+_PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2"]
+
+
+def render_pathways_svg(gap_scenarios: Dict[float, List[Pathway]],
+                         ledger: List[LiquidityZone], prior_close: float,
+                         out_path: str, width: int = 1200, height: int = 760) -> None:
+    """Renders every gap scenario's top pathways as smooth lines on one
+    SVG chart, with liquidity-zone bands drawn behind them. Self-contained
+    (no JS, no external fonts/CDNs) — open directly in a browser."""
+    all_prices = [prior_close]
+    for pathways in gap_scenarios.values():
+        for pw in pathways:
+            all_prices.extend(p for _, p in pw.points)
+    for z in ledger[:12]:
+        all_prices.extend([z.price_low, z.price_high])
+
+    y_min, y_max = min(all_prices), max(all_prices)
+    pad = (y_max - y_min) * 0.08 or 1.0
+    y_min, y_max = y_min - pad, y_max + pad
+
+    margin_l, margin_r, margin_t, margin_b = 90, 220, 50, 50
+    plot_w = width - margin_l - margin_r
+    plot_h = height - margin_t - margin_b
+
+    def px(t: float) -> float:
+        return margin_l + t * plot_w
+
+    def py(price: float) -> float:
+        return margin_t + (1 - (price - y_min) / (y_max - y_min)) * plot_h
+
+    svg = []
+    svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+               f'font-family="Helvetica,Arial,sans-serif">')
+    svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#0b1220"/>')
+    svg.append(f'<text x="{margin_l}" y="28" fill="#e5e7eb" font-size="18" font-weight="600">'
+               f'Market Pathway Projections — gap scenarios from prior close {prior_close:.2f}</text>')
+
+    # gridlines + y-axis labels
+    for i in range(6):
+        gy = margin_t + plot_h * i / 5
+        price = y_max - (y_max - y_min) * i / 5
+        svg.append(f'<line x1="{margin_l}" y1="{gy:.1f}" x2="{width - margin_r}" y2="{gy:.1f}" '
+                   f'stroke="#1f2937" stroke-width="1"/>')
+        svg.append(f'<text x="{margin_l - 10}" y="{gy + 4:.1f}" fill="#9ca3af" font-size="11" '
+                   f'text-anchor="end">{price:.1f}</text>')
+
+    # liquidity zone bands (top confluence zones only, to avoid clutter)
+    for z in ledger[:10]:
+        y0, y1 = py(z.price_high), py(z.price_low)
+        opacity = min(0.35, 0.08 + 0.03 * len(z.timeframes))
+        svg.append(f'<rect x="{margin_l}" y="{y0:.1f}" width="{plot_w}" height="{max(1, y1 - y0):.1f}" '
+                   f'fill="#fbbf24" opacity="{opacity:.2f}"/>')
+        svg.append(f'<text x="{width - margin_r + 6}" y="{(y0 + y1) / 2 + 3:.1f}" fill="#fbbf24" '
+                   f'font-size="9">{z.mid:.0f} ({"+".join(z.timeframes)})</text>')
+
+    # prior-close reference line
+    py0 = py(prior_close)
+    svg.append(f'<line x1="{margin_l}" y1="{py0:.1f}" x2="{width - margin_r}" y2="{py0:.1f}" '
+               f'stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,4"/>')
+    svg.append(f'<text x="{margin_l + 4}" y="{py0 - 4:.1f}" fill="#e5e7eb" font-size="10">prior close</text>')
+
+    legend_y = margin_t
+    color_i = 0
+    for gap_points, pathways in sorted(gap_scenarios.items(), key=lambda kv: kv[0]):
+        for pw in pathways:
+            color = _PALETTE[color_i % len(_PALETTE)]
+            color_i += 1
+            curve = sample_smooth_curve(pw.points, samples_per_seg=24)
+            path_d = " ".join(
+                f'{"M" if i == 0 else "L"} {px(t):.1f} {py(p):.1f}'
+                for i, (t, p) in enumerate(curve)
+            )
+            svg.append(f'<path d="{path_d}" fill="none" stroke="{color}" stroke-width="2.2" '
+                       f'stroke-linecap="round" opacity="0.92"/>')
+            for t, p in pw.points:
+                svg.append(f'<circle cx="{px(t):.1f}" cy="{py(p):.1f}" r="3" fill="{color}"/>')
+
+            label = f'{"+" if gap_points >= 0 else ""}{gap_points:.0f} {pw.template_name} ' \
+                    f'(p={pw.gap.probability:.2f}, score={pw.plausibility_score:.2f})'
+            svg.append(f'<rect x="{width - margin_r + 4}" y="{legend_y - 10}" width="10" height="10" '
+                       f'fill="{color}"/>')
+            svg.append(f'<text x="{width - margin_r + 18}" y="{legend_y - 1}" fill="#e5e7eb" '
+                       f'font-size="10">{label}</text>')
+            legend_y += 16
+
+    svg.append(f'<text x="{margin_l}" y="{height - 12}" fill="#6b7280" font-size="10">'
+               f'Illustrative structural pathways, not a candle-by-candle forecast. '
+               f'Generated by market_pathway_engine.py</text>')
+    svg.append("</svg>")
+
+    with open(out_path, "w") as f:
+        f.write("\n".join(svg))
+
+
+def try_render_matplotlib(gap_scenarios: Dict[float, List[Pathway]],
+                           ledger: List[LiquidityZone], prior_close: float,
+                           out_path: str) -> bool:
+    """Optional higher-fidelity PNG render if matplotlib happens to be
+    installed. Returns False (and does nothing else) if it isn't — SVG
+    rendering above is the guaranteed path and needs no third-party libs."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    fig, ax = plt.subplots(figsize=(13, 8))
+    for z in ledger[:10]:
+        ax.axhspan(z.price_low, z.price_high, color="#f59e0b",
+                   alpha=min(0.3, 0.08 + 0.03 * len(z.timeframes)))
+    ax.axhline(prior_close, color="white", linestyle="--", linewidth=1, alpha=0.6)
+
+    color_i = 0
+    for gap_points, pathways in sorted(gap_scenarios.items(), key=lambda kv: kv[0]):
+        for pw in pathways:
+            curve = sample_smooth_curve(pw.points, samples_per_seg=24)
+            xs = [t for t, _ in curve]
+            ys = [p for _, p in curve]
+            ax.plot(xs, ys, linewidth=2.2, color=_PALETTE[color_i % len(_PALETTE)],
+                    label=f'{"+" if gap_points >= 0 else ""}{gap_points:.0f} {pw.template_name} '
+                          f'(p={pw.gap.probability:.2f})')
+            color_i += 1
+    ax.set_title("Market Pathway Projections")
+    ax.set_xlabel("session progress")
+    ax.set_ylabel("price")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, facecolor="#0b1220")
+    plt.close(fig)
+    return True
+
+
+# =========================================================================
+# 15. CONTEXT MAP / REPORT
+# =========================================================================
+
+def build_context_map(layers: Dict[str, LayerContext], ledger: List[LiquidityZone],
+                       bias: SessionBias, gap_buckets: List[GapBucket],
+                       scenarios: Dict[float, List[Pathway]], prior_close: float) -> dict:
+    return {
+        "generated_at": datetime.now(IST).isoformat(),
+        "prior_close": prior_close,
+        "layers": {
+            tf: {
+                "bias": ctx.bias.value,
+                "range": {"high": ctx.range_ctx.high, "low": ctx.range_ctx.low,
+                          "position_pct": ctx.range_ctx.position_pct, "state": ctx.range_ctx.state},
+                "volatility_state": ctx.vol_state.value,
+                "n_structure_events": len(ctx.structure_events),
+                "last_structure_event": (
+                    {"kind": ctx.structure_events[-1].kind, "direction": ctx.structure_events[-1].direction.value,
+                     "price": ctx.structure_events[-1].price, "t": ctx.structure_events[-1].t.isoformat()}
+                    if ctx.structure_events else None
+                ),
+                "n_liquidity_levels": len(ctx.levels),
+                "n_sweeps": len(ctx.sweeps),
+                "parent_relation": ctx.parent_relation,
+            }
+            for tf, ctx in layers.items()
+        },
+        "liquidity_engineering_bias": {
+            "score": bias.score, "label": bias.label, "explanation": bias.explanation,
+        },
+        "level_ledger_top": [
+            {"price_range": [z.price_low, z.price_high], "mid": z.mid,
+             "confluence_score": z.confluence_score, "timeframes": z.timeframes}
+            for z in ledger[:20]
+        ],
+        "gap_buckets": [
+            {"points": g.points, "probability": g.probability, "rationale": g.rationale}
+            for g in gap_buckets
+        ],
+        "pathways": {
+            f"{pts:+.0f}": [pw.to_dict() for pw in pathways]
+            for pts, pathways in scenarios.items()
+        },
+    }
+
+
+# =========================================================================
+# 16. ORCHESTRATION
+# =========================================================================
+
+def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
+        csv_path: Optional[str] = None, exchange: str = "NSE",
+        instrument_token: Optional[int] = None, seed: int = 7,
+        custom_gap_points: Optional[List[float]] = None,
+        sentiment_provider: Callable[[], float] = default_sentiment_provider,
+        sentiment_override: Optional[float] = None,
+        top_k: int = 3, out_dir: str = "market_pathway_output") -> dict:
+
+    if mode == "live":
+        provider: DataProvider = ZerodhaProvider(symbol, exchange, instrument_token)
+    elif mode == "csv":
+        if not csv_path:
+            raise ValueError("--csv PATH is required for --mode csv")
+        provider = CSVProvider(csv_path)
+    else:
+        provider = SyntheticProvider(seed=seed)
+
+    print(f"[1/7] Fetching base 1-minute data (mode={mode}, lookback={lookback_days}d)...")
+    base = provider.fetch_base(as_of, lookback_days)
+    if not base:
+        raise RuntimeError("No candles returned — check symbol/lookback/credentials.")
+    print(f"      -> {len(base)} base candles from {base[0].t} to {base[-1].t}")
+
+    print("[2/7] Building multi-timeframe layer contexts (1min..1D)...")
+    layers = build_all_layers(base, as_of)
+    for tf, ctx in layers.items():
+        print(f"      {tf:>5}: {len(ctx.candles):>5} candles | bias={ctx.bias.value:<8} | "
+              f"range_state={ctx.range_ctx.state:<11} | vol={ctx.vol_state.value:<13} | "
+              f"levels={len(ctx.levels):>3} | sweeps={len(ctx.sweeps)}")
+
+    print("[3/7] Merging liquidity levels into the cross-timeframe ledger...")
+    ledger = build_level_ledger(layers, tolerance_pct=0.05)
+    print(f"      -> {len(ledger)} canonical liquidity zones "
+          f"(top confluence: {ledger[0].confluence_score:.2f} across {ledger[0].timeframes})"
+          if ledger else "      -> no liquidity zones found")
+
+    print("[4/7] Scoring liquidity-engineering / session bias...")
+    bias = compute_liquidity_engineering_bias(layers)
+    print(f"      -> {bias.label} (score {bias.score:+.2f})")
+
+    sentiment = sentiment_override if sentiment_override is not None else sentiment_provider()
+    print(f"[5/7] Sentiment input: {sentiment:+.2f} "
+          f"({'override' if sentiment_override is not None else 'provider'})")
+
+    print("[6/7] Building gap buckets and generating pathway scenarios...")
+    atr = compute_atr_daily(layers)
+    gap_points = build_gap_buckets(atr, custom_gap_points)
+    gap_buckets = score_gap_probabilities(gap_points, bias, sentiment, atr)
+    prior_close = layers[list(layers.keys())[-1]].candles[-1].c if "1D" not in layers \
+        else layers["1D"].candles[-1].c
+
+    scenarios: Dict[float, List[Pathway]] = {}
+    for i, gap in enumerate(gap_buckets):
+        candidates = generate_candidates(gap, ledger, layers, bias, prior_close,
+                                          n_per_template=2, top_k=top_k, seed=seed + i)
+        scenarios[gap.points] = candidates
+        print(f"      gap {gap.points:+.0f} (p={gap.probability:.2f}): "
+              f"{len(candidates)} pathway(s) kept")
+
+    print("[7/7] Rendering + writing report...")
+    os.makedirs(out_dir, exist_ok=True)
+    svg_path = os.path.join(out_dir, "pathways.svg")
+    render_pathways_svg(scenarios, ledger, prior_close, svg_path)
+    png_path = os.path.join(out_dir, "pathways.png")
+    rendered_png = try_render_matplotlib(scenarios, ledger, prior_close, png_path)
+
+    context_map = build_context_map(layers, ledger, bias, gap_buckets, scenarios, prior_close)
+    json_path = os.path.join(out_dir, "context_map.json")
+    with open(json_path, "w") as f:
+        json.dump(context_map, f, indent=2, default=str)
+
+    print(f"\nDone. Wrote:\n  {svg_path}" + (f"\n  {png_path}" if rendered_png else "") +
+          f"\n  {json_path}")
+    return context_map
+
+
+# =========================================================================
+# 17. CLI
+# =========================================================================
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Standalone multi-timeframe liquidity-structure & pathway-projection engine.")
+    ap.add_argument("--demo", action="store_true",
+                     help="Shortcut for --mode synthetic with sensible defaults; runs with zero setup.")
+    ap.add_argument("--mode", choices=["synthetic", "csv", "live"], default="synthetic")
+    ap.add_argument("--symbol", default="NIFTY 50", help="Tradingsymbol, used in --mode live")
+    ap.add_argument("--exchange", default="NSE")
+    ap.add_argument("--instrument-token", type=int, default=None)
+    ap.add_argument("--csv", dest="csv_path", default=None, help="CSV path for --mode csv")
+    ap.add_argument("--as-of", dest="as_of", default=None,
+                     help="ISO datetime treated as 'P day' end (default: now, IST)")
+    ap.add_argument("--lookback-days", type=int, default=45)
+    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--gap-points", type=float, nargs="*", default=None,
+                     help="Explicit positive gap magnitudes, e.g. --gap-points 50 100 200 250 300 "
+                          "(negatives are added automatically)")
+    ap.add_argument("--sentiment", type=float, default=None,
+                     help="Manual sentiment override in [-1,1]; default uses the neutral stub provider")
+    ap.add_argument("--top-k", type=int, default=3, help="Pathways kept per gap bucket")
+    ap.add_argument("--out-dir", default="market_pathway_output")
+    args = ap.parse_args()
+
+    mode = "synthetic" if args.demo else args.mode
+    as_of = datetime.now(IST) if not args.as_of else datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=IST)
+
+    run(
+        symbol=args.symbol, mode=mode, as_of=as_of, lookback_days=args.lookback_days,
+        csv_path=args.csv_path, exchange=args.exchange, instrument_token=args.instrument_token,
+        seed=args.seed, custom_gap_points=args.gap_points, sentiment_override=args.sentiment,
+        top_k=args.top_k, out_dir=args.out_dir,
+    )
+
+
+if __name__ == "__main__":
+    main()
