@@ -1692,7 +1692,119 @@ def run(symbol: str, mode: str, as_of: datetime, lookback_days: int,
 
 
 # =========================================================================
-# 17. CLI
+# 17. KITE AUTH HELPERS — `--login` (morning OAuth flow) and `--check-auth`
+# =========================================================================
+
+def kite_login_flow(api_key: Optional[str] = None, api_secret: Optional[str] = None) -> int:
+    """Interactive daily login. Kite Connect auth has three pieces with
+    different lifetimes, and confusing them is the #1 source of 'am I even
+    connected?' doubt:
+
+      api_key / api_secret  -> permanent, from your app on developers.kite.trade
+      request_token         -> single-use, ~few minutes, produced by the
+                               browser login redirect
+      access_token          -> what the engine actually uses; valid until
+                               ~7:30 AM IST the NEXT day, then dead
+
+    This flow: print the login URL -> you log in to Zerodha in a browser ->
+    Kite redirects to your app's registered redirect URL with
+    ?request_token=XXX -> paste that token here -> we exchange
+    (request_token + api_secret) for today's access_token and print the
+    export line. The api_secret never needs to exist in your shell after
+    this exchange; the engine itself only ever reads KITE_API_KEY and
+    KITE_ACCESS_TOKEN."""
+    api_key = api_key or os.environ.get("KITE_API_KEY", "")
+    api_secret = api_secret or os.environ.get("KITE_API_SECRET", "")
+    if not api_key:
+        print("error: set KITE_API_KEY (from your app on developers.kite.trade)")
+        return 1
+    if not api_secret:
+        print("error: set KITE_API_SECRET (from the same app page)")
+        return 1
+    try:
+        from kiteconnect import KiteConnect
+    except ImportError:
+        print("error: kiteconnect not installed. Run: pip install kiteconnect")
+        return 1
+
+    kite = KiteConnect(api_key=api_key)
+    print("\nStep 1 — open this URL in a browser and log in to Zerodha:\n")
+    print(f"    {kite.login_url()}\n")
+    print("Step 2 — after you authorise, Kite redirects to your app's registered")
+    print("redirect URL with ?request_token=... in the address bar. Copy it fast —")
+    print("request_tokens are single-use and expire in minutes.\n")
+    try:
+        request_token = input("request_token: ").strip()
+    except EOFError:
+        print("\nno request_token provided")
+        return 1
+    if not request_token:
+        print("no request_token entered")
+        return 1
+    try:
+        data = kite.generate_session(request_token, api_secret=api_secret)
+    except Exception as e:
+        print(f"\nLOGIN FAILED: {e}")
+        print("Common causes: request_token already used or expired (redo the browser")
+        print("step and paste immediately), or api_secret doesn't match this api_key.")
+        return 1
+    token = data.get("access_token", "")
+    print("\nSUCCESS — logged in as "
+          f"{data.get('user_name', '?')} ({data.get('user_id', '?')}).")
+    print("Export today's token, then you're set until ~7:30 AM IST tomorrow:\n")
+    print(f"    export KITE_ACCESS_TOKEN={token}\n")
+    print("Verify any time with:  python3 market_pathway_engine.py --check-auth")
+    return 0
+
+
+def kite_check_auth() -> int:
+    """The definitive 'am I connected correctly?' answer. Exit code 0 =
+    yes, your key + token are valid RIGHT NOW and the engine's --mode live
+    will work. Non-zero = no, with the specific reason printed. Checks, in
+    order: env vars present -> kiteconnect importable -> profile() call
+    succeeds (validates the token against Zerodha's servers) -> a real
+    market-data call succeeds (validates data permissions, not just auth).
+    """
+    api_key = os.environ.get("KITE_API_KEY")
+    token = os.environ.get("KITE_ACCESS_TOKEN")
+    print("Kite Connect auth check")
+    print(f"  KITE_API_KEY:      {'set (' + api_key[:4] + '...)' if api_key else 'MISSING'}")
+    print(f"  KITE_ACCESS_TOKEN: {'set (' + token[:4] + '...)' if token else 'MISSING'}")
+    if not api_key or not token:
+        print("\nNOT CONNECTED — export both env vars first. Get today's access_token")
+        print("via:  python3 market_pathway_engine.py --login")
+        return 1
+    try:
+        from kiteconnect import KiteConnect
+    except ImportError:
+        print("\nNOT CONNECTED — kiteconnect not installed: pip install kiteconnect")
+        return 1
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(token)
+    try:
+        profile = kite.profile()
+    except Exception as e:
+        print(f"\nNOT CONNECTED — profile() rejected: {e}")
+        print("If this says TokenException/403: your access_token has expired (they die")
+        print("daily ~7:30 AM IST). Re-run --login to mint today's token.")
+        return 1
+    print(f"\n  profile OK: {profile.get('user_name', '?')} ({profile.get('user_id', '?')}), "
+          f"broker={profile.get('broker', '?')}")
+    try:
+        ltp = kite.ltp(["NSE:NIFTY 50"])
+        for sym, row in ltp.items():
+            print(f"  market data OK: {sym} last price {row.get('last_price')}")
+    except Exception as e:
+        print(f"  market data check failed: {e}")
+        print("  (auth is valid but the data call was refused — check your app's")
+        print("   subscription/permissions on developers.kite.trade)")
+        return 2
+    print("\nCONNECTED — --mode live will work with these credentials.")
+    return 0
+
+
+# =========================================================================
+# 18. CLI
 # =========================================================================
 
 def main():
@@ -1716,7 +1828,18 @@ def main():
                      help="Manual sentiment override in [-1,1]; default uses the neutral stub provider")
     ap.add_argument("--top-k", type=int, default=3, help="Pathways kept per gap bucket")
     ap.add_argument("--out-dir", default="market_pathway_output")
+    ap.add_argument("--login", action="store_true",
+                     help="Run the daily Kite Connect OAuth flow: prints the login URL, "
+                          "exchanges your request_token for today's access_token, and exits.")
+    ap.add_argument("--check-auth", action="store_true",
+                     help="Verify KITE_API_KEY/KITE_ACCESS_TOKEN against Zerodha's servers "
+                          "(profile + a live data call) and exit. Exit code 0 = connected.")
     args = ap.parse_args()
+
+    if args.login:
+        sys.exit(kite_login_flow())
+    if args.check_auth:
+        sys.exit(kite_check_auth())
 
     mode = "synthetic" if args.demo else args.mode
     as_of = datetime.now(IST) if not args.as_of else datetime.fromisoformat(args.as_of)
